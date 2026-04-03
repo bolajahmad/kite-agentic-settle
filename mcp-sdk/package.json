@@ -1,0 +1,40 @@
+{
+  "name": "@kite-agent-pay/mcp-sdk",
+  "version": "0.1.0",
+  "description": "Agent MCP SDK for Kite agentic payments",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "kite": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "agents.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "kite": "tsx src/cli.ts",
+    "app": "tsx examples/app.ts",
+    "call": "tsx examples/app.ts call",
+    "balance": "tsx examples/app.ts balance",
+    "fund": "tsx examples/app.ts fund",
+    "simulate": "tsx examples/simulate.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.49",
+    "@tetherto/wdk": "^1.0.0-beta.6",
+    "@tetherto/wdk-wallet-evm": "^1.0.0-beta.10",
+    "ai": "^6.0.143",
+    "viem": "^2.47.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
