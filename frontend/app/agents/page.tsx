@@ -29,9 +29,9 @@ export default function AgentsPage() {
           <h1 className="text-4xl font-display font-bold tracking-tight text-kite-primary">Agents</h1>
           <p className="text-slate-500 mt-1">Manage your autonomous AI workforce</p>
         </div>
-        <button className="kite-button-primary shadow-xl shadow-kite-primary/20">
+        <Link href="/agents/create" className="kite-button-primary shadow-xl shadow-kite-primary/20">
           <Plus size={20} /> Register New Agent
-        </button>
+        </Link>
       </div>
 
       {/* Featured Agents */}
@@ -88,7 +88,7 @@ export default function AgentsPage() {
         ))}
 
         {/* Add New Agent Card */}
-        <button className="flex flex-col items-center justify-center gap-4 p-8 bg-kite-bg/30 border border-dashed border-kite-border rounded-3xl hover:bg-white hover:border-kite-primary/50 transition-all group min-h-70">
+        <Link href="/agents/create" className="flex flex-col items-center justify-center gap-4 p-8 bg-kite-bg/30 border border-dashed border-kite-border rounded-3xl hover:bg-white hover:border-kite-primary/50 transition-all group min-h-70">
           <div className="w-16 h-16 bg-white border border-kite-border rounded-full flex items-center justify-center text-slate-400 group-hover:text-kite-primary group-hover:border-kite-primary/30 transition-all shadow-sm">
             <Plus size={32} />
           </div>
@@ -96,7 +96,7 @@ export default function AgentsPage() {
             <p className="text-lg font-display font-bold text-slate-500 group-hover:text-kite-primary transition-colors">Register New Agent</p>
             <p className="text-sm text-slate-400 mt-1 max-w-50">Add another autonomous agent to your wallet.</p>
           </div>
-        </button>
+        </Link>
       </div>
 
       {/* Agent Table */}

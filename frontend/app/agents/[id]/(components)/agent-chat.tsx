@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
-import { cn } from '@/utils/utils';
+import { cn } from '@/lib/utils';
 
 interface Message {
   id: string;

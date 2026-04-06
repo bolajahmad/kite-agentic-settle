@@ -4,7 +4,7 @@ import { Geist, Geist_Mono } from "next/font/google"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
-import { cn } from "@/utils/utils";
+import { cn } from "@/lib/utils";
 import { Web3Provider } from "@/utils/context/web3";
 import { DashboardLayout } from "@/components/layout/dashboard/dashboard-layout";
 

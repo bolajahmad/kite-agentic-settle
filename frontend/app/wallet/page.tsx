@@ -1,7 +1,7 @@
 "use client";
 
 import { useKiteData } from '@/utils/hooks/use-kite-data';
-import { cn } from '@/utils/utils';
+import { cn } from '@/lib/utils';
 import { Wallet as WalletIcon, Plus, ArrowUpRight, ArrowDownLeft, History, Shield, Key, Copy, ExternalLink } from 'lucide-react';
 
 export default function WalletPage() {

@@ -16,7 +16,7 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { useState } from 'react';
-import { cn } from '@/utils/utils';
+import { cn } from '@/lib/utils';
 import { AgentChat } from './(components)/agent-chat';
 import Link from 'next/link';
 

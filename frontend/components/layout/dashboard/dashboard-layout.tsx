@@ -21,7 +21,7 @@ import { Menu as HeadlessMenu, MenuButton, MenuItem, MenuItems } from '@headless
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
-import { cn, truncateAddress } from "@/utils/utils"
+import { cn, truncateAddress } from "@/lib/utils"
 import { OnboardingWizard } from "./onboarding-wizard"
 import { useKiteData } from "@/utils/hooks/use-kite-data"
 import { Button } from "@/components/ui/button"
@@ -80,7 +80,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
 
           <nav className="flex-1 space-y-2 px-6">
             {navItems.map((item) => {
-              const isActive = location === item.href
+              const isActive = item.href === "/" ? location === item.href : location.includes(item.href)
               return (
                 <Link
                   key={item.name}

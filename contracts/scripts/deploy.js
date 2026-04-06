@@ -12,9 +12,9 @@ async function main() {
   const registryAddr = await registry.getAddress();
   console.log("AgentRegistry deployed to:", registryAddr);
 
-  // 2. Deploy KiteAAWallet (owner = deployer for PoC)
+  // 2. Deploy KiteAAWallet (multi-tenant, no owner arg)
   const KiteAAWallet = await hre.ethers.getContractFactory("KiteAAWallet");
-  const wallet = await KiteAAWallet.deploy(deployer.address);
+  const wallet = await KiteAAWallet.deploy();
   await wallet.waitForDeployment();
   const walletAddr = await wallet.getAddress();
   console.log("KiteAAWallet deployed to:", walletAddr);

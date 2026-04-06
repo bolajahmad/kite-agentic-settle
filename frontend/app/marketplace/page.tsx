@@ -1,6 +1,6 @@
 "use client";
 
-import { cn } from '@/utils/utils';
+import { cn } from '@/lib/utils';
 import { Search, Filter, Star, ArrowRight } from 'lucide-react';
 import Image from 'next/image';
 import { useState } from 'react';

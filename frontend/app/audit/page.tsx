@@ -1,7 +1,7 @@
 "use client";
 
-import { History, Shield, CheckCircle2, ExternalLink, Search, Filter, ArrowRight, Clock, Zap, AlertCircle } from 'lucide-react';
-import { cn } from '@/src/utils/utils';
+import { cn } from '@/lib/utils';
+import { History, Shield, CheckCircle2, ExternalLink, Search, Filter, ArrowRight, Zap, AlertCircle } from 'lucide-react';
 import { useState } from 'react';
 
 const auditLogs = [
