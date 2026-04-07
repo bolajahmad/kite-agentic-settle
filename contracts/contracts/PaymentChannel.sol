@@ -34,6 +34,7 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 expiresAt;
         uint256 ratePerCall;       // agreed cost per API call
         uint256 settledAmount;     // final settlement amount
+        bytes32 usageMerkleRoot;   // optional: root anchoring off-chain usage receipts
         ChannelStatus status;
     }
 
@@ -73,7 +74,7 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 ratePerCall
     );
     event ChannelActivated(bytes32 indexed channelId);
-    event ChannelSettled(bytes32 indexed channelId, uint256 amount, uint256 refund);
+    event ChannelSettled(bytes32 indexed channelId, uint256 amount, uint256 refund, bytes32 usageMerkleRoot);
     event ChannelClosed(bytes32 indexed channelId);
     event ChannelDisputed(bytes32 indexed channelId, address indexed disputedBy);
     event DisputeResolved(bytes32 indexed channelId, uint256 finalAmount);
@@ -145,6 +146,7 @@ contract PaymentChannel is ReentrancyGuard {
             expiresAt: block.timestamp + maxDuration,
             ratePerCall: ratePerCall,
             settledAmount: 0,
+            usageMerkleRoot: bytes32(0),
             status: ChannelStatus.Open
         });
 
@@ -182,7 +184,8 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 sequenceNumber,
         uint256 cumulativeCost,
         uint256 timestamp,
-        bytes calldata providerSignature
+        bytes calldata providerSignature,
+        bytes32 merkleRoot
     ) external nonReentrant onlyChannelParty(channelId) {
         Channel storage ch = channels[channelId];
         require(
@@ -206,7 +209,7 @@ contract PaymentChannel is ReentrancyGuard {
         );
 
         ch.status = ChannelStatus.Settling;
-        _settle(channelId, cumulativeCost);
+        _settle(channelId, cumulativeCost, merkleRoot);
     }
 
     /**
@@ -225,7 +228,7 @@ contract PaymentChannel is ReentrancyGuard {
         );
 
         ch.status = ChannelStatus.Settling;
-        _settle(channelId, 0);
+        _settle(channelId, 0, bytes32(0));
     }
 
     /**
@@ -245,7 +248,7 @@ contract PaymentChannel is ReentrancyGuard {
         );
 
         ch.status = ChannelStatus.Settling;
-        _settle(channelId, 0);
+        _settle(channelId, 0, bytes32(0));
     }
 
     /**
@@ -257,7 +260,8 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 sequenceNumber,
         uint256 cumulativeCost,
         uint256 timestamp,
-        bytes calldata providerSignature
+        bytes calldata providerSignature,
+        bytes32 merkleRoot
     ) external nonReentrant {
         Channel storage ch = channels[channelId];
         require(
@@ -279,7 +283,7 @@ contract PaymentChannel is ReentrancyGuard {
         );
 
         ch.status = ChannelStatus.Settling;
-        _settle(channelId, cumulativeCost);
+        _settle(channelId, cumulativeCost, merkleRoot);
     }
 
     // -- Dispute --
@@ -313,7 +317,8 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 sequenceNumber,
         uint256 cumulativeCost,
         uint256 timestamp,
-        bytes calldata providerSignature
+        bytes calldata providerSignature,
+        bytes32 merkleRoot
     ) external nonReentrant onlyChannelParty(channelId)
         channelInStatus(channelId, ChannelStatus.Disputed)
     {
@@ -335,7 +340,7 @@ contract PaymentChannel is ReentrancyGuard {
             "Cumulative cost exceeds expected total"
         );
 
-        _settle(channelId, cumulativeCost);
+        _settle(channelId, cumulativeCost, merkleRoot);
         emit DisputeResolved(channelId, cumulativeCost);
     }
 
@@ -353,13 +358,16 @@ contract PaymentChannel is ReentrancyGuard {
             block.timestamp > disputeDeadline[channelId],
             "Dispute still active"
         );
-        _settle(channelId, 0);
+        _settle(channelId, 0, bytes32(0));
     }
 
     // -- Internal --
 
-    function _settle(bytes32 channelId, uint256 amount) internal {
+    function _settle(bytes32 channelId, uint256 amount, bytes32 merkleRoot) internal {
         Channel storage ch = channels[channelId];
+
+        // Store merkle root if provided
+        ch.usageMerkleRoot = merkleRoot;
 
         if (ch.mode == PaymentMode.Prepaid) {
             uint256 payment = amount > ch.deposit ? ch.deposit : amount;
@@ -376,7 +384,7 @@ contract PaymentChannel is ReentrancyGuard {
             emit FundsUnlocked(ch.consumer, ch.token, ch.deposit);
 
             ch.settledAmount = payment;
-            emit ChannelSettled(channelId, payment, refund);
+            emit ChannelSettled(channelId, payment, refund, merkleRoot);
         } else {
             // Postpaid: consumer must have approved this contract or funds
             // are pulled from consumer's wallet
@@ -384,7 +392,7 @@ contract PaymentChannel is ReentrancyGuard {
                 IERC20(ch.token).safeTransferFrom(ch.consumer, ch.provider, amount);
             }
             ch.settledAmount = amount;
-            emit ChannelSettled(channelId, amount, 0);
+            emit ChannelSettled(channelId, amount, 0, merkleRoot);
         }
 
         ch.status = ChannelStatus.Closed;

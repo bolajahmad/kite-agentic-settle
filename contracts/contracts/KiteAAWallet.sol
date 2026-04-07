@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IAgentRegistry {
-    function registerSession(bytes32 agentId, address sessionKey, uint256 validUntil) external;
+    function registerSession(bytes32 agentId, address sessionKey, uint256 sessionIndex, uint256 validUntil) external;
     function deactivateSession(address sessionKey) external;
 }
 
@@ -34,6 +34,8 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
     struct SessionKeyRule {
         address user;              // EOA that owns this session
         bytes32 agentId;
+        uint256 sessionIndex;      // derivation index for deterministic key regeneration
+        bytes32 metadataHash;      // keccak256 of encrypted session metadata
         uint256 valueLimit;        // max per-transaction (in token units)
         uint256 dailyLimit;        // max aggregate per rolling 24h window
         uint256 validUntil;        // expiry timestamp
@@ -64,9 +66,12 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         address indexed sessionKey,
         address indexed user,
         bytes32 indexed agentId,
+        uint256 sessionIndex,
+        bytes32 metadataHash,
         uint256 valueLimit,
         uint256 dailyLimit,
-        uint256 validUntil
+        uint256 validUntil,
+        bytes   metadata
     );
     event SessionKeyRevoked(address indexed sessionKey, bytes32 indexed agentId);
     event PaymentExecuted(
@@ -119,10 +124,12 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
     function addSessionKeyRule(
         address sessionKeyAddress,
         bytes32 agentId,
+        uint256 sessionIndex,
         uint256 valueLimit,
         uint256 dailyLimit,
         uint256 validUntil,
-        address[] calldata allowedRecipients
+        address[] calldata allowedRecipients,
+        bytes calldata metadata
     ) external onlyRegistered {
         require(sessionKeyAddress != address(0), "Invalid session key");
         require(validUntil > block.timestamp, "Expiry must be in future");
@@ -140,9 +147,13 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         }
         require(ownsAgent, "Agent not owned by caller");
 
+        bytes32 mHash = keccak256(metadata);
+
         sessionKeys[sessionKeyAddress] = SessionKeyRule({
             user: msg.sender,
             agentId: agentId,
+            sessionIndex: sessionIndex,
+            metadataHash: mHash,
             valueLimit: valueLimit,
             dailyLimit: dailyLimit,
             validUntil: validUntil,
@@ -154,10 +165,10 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
 
         // Sync to AgentRegistry
         if (agentRegistry != address(0)) {
-            IAgentRegistry(agentRegistry).registerSession(agentId, sessionKeyAddress, validUntil);
+            IAgentRegistry(agentRegistry).registerSession(agentId, sessionKeyAddress, sessionIndex, validUntil);
         }
 
-        emit SessionKeyAdded(sessionKeyAddress, msg.sender, agentId, valueLimit, dailyLimit, validUntil);
+        emit SessionKeyAdded(sessionKeyAddress, msg.sender, agentId, sessionIndex, mHash, valueLimit, dailyLimit, validUntil, metadata);
     }
 
     function revokeSessionKey(address sessionKeyAddress) external onlyRegistered {

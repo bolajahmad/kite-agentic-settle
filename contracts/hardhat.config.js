@@ -9,6 +9,11 @@ module.exports = {
     version: "0.8.28",
     settings: {
       evmVersion: "cancun",
+      viaIR: true,
+      optimizer: {
+        enabled: true,
+        runs: 200,
+      },
     },
   },
   sourcify: {

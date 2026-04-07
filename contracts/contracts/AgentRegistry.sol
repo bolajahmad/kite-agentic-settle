@@ -26,12 +26,14 @@ contract AgentRegistry is Ownable {
         address agentAddress;      // BIP-32 derived agent address
         address walletContract;    // KiteAAWallet that funds this agent
         address ownerAddress;      // user EOA that controls this agent
+        uint256 agentIndex;        // derivation index for deterministic key regeneration
         bool    active;
     }
 
     struct SessionInfo {
         bytes32 agentId;
         address sessionKey;
+        uint256 sessionIndex;      // derivation index for deterministic key regeneration
         uint256 validUntil;
         bool    active;
     }
@@ -52,10 +54,11 @@ contract AgentRegistry is Ownable {
         address indexed agentAddress,
         address indexed walletContract,
         address ownerAddress,
+        uint256 agentIndex,
         bytes   metadata
     );
     event AgentDeactivated(bytes32 indexed agentId);
-    event SessionRegistered(bytes32 indexed agentId, address indexed sessionKey, uint256 validUntil);
+    event SessionRegistered(bytes32 indexed agentId, address indexed sessionKey, uint256 sessionIndex, uint256 validUntil);
     event SessionDeactivated(address indexed sessionKey);
 
     constructor() Ownable(msg.sender) {
@@ -76,6 +79,7 @@ contract AgentRegistry is Ownable {
     function registerAgent(
         address agentAddress,
         address walletContract,
+        uint256 agentIndex,
         bytes calldata metadata
     ) external returns (bytes32) {
         require(agentAddress != address(0), "Invalid agent address");
@@ -91,6 +95,7 @@ contract AgentRegistry is Ownable {
             agentAddress: agentAddress,
             walletContract: walletContract,
             ownerAddress: msg.sender,
+            agentIndex: agentIndex,
             active: true
         });
 
@@ -98,7 +103,7 @@ contract AgentRegistry is Ownable {
         ownerAgents[msg.sender].push(agentId);
         nonce++;
 
-        emit AgentRegistered(agentId, agentAddress, walletContract, msg.sender, metadata);
+        emit AgentRegistered(agentId, agentAddress, walletContract, msg.sender, agentIndex, metadata);
 
         return agentId;
     }
@@ -121,6 +126,7 @@ contract AgentRegistry is Ownable {
     function registerSession(
         bytes32 agentId,
         address sessionKey,
+        uint256 sessionIndex,
         uint256 validUntil
     ) external {
         AgentInfo storage agent = agents[agentId];
@@ -130,11 +136,12 @@ contract AgentRegistry is Ownable {
         sessionToAgent[sessionKey] = SessionInfo({
             agentId: agentId,
             sessionKey: sessionKey,
+            sessionIndex: sessionIndex,
             validUntil: validUntil,
             active: true
         });
 
-        emit SessionRegistered(agentId, sessionKey, validUntil);
+        emit SessionRegistered(agentId, sessionKey, sessionIndex, validUntil);
     }
 
     function deactivateSession(address sessionKey) external {
@@ -152,10 +159,11 @@ contract AgentRegistry is Ownable {
         address agentAddress,
         address walletContract,
         address ownerAddr,
+        uint256 agentIndex,
         bool active
     ) {
         AgentInfo storage a = agents[agentId];
-        return (a.metadataHash, a.agentAddress, a.walletContract, a.ownerAddress, a.active);
+        return (a.metadataHash, a.agentAddress, a.walletContract, a.ownerAddress, a.agentIndex, a.active);
     }
 
     function resolveAgentByAddress(address agentAddr) external view returns (
@@ -163,17 +171,20 @@ contract AgentRegistry is Ownable {
         bytes32 metadataHash,
         address walletContract,
         address ownerAddr,
+        uint256 agentIndex,
         bool active
     ) {
         bytes32 id = addressToAgent[agentAddr];
         AgentInfo storage a = agents[id];
-        return (id, a.metadataHash, a.walletContract, a.ownerAddress, a.active);
+        return (id, a.metadataHash, a.walletContract, a.ownerAddress, a.agentIndex, a.active);
     }
 
     function getAgentBySession(address sessionKey) external view returns (
         bytes32 agentId,
         bytes32 metadataHash,
         address agentAddress,
+        uint256 agentIndex,
+        uint256 sessionIndex,
         bool agentActive,
         bool sessionActive,
         uint256 sessionValidUntil
@@ -184,6 +195,8 @@ contract AgentRegistry is Ownable {
             s.agentId,
             a.metadataHash,
             a.agentAddress,
+            a.agentIndex,
+            s.sessionIndex,
             a.active,
             s.active && block.timestamp <= s.validUntil,
             s.validUntil
