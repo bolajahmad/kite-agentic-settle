@@ -7,6 +7,7 @@
 
 import { KitePaymentClient } from "./index.js";
 import type { PaymentRequest, InterceptorOptions } from "./types.js";
+import { stringToHex } from "viem";
 
 // ── Tool Definitions ───────────────────────────────────────────────
 
@@ -59,25 +60,26 @@ export const TOOLS: McpToolDefinition[] = [
   },
   {
     name: "register_agent",
-    description: "Register this agent on the Kite AgentRegistry contract with a name and domain.",
+    description: "Register this agent on the Kite AgentRegistry contract with metadata. The agent address used is the current wallet address.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Agent name (e.g. 'weather-bot')" },
-        domain: { type: "string", description: "Agent domain (e.g. 'weather-bot.kite')" },
+        description: { type: "string", description: "Agent description" },
+        category: { type: "string", description: "Agent category (Research, Trading, Social, Dev, Other)" },
       },
-      required: ["name", "domain"],
+      required: ["name"],
     },
   },
   {
     name: "resolve_agent",
-    description: "Look up an agent by domain name on the Kite AgentRegistry.",
+    description: "Look up an agent by its on-chain address on the Kite AgentRegistry.",
     inputSchema: {
       type: "object",
       properties: {
-        domain: { type: "string", description: "Agent domain to look up (e.g. 'weather-bot.kite')" },
+        address: { type: "string", description: "Agent address to look up (0x...)" },
       },
-      required: ["domain"],
+      required: ["address"],
     },
   },
   {
@@ -89,6 +91,24 @@ export const TOOLS: McpToolDefinition[] = [
         amount: { type: "string", description: "Amount in wei to deposit" },
       },
       required: ["amount"],
+    },
+  },
+  {
+    name: "onboard_agent",
+    description: "Full onboarding flow: register EOA user, create a new agent with session key rules, and optionally fund the wallet. Returns all created addresses, private keys, and transaction hashes. Use this when setting up a new agent from scratch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Agent name" },
+        category: { type: "string", description: "Agent category (Research, Trading, Social, Dev, Other)" },
+        description: { type: "string", description: "Agent description" },
+        valueLimit: { type: "string", description: "Max payment per transaction in KTT (default: 1)" },
+        dailyLimit: { type: "string", description: "Max daily spending in KTT (default: 10)" },
+        validDays: { type: "number", description: "Session validity in days (default: 30)" },
+        fundAmount: { type: "string", description: "KTT to deposit into AAWallet (default: 0)" },
+        gasAmount: { type: "string", description: "KITE to send to agent for gas (default: 0)" },
+      },
+      required: ["name"],
     },
   },
 ];
@@ -168,17 +188,20 @@ export async function handleTool(
 
     case "register_agent": {
       const name = args.name as string;
-      const domain = args.domain as string;
-      const result = await client.registerAgent(name, domain);
+      const description = (args.description as string) || "";
+      const category = (args.category as string) || "";
+      const metadata = JSON.stringify({ name, description, category, version: "0.1.0" });
+      const metadataHex = stringToHex(metadata);
+      const result = await client.registerAgent(metadataHex);
       return {
-        agentId: result.agentIdBytes32,
+        agentId: result.agentId,
         txHash: result.txHash,
       };
     }
 
     case "resolve_agent": {
-      const domain = args.domain as string;
-      const agent = await client.resolveAgentByDomain(domain);
+      const address = args.address as string;
+      const agent = await client.resolveAgentByAddress(address);
       return agent;
     }
 
@@ -186,6 +209,32 @@ export async function handleTool(
       const amount = BigInt(args.amount as string);
       const txHash = await client.depositToWallet(amount);
       return { txHash, amount: amount.toString() };
+    }
+
+    case "onboard_agent": {
+      const result = await client.onboard({
+        agentName: args.name as string,
+        category: args.category as string | undefined,
+        description: args.description as string | undefined,
+        valueLimit: args.valueLimit as string | undefined,
+        dailyLimit: args.dailyLimit as string | undefined,
+        validDays: args.validDays as number | undefined,
+        fundAmount: args.fundAmount as string | undefined,
+        gasAmount: args.gasAmount as string | undefined,
+      });
+      return {
+        eoaAddress: result.eoaAddress,
+        agentAddress: result.agentAddress,
+        agentPrivateKey: result.agentPrivateKey,
+        agentId: result.agentId,
+        sessionKeyAddress: result.sessionKeyAddress,
+        sessionKeyPrivateKey: result.sessionKeyPrivateKey,
+        txHashes: result.txHashes,
+        kiteBalance: result.kiteBalance,
+        kttBalance: result.kttBalance,
+        walletKttBalance: result.walletKttBalance,
+        validUntil: new Date(result.validUntil * 1000).toISOString(),
+      };
     }
 
     default:

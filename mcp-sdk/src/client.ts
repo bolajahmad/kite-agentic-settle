@@ -6,6 +6,8 @@ import type { BatchLimits, BatchEndReason } from "./batch.js";
 import { PaymentInterceptor } from "./interceptor.js";
 import { UsageTracker } from "./usage.js";
 import { KITE_TESTNET } from "./config.js";
+import { onboardAgent } from "./onboard.js";
+import type { OnboardOptions, OnboardResult } from "./onboard.js";
 import type {
   KiteConfig,
   ChannelConfig,
@@ -37,6 +39,7 @@ export class KitePaymentClient {
   private readonly interceptor: PaymentInterceptor;
   private readonly usage: UsageTracker;
   private readonly agentId: string;
+  private readonly privateKey: Uint8Array;
 
   private constructor(
     address: string,
@@ -48,7 +51,8 @@ export class KitePaymentClient {
     batchManager: BatchManager,
     interceptor: PaymentInterceptor,
     usage: UsageTracker,
-    agentId: string
+    agentId: string,
+    privateKey: Uint8Array,
   ) {
     this.address = address;
     this.config = config;
@@ -60,6 +64,7 @@ export class KitePaymentClient {
     this.interceptor = interceptor;
     this.usage = usage;
     this.agentId = agentId;
+    this.privateKey = privateKey;
   }
 
   static async create(options: KiteClientOptions): Promise<KitePaymentClient> {
@@ -111,7 +116,8 @@ export class KitePaymentClient {
       batchManager,
       interceptor,
       usage,
-      agentId
+      agentId,
+      privateKey,
     );
   }
 
@@ -122,37 +128,39 @@ export class KitePaymentClient {
   // -- Agent Registration --
 
   async registerAgent(
-    name: string,
-    domain: string,
-    walletContract?: string
-  ): Promise<{ txHash: string; agentIdBytes32: `0x${string}` }> {
+    metadata: `0x${string}`,
+    agentIndex: number = 0,
+    walletContract?: string,
+  ): Promise<{ txHash: string; agentId: `0x${string}` }> {
     const wallet = walletContract || this.config.contracts.kiteAAWallet;
     return await this.contractService.registerAgent(
-      name,
-      domain,
       this.address,
-      wallet
+      wallet,
+      agentIndex,
+      metadata,
     );
   }
 
-  async getAgent(agentId: string) {
+  async getAgent(agentId: `0x${string}`) {
     return await this.contractService.getAgent(agentId);
   }
 
-  async resolveAgentByDomain(domain: string) {
-    return await this.contractService.resolveAgentByDomain(domain);
+  async resolveAgentByAddress(address: string) {
+    return await this.contractService.resolveAgentByAddress(address);
   }
 
   // -- Session Keys --
 
   async registerSession(
-    agentId: string,
+    agentId: `0x${string}`,
     sessionKey: string,
-    validUntil: number
+    sessionIndex: number,
+    validUntil: number,
   ): Promise<string> {
     return await this.contractService.registerSession(
       agentId,
       sessionKey,
+      sessionIndex,
       validUntil
     );
   }
@@ -302,5 +310,30 @@ export class KitePaymentClient {
 
   getChannelManager(): ChannelManager {
     return this.channelManager;
+  }
+
+  // -- Onboarding --
+
+  /** Get the EOA private key for deterministic derivation. */
+  getPrivateKey(): Uint8Array {
+    return this.privateKey;
+  }
+
+  /**
+   * Full onboarding: register EOA, create agent + session key, optionally fund.
+   * Replaces the multi-step frontend wizard.
+   */
+  async onboard(
+    options: OnboardOptions,
+    onStep?: (step: string) => void,
+  ): Promise<OnboardResult> {
+    return onboardAgent(
+      this.contractService,
+      this.privateKey,
+      this.address,
+      this.config,
+      options,
+      onStep,
+    );
   }
 }

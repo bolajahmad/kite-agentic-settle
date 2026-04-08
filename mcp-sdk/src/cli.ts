@@ -9,18 +9,16 @@
  * npx kite vars path            Show vars file location
  *
  * npx kite init                 Interactive first-time onboarding
- * npx kite whoami [--agent id]  Show current agent identity
+ * npx kite whoami               Show current agent identity
  *
- * npx kite call [--agent id]    Call a paid API endpoint
- * npx kite balance [--agent id] Show agent token balance
- * npx kite usage [--agent id]   Show usage logs
+ * npx kite call                 Call a paid API endpoint
+ * npx kite balance              Show agent token balance
+ * npx kite usage                Show usage logs
  * npx kite fund <addr> [amt]    Fund wallet with test tokens
  * npx kite simulate             Run payment simulation
  */
 
 import readline from "node:readline";
-import { existsSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
 import {
   getVar,
   setVar,
@@ -30,8 +28,6 @@ import {
   getVarsPath,
   resolveVar,
 } from "./vars.js";
-import { loadAgents, getAgent } from "./agents.js";
-import type { AgentConfig, AgentRules, BatchConfig, AgentsFile } from "./agents.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -172,39 +168,18 @@ async function cmdVars(args: string[]) {
     }
 
     case "setup": {
-      // Show which vars are referenced in agents.json but not yet stored
-      try {
-        const agentsPath = resolve(process.cwd(), "agents.json");
-        if (!existsSync(agentsPath)) {
-          info("No agents.json found. Run: npx kite init");
-          return;
-        }
+      // Show which essential vars are missing
+      const essential = ["PRIVATE_KEY", "AGENT_SEED"];
+      const missing = essential.filter((k) => !hasVar(k) && !process.env[k]);
 
-        const raw = JSON.parse(
-          (await import("node:fs")).readFileSync(agentsPath, "utf-8")
-        ) as AgentsFile;
-
-        const needed: string[] = [];
-        for (const [, agent] of Object.entries(raw.agents)) {
-          if (agent.seed.startsWith("$")) {
-            const key = agent.seed.slice(1);
-            if (!hasVar(key) && !process.env[key]) {
-              needed.push(key);
-            }
-          }
+      if (missing.length === 0) {
+        info("All essential variables are set. ✓");
+      } else {
+        header("Missing Variables");
+        for (const k of missing) {
+          info(`  ${k}  — Run: npx kite vars set ${k}`);
         }
-
-        if (needed.length === 0) {
-          info("All required variables are set. ✓");
-        } else {
-          header("Missing Variables");
-          for (const k of needed) {
-            info(`  ${k}  — Run: npx kite vars set ${k}`);
-          }
-          console.log("");
-        }
-      } catch (err: any) {
-        die(err.message);
+        console.log("");
       }
       break;
     }
@@ -229,157 +204,182 @@ async function cmdVars(args: string[]) {
 async function cmdInit() {
   header("Kite Agent Pay — Setup");
 
-  const agentsPath = resolve(process.cwd(), "agents.json");
-
-  if (existsSync(agentsPath)) {
-    const overwrite = await prompt("  agents.json already exists. Overwrite? (y/N): ");
+  // Store seed phrase / private key in vars
+  const existing = getVar("PRIVATE_KEY") || getVar("AGENT_SEED");
+  if (existing) {
+    info("Credential already stored in vars.");
+    const overwrite = await prompt("  Overwrite? (y/N): ");
     if (overwrite.toLowerCase() !== "y") {
       info("Aborted.");
       return;
     }
   }
 
-  const agents: AgentsFile = {
-    defaultAgent: "",
-    agents: {},
-  };
+  info("Enter your EOA seed phrase or private key.");
+  info("This will be stored locally in vars (never committed to git).\n");
 
-  let addMore = true;
-  let agentNum = 0;
+  const credential = await prompt("  Seed phrase or private key: ", true);
+  if (!credential) die("Credential cannot be empty");
 
-  while (addMore) {
-    agentNum++;
-    console.log("");
-    info(`── Agent ${agentNum} ──`);
-
-    const id =
-      (await prompt(`  Agent ID (e.g. agent-${agentNum}): `)) ||
-      `agent-${agentNum}`;
-    const name = (await prompt("  Agent name: ")) || `Agent ${agentNum}`;
-    const wallet = await prompt("  KiteAA Wallet address (0x...): ");
-
-    if (!wallet.startsWith("0x")) die("Wallet must start with 0x");
-
-    // Seed phrase — store in vars
-    const seedVarKey = `${id.toUpperCase().replace(/-/g, "_")}_SEED`;
-    info(`Seed will be stored as: ${seedVarKey}`);
-    const seed = await prompt("  Seed phrase: ", true);
-
-    if (!seed) die("Seed phrase cannot be empty");
-    setVar(seedVarKey, seed);
-    info(`✓ Stored ${seedVarKey}`);
-
-    // Rules with defaults
-    info("");
-    info("Payment rules (press Enter for defaults):");
-    const maxPerCall =
-      (await prompt("  Max per call in KTT [0.5]: ")) || "0.5";
-    const maxPerSession =
-      (await prompt("  Max per session in KTT [5.0]: ")) || "5.0";
-    const approvalAbove =
-      (await prompt("  Require approval above KTT [1.0]: ")) || "1.0";
-
-    const rules: AgentRules = {
-      maxPerCall: toWei(maxPerCall),
-      maxPerSession: toWei(maxPerSession),
-      allowedProviders: [],
-      blockedProviders: [],
-      requireApprovalAbove: toWei(approvalAbove),
-    };
-
-    // Batch config with defaults
-    info("");
-    info("Batch session config (press Enter for defaults):");
-    const batchMaxDeposit =
-      (await prompt("  Max batch deposit in KTT [1.0]: ")) || "1.0";
-    const batchDuration =
-      (await prompt("  Max batch duration in seconds [300]: ")) || "300";
-    const batchCalls =
-      (await prompt("  Max calls per batch [20]: ")) || "20";
-
-    const batch: BatchConfig = {
-      maxDeposit: toWei(batchMaxDeposit),
-      maxDurationSeconds: parseInt(batchDuration, 10),
-      maxCalls: parseInt(batchCalls, 10),
-    };
-
-    agents.agents[id] = {
-      name,
-      seed: `$${seedVarKey}`,
-      wallet,
-      rules,
-      batch,
-    };
-
-    if (!agents.defaultAgent) agents.defaultAgent = id;
-
-    const more = await prompt("\n  Add another agent? (y/N): ");
-    addMore = more.toLowerCase() === "y";
+  if (credential.startsWith("0x")) {
+    setVar("PRIVATE_KEY", credential);
+    info(`✓ Stored PRIVATE_KEY in ${getVarsPath()}`);
+  } else {
+    setVar("AGENT_SEED", credential);
+    info(`✓ Stored AGENT_SEED in ${getVarsPath()}`);
   }
 
-  writeFileSync(agentsPath, JSON.stringify(agents, null, 2) + "\n");
-  info(`\n✓ Created ${agentsPath}`);
-  info(`✓ Secrets stored in ${getVarsPath()}`);
   info("");
   info("Next steps:");
-  info(`  npx kite whoami          — verify identity`);
-  info(`  npx kite balance         — check token balance`);
-  info(`  npx kite call            — make a paid API call`);
+  info(`  npx kite onboard --name "My Agent"   — register agent on-chain`);
+  info(`  npx kite whoami                      — verify identity`);
   console.log("");
 }
 
-function toWei(ktt: string): string {
-  // Simple conversion: multiply by 1e18
-  const parts = ktt.split(".");
-  const whole = parts[0] || "0";
-  const frac = (parts[1] || "").padEnd(18, "0").slice(0, 18);
-  return (BigInt(whole) * 10n ** 18n + BigInt(frac)).toString();
-}
+// ── onboard subcommand ─────────────────────────────────────────────
 
-// ── whoami subcommand ──────────────────────────────────────────────
+async function cmdOnboard(args: string[]) {
+  header("Kite Agent Pay — Onboard Agent");
 
-async function cmdWhoami(args: string[]) {
-  const agentId = findFlag(args, "--agent");
+  // Accept flags or prompt interactively
+  let name = findFlag(args, "--name");
+  let category = findFlag(args, "--category");
+  let description = findFlag(args, "--description");
+  let valueLimitStr = findFlag(args, "--value-limit");
+  let dailyLimitStr = findFlag(args, "--daily-limit");
+  let validDaysStr = findFlag(args, "--valid-days");
+  let fundAmountStr = findFlag(args, "--fund");
+  let gasAmountStr = findFlag(args, "--gas");
+  const agentIndexStr = findFlag(args, "--agent-index");
+
+  // Seed / private key — always from vars, never from agents.json
+  let credential: string | undefined;
+
+  // Check vars first, then prompt
+  credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+  if (!credential) {
+    credential = await prompt(
+      "  Seed phrase or private key: ",
+      true,
+    );
+  }
+
+  if (!credential) die("Seed phrase or private key is required");
+
+  // Interactive prompts for missing values
+  if (!name) name = await prompt("  Agent name: ");
+  if (!name) die("Agent name is required");
+
+  if (!category) category = (await prompt("  Category (e.g. defi, social, data) [general]: ")) || "general";
+  if (!description) description = (await prompt("  Description []: ")) || "";
+
+  if (!valueLimitStr) valueLimitStr = (await prompt("  Value limit per tx in KTT [1.0]: ")) || "1.0";
+  if (!dailyLimitStr) dailyLimitStr = (await prompt("  Daily limit in KTT [10.0]: ")) || "10.0";
+  if (!validDaysStr) validDaysStr = (await prompt("  Session validity in days [30]: ")) || "30";
+
+  const wantFund = await prompt("  Fund agent wallet? (y/N): ");
+  if (wantFund.toLowerCase() === "y") {
+    if (!fundAmountStr) fundAmountStr = (await prompt("  KTT amount to deposit [1.0]: ")) || "1.0";
+    if (!gasAmountStr) gasAmountStr = (await prompt("  Native gas to send in ETH [0.001]: ")) || "0.001";
+  }
+
+  // Create client
+  info("");
+  info("Starting onboarding...");
 
   try {
-    const agents = loadAgents();
-    const agent = getAgent(agents, agentId);
-
-    // Lazy import to avoid loading WDK for vars commands
     const { KitePaymentClient } = await import("./client.js");
 
     const client = await KitePaymentClient.create({
-      seedPhrase: agent.seed,
-      walletAddress: agent.wallet,
+      seedPhrase: credential,
     });
 
-    header(`Agent: ${agent.id}`);
-    info(`  Name:      ${agent.name}`);
-    info(`  Address:   ${client.address}`);
-    info(`  Wallet:    ${agent.wallet}`);
-    info(`  Rules:`);
-    info(`    Max/call:    ${fmtWei(agent.rules.maxPerCall)} KTT`);
-    info(`    Max/session: ${fmtWei(agent.rules.maxPerSession)} KTT`);
-    info(`    Approve < :  ${fmtWei(agent.rules.requireApprovalAbove)} KTT`);
-    if (agent.batch) {
-      info(`  Batch:`);
-      info(`    Max deposit: ${fmtWei(agent.batch.maxDeposit)} KTT`);
-      info(`    Duration:    ${agent.batch.maxDurationSeconds}s`);
-      info(`    Max calls:   ${agent.batch.maxCalls}`);
+    const result = await client.onboard(
+      {
+        agentName: name,
+        category,
+        description,
+        agentIndex: agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : undefined,
+        valueLimit: valueLimitStr,
+        dailyLimit: dailyLimitStr,
+        validDays: parseInt(validDaysStr!, 10),
+        fundAmount: fundAmountStr,
+        gasAmount: gasAmountStr,
+      },
+      (step) => info(`  → ${step}`),
+    );
+
+    header("Onboarding Complete");
+    info(`  EOA Address:          ${result.eoaAddress}`);
+    info(`  Agent Address:        ${result.agentAddress}`);
+    info(`  Agent Private Key:    ${result.agentPrivateKey}`);
+    info(`  Agent ID (on-chain):  ${result.agentId}`);
+    info(`  Session Address:      ${result.sessionKeyAddress}`);
+    info(`  Session Private Key:  ${result.sessionKeyPrivateKey}`);
+    info("");
+    info(`  Transactions:`);
+    for (const tx of result.txHashes) {
+      if (tx.hash) info(`    ${tx.step}: ${tx.hash}`);
     }
+    info("");
+    info(`  Balances:`);
+    info(`    KTT (wallet):  ${result.walletKttBalance}`);
+    info(`    KTT (EOA):     ${result.kttBalance}`);
+    info(`    Native (EOA):  ${result.kiteBalance}`);
     console.log("");
   } catch (err: any) {
     die(err.message);
   }
 }
 
-function fmtWei(wei: string): string {
-  const n = BigInt(wei);
-  const whole = n / 10n ** 18n;
-  const frac = n % 10n ** 18n;
-  if (frac === 0n) return whole.toString();
-  const fracStr = frac.toString().padStart(18, "0").replace(/0+$/, "");
-  return `${whole}.${fracStr}`;
+// ── whoami subcommand ──────────────────────────────────────────────
+
+async function cmdWhoami(args: string[]) {
+  const agentIndexStr = findFlag(args, "--agent-index");
+
+  try {
+    // Load credential from vars
+    const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+    if (!credential) die("No credential found. Run: npx kite init");
+
+    const { KitePaymentClient } = await import("./client.js");
+
+    const client = await KitePaymentClient.create({
+      seedPhrase: credential,
+    });
+
+    const agentIndex = agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : 0;
+
+    // Derive agent address at the given index
+    const { deriveAgentAccount } = await import("./wallet.js");
+    const agent = await deriveAgentAccount(client.getPrivateKey(), agentIndex);
+
+    header(`Agent (index: ${agentIndex})`);
+    info(`  EOA Address:    ${client.address}`);
+    info(`  Agent Address:  ${agent.address}`);
+
+    // Check on-chain registration
+    try {
+      const resolved = await client.resolveAgentByAddress(agent.address);
+      const agentId = (resolved as any)[0] ?? (resolved as any).agentId;
+      if (agentId && agentId !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
+        info(`  Agent ID:       ${agentId}`);
+        info(`  Status:         Registered on-chain`);
+      } else {
+        info(`  Status:         Not registered on-chain`);
+      }
+    } catch {
+      info(`  Status:         Not registered on-chain`);
+    }
+
+    // Show stored vars for this agent
+    const storedId = getVar(`AGENT_${agentIndex}_ID`);
+    if (storedId) info(`  Stored ID (vars): ${storedId}`);
+
+    console.log("");
+  } catch (err: any) {
+    die(err.message);
+  }
 }
 
 // ── help ───────────────────────────────────────────────────────────
@@ -398,6 +398,7 @@ function showHelp() {
 
   Setup:
     kite init                 Interactive first-time onboarding
+    kite onboard              One-step agent onboarding (register + session key)
     kite whoami               Show current agent identity
 
   Commands:
@@ -408,21 +409,21 @@ function showHelp() {
     kite simulate             Run payment simulation
 
   Options:
-    --agent <id>              Agent ID from agents.json
+    --agent-index <n>         Agent derivation index (default: 0)
     --decide <mode>           Decision mode: auto, rules, ai, cli
     --url <url>               Target a live API URL
 
   Examples:
     npx kite vars set AGENT_1_SEED
     npx kite init
-    npx kite call --agent agent-1
-    npx kite call --agent agent-1 --decide rules
+    npx kite onboard --name "My Agent" --category defi
+    npx kite call --agent-index 0
+    npx kite call --agent-index 0 --decide rules
     npx kite balance
-    npx kite whoami --agent agent-2
+    npx kite whoami --agent-index 1
 
   Config files:
-    agents.json               Agent metadata (committable, no secrets)
-    ~/.kite-agent-pay/vars.json  Secrets (local only, mode 0600)
+    ~/.kite-agent-pay/vars.json  Secrets & credentials (local only, mode 0600)
 `);
 }
 
@@ -443,6 +444,10 @@ async function main() {
 
       case "init":
         await cmdInit();
+        break;
+
+      case "onboard":
+        await cmdOnboard(args.slice(1));
         break;
 
       case "whoami":

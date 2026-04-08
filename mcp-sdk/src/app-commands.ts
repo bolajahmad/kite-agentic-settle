@@ -17,10 +17,9 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { KitePaymentClient, KITE_TESTNET, erc20Abi } from "./index.js";
-import { loadAgents, getAgent } from "./agents.js";
 import { decide } from "./decide.js";
-import { resolveVar } from "./vars.js";
-import type { DecisionMode } from "./decide.js";
+import { resolveVar, getVar } from "./vars.js";
+import type { DecisionMode, SessionRules } from "./decide.js";
 import type { PaymentRequest, PaymentResult } from "./types.js";
 
 // ── Constants ──────────────────────────────────────────────────────
@@ -260,9 +259,9 @@ function startMockAPI(providerKey: `0x${string}`): Promise<http.Server> {
 // ── Commands ───────────────────────────────────────────────────────
 
 async function callApi(opts: CmdOpts) {
-  const agents = loadAgents();
-  const agent = getAgent(agents, opts.agentId);
-  console.log(`  Agent:    ${agent.id} (${agent.name})`);
+  const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+  if (!credential) throw new Error("No credential found. Run: npx kite init");
+
   console.log(`  Decide:   ${opts.decide}`);
 
   let server: http.Server | null = null;
@@ -288,14 +287,11 @@ async function callApi(opts: CmdOpts) {
     console.log(`  Target:   ${apiUrl} (mock)`);
   }
 
-  console.log(`  Wallet:   ${agent.wallet}`);
   console.log("");
 
   const client = await KitePaymentClient.create({
-    seedPhrase: agent.seed,
+    seedPhrase: credential,
     defaultPaymentMode: "x402" as const,
-    walletAddress: agent.wallet,
-    agentId: agent.id,
   });
 
   console.log(`  Address:  ${client.address}`);
@@ -312,6 +308,14 @@ async function callApi(opts: CmdOpts) {
     },
   };
 
+  // Default rules sourced from vars/on-chain
+  const defaultRules: SessionRules = {
+    maxPerCall: parseUnits("1", 18).toString(),
+    maxPerSession: parseUnits("10", 18).toString(),
+    blockedProviders: [],
+    requireApprovalAbove: parseUnits("0.5", 18).toString(),
+  };
+
   if (opts.decide === "cli") {
     fetchOpts.onPaymentRequired = promptForPayment;
   } else {
@@ -320,7 +324,7 @@ async function callApi(opts: CmdOpts) {
     ): Promise<boolean> => {
       const ctx = {
         request: req,
-        rules: agent.rules,
+        rules: defaultRules,
         balance: await client.getTokenBalance(),
         totalSpentThisSession: client.getTotalSpent(),
         callCount: client.getUsageLogs().length,
@@ -361,33 +365,29 @@ async function callApi(opts: CmdOpts) {
 }
 
 async function showBalance(opts: CmdOpts) {
-  const agents = loadAgents();
-  const agent = getAgent(agents, opts.agentId);
+  const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+  if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const client = await KitePaymentClient.create({
-    seedPhrase: agent.seed,
-    walletAddress: agent.wallet,
+    seedPhrase: credential,
   });
 
   const agentBalance = await client.getTokenBalance();
-  console.log(`  Agent:    ${agent.id} (${agent.name})`);
   console.log(`  Address:  ${client.address}`);
   console.log(`  Balance:  ${fmt(agentBalance)} KTT`);
 }
 
 async function showUsage(opts: CmdOpts) {
-  const agents = loadAgents();
-  const agent = getAgent(agents, opts.agentId);
+  const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+  if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const client = await KitePaymentClient.create({
-    seedPhrase: agent.seed,
-    walletAddress: agent.wallet,
+    seedPhrase: credential,
   });
 
   const logs = client.getUsageLogs();
   const total = client.getTotalSpent();
 
-  console.log(`  Agent:       ${agent.id} (${agent.name})`);
   console.log(`  Address:     ${client.address}`);
   console.log(`  Total spent: ${fmt(total)} KTT`);
   console.log(`  Calls:       ${logs.length}`);

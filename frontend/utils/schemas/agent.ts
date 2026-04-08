@@ -27,6 +27,14 @@ export const agentIdentitySchema = z.object({
   domain: z.string().optional(),
 })
 
+export type AgentSessionCreateModel = {
+  valueLimit: string
+  dailyLimit: string
+  validUntil: string
+  allowedRecipients?: string[]
+  restrictedRecipients?: string[]
+}
+
 export const agentSessionSchema = z
   .object({
     valueLimit: z

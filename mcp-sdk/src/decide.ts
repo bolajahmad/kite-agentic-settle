@@ -2,14 +2,21 @@
 // Each tier returns "approve", "reject", or "unclear" (pass to next tier).
 
 import type { PaymentRequest } from "./types.js";
-import type { AgentRules } from "./agents.js";
 
 export type Decision = "approve" | "reject" | "unclear";
 export type DecisionMode = "auto" | "rules" | "ai" | "cli";
 
+/** Runtime session rules — sourced from on-chain data or indexer, NOT agents.json */
+export interface SessionRules {
+  maxPerCall: string;           // max per-call spend (wei string)
+  maxPerSession: string;        // max per-session spend (wei string)
+  blockedProviders: string[];   // blocked provider addresses
+  requireApprovalAbove: string; // auto-approve threshold (wei string)
+}
+
 export interface DecisionContext {
   request: PaymentRequest;
-  rules: AgentRules;
+  rules: SessionRules;
   balance: bigint;
   totalSpentThisSession: bigint;
   callCount: number;
@@ -45,14 +52,6 @@ export function checkRules(ctx: DecisionContext): { decision: Decision; reason?:
     const payToLower = request.payTo.toLowerCase();
     if (rules.blockedProviders.some((p) => p.toLowerCase() === payToLower)) {
       return { decision: "reject", reason: `Provider ${request.payTo} is blocked` };
-    }
-  }
-
-  // Check allowed providers (if set, only these are allowed)
-  if (rules.allowedProviders.length > 0) {
-    const payToLower = request.payTo.toLowerCase();
-    if (!rules.allowedProviders.some((p) => p.toLowerCase() === payToLower)) {
-      return { decision: "reject", reason: `Provider ${request.payTo} not in allowlist` };
     }
   }
 

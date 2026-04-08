@@ -8,16 +8,33 @@ export type { BatchLimits, BatchEndReason } from "./batch.js";
 export { PaymentInterceptor } from "./interceptor.js";
 export { UsageTracker } from "./usage.js";
 
-export { createKiteWallet, generateSeedPhrase } from "./wallet.js";
+export {
+  createKiteWallet,
+  generateSeedPhrase,
+  isPrivateKey,
+  isSeedPhrase,
+  deriveAgentAccount,
+  deriveSessionAccount,
+} from "./wallet.js";
 export { computeReceiptHash, signReceipt, createSignedReceipt, verifyReceipt, validateReceipt, RECEIPT_DOMAIN, RECEIPT_TYPES } from "./receipt.js";
 export { TOOLS, handleTool } from "./tools.js";
 export type { McpToolDefinition } from "./tools.js";
 
 export { KITE_TESTNET } from "./config.js";
-export { loadAgents, getAgent } from "./agents.js";
-export type { AgentConfig, AgentRules, AgentsFile, BatchConfig } from "./agents.js";
 export { decide, checkRules, checkCostModel, askLLM } from "./decide.js";
-export type { Decision, DecisionMode, DecisionContext, DecisionResult } from "./decide.js";
+export type { Decision, DecisionMode, DecisionContext, DecisionResult, SessionRules } from "./decide.js";
+
+export { onboardAgent } from "./onboard.js";
+export type { OnboardOptions, OnboardResult } from "./onboard.js";
+
+export {
+  getAgentsByOwner,
+  getAgentById,
+  getSessionsByAgent,
+  getPaymentsByAgent,
+  getRecentPayments,
+  getSessionKeyAdded,
+} from "./indexer.js";
 
 export {
   getVar,

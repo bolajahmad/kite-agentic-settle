@@ -1,0 +1,36 @@
+{
+  "version": "1",
+  "name": "kite-aspl",
+  "abis": {
+    "agentRegistry": { "path": "./abis/AgentRegistryABI.json" },
+    "aawallet": { "path": "./abis/KiteAAWalletABI.json" },
+    "merkle": { "path": "./abis/AnchorMerkleABI.json" },
+    "paymentChannel": { "path": "./abis/PaymentChannelABI.json" }
+  },
+  "instances": [
+    {
+      "abi": "agentRegistry",
+      "address": "0xafb3FF4863380118767377Fd33169FB52FD464c1",
+      "startBlock": 20749220,
+      "chain": "kite-ai-testnet"
+    },
+    {
+      "abi": "aawallet",
+      "address": "0xf9b2F8836938743A861a3e737aBae50bc35b7553",
+      "startBlock": 20749220,
+      "chain": "kite-ai-testnet"
+    },
+    {
+      "abi": "merkle",
+      "address": "0x7054359323bF53244879B837d72aa029341eF49a",
+      "startBlock": 20749220,
+      "chain": "kite-ai-testnet"
+    },
+    {
+      "abi": "paymentChannel",
+      "address": "0x27d5aeae3962dd5Ba157F94Ee0e0C94D1bfCc08F",
+      "startBlock": 20749220,
+      "chain": "kite-ai-testnet"
+    }
+  ]
+}

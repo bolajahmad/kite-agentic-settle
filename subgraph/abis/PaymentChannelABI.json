@@ -1,4 +1,4 @@
-export const PaymentChannelABI = [
+[
   {
     "inputs": [],
     "name": "ECDSAInvalidSignature",
@@ -162,6 +162,12 @@ export const PaymentChannelABI = [
         "internalType": "uint256",
         "name": "refund",
         "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "usageMerkleRoot",
+        "type": "bytes32"
       }
     ],
     "name": "ChannelSettled",
@@ -341,6 +347,11 @@ export const PaymentChannelABI = [
         "type": "uint256"
       },
       {
+        "internalType": "bytes32",
+        "name": "usageMerkleRoot",
+        "type": "bytes32"
+      },
+      {
         "internalType": "enum PaymentChannel.ChannelStatus",
         "name": "status",
         "type": "uint8"
@@ -375,6 +386,11 @@ export const PaymentChannelABI = [
         "internalType": "bytes",
         "name": "providerSignature",
         "type": "bytes"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
       }
     ],
     "name": "closeChannel",
@@ -479,6 +495,11 @@ export const PaymentChannelABI = [
         "internalType": "bytes",
         "name": "providerSignature",
         "type": "bytes"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
       }
     ],
     "name": "forceCloseWithReceipt",
@@ -745,6 +766,11 @@ export const PaymentChannelABI = [
         "internalType": "bytes",
         "name": "providerSignature",
         "type": "bytes"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
       }
     ],
     "name": "resolveDispute",
@@ -765,4 +791,4 @@ export const PaymentChannelABI = [
     "stateMutability": "view",
     "type": "function"
   }
-];
+]

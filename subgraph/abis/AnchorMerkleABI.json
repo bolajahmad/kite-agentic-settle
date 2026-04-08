@@ -1,4 +1,4 @@
-export const AnchorMerkleABI = [
+[
   {
     "inputs": [],
     "stateMutability": "nonpayable",
@@ -386,4 +386,4 @@ export const AnchorMerkleABI = [
     "stateMutability": "nonpayable",
     "type": "function"
   }
-] as const;
+]

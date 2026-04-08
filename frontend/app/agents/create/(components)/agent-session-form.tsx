@@ -1,20 +1,28 @@
 import { Button } from "@/components/ui/button"
 import { Field, FieldError, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { CONTRACT_ADDRESSES } from "@/utils/contracts"
+import { KiteAAWalletABI } from "@/utils/contracts/abi/KiteAAWalletABI"
 import { useGenerateSession } from "@/utils/hooks/use-generate-agent"
-import { agentSessionSchema } from "@/utils/schemas/agent"
+import {
+  AgentSessionCreateModel,
+  agentSessionSchema,
+} from "@/utils/schemas/agent"
 import { zodResolver } from "@hookform/resolvers/zod"
 import {
   AlertCircle,
   ChevronRight,
   Copy,
   Key,
+  Loader2,
   Shield,
   Trash2,
   Zap,
 } from "lucide-react"
 import { Controller, useFieldArray, useForm } from "react-hook-form"
 import { toast } from "sonner"
+import { parseUnits } from "viem"
+import { usePublicClient, useWriteContract } from "wagmi"
 
 export const GenerateSessionKey = ({
   updateSessionKey,
@@ -25,8 +33,8 @@ export const GenerateSessionKey = ({
 }: {
   handleBack: () => void
   handleContinue: () => void
-  sessionKey: { address: string; privateKey: string } | null
-  updateSessionKey: (key: { address: string; privateKey: string }) => void
+  sessionKey: { address: string } | null
+  updateSessionKey: (key: { address: string }) => void
   agentId: string
 }) => {
   const { generateSession, isGenerating } = useGenerateSession()
@@ -36,7 +44,6 @@ export const GenerateSessionKey = ({
     if (sessions.length > 0) {
       updateSessionKey({
         address: sessions[0].address,
-        privateKey: sessions[0].publicKey,
       })
     }
   }
@@ -63,7 +70,12 @@ export const GenerateSessionKey = ({
             onClick={generateSessionKey}
             className="kite-button-primary mx-auto px-10 py-4 shadow-xl shadow-kite-primary/20"
           >
-            <Zap size={20} /> Generate Session Key
+            {isGenerating ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Zap size={20} />
+            )}{" "}
+            Generate Session Key
           </button>
         ) : (
           <div className="space-y-6 text-left">
@@ -86,24 +98,6 @@ export const GenerateSessionKey = ({
                   </button>
                 </div>
               </div>
-              <div className="space-y-1">
-                <p className="text-[10px] font-bold tracking-widest text-red-500 uppercase">
-                  Session ID (Remember at all times)
-                </p>
-                <div className="flex items-center gap-2">
-                  <code className="font-mono text-xs break-all text-red-600">
-                    {sessionKey.privateKey}
-                  </code>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(sessionKey.privateKey)
-                      toast.success("Private key copied!")
-                    }}
-                  >
-                    <Copy size={14} className="text-red-400" />
-                  </button>
-                </div>
-              </div>
             </div>
             <div className="flex items-start gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-700">
               <AlertCircle size={20} className="mt-0.5 shrink-0" />
@@ -122,7 +116,7 @@ export const GenerateSessionKey = ({
         </button>
         <button
           onClick={handleContinue}
-          disabled={!sessionKey}
+          disabled={!sessionKey || isGenerating}
           className="kite-button-primary px-10"
         >
           Register Agent & Session <ChevronRight size={18} />
@@ -133,10 +127,11 @@ export const GenerateSessionKey = ({
 }
 
 type Props = {
-  onComplete: () => void
+  onComplete: (model?: AgentSessionCreateModel & { address: string }) => void
   handleBack: () => void
   onError?: () => void
   sessionKey: string
+  agentId?: string
 }
 
 export const AgentSessionSetupForm = ({
@@ -144,6 +139,7 @@ export const AgentSessionSetupForm = ({
   handleBack,
   onError,
   sessionKey,
+  agentId,
 }: Props) => {
   const form = useForm({
     resolver: zodResolver(agentSessionSchema),
@@ -160,12 +156,39 @@ export const AgentSessionSetupForm = ({
     name: "allowedRecipients" as never,
   })
 
+  const pubClient = usePublicClient()
+  const { writeContractAsync, isPending } = useWriteContract({
+    mutation: {
+      onError: (error) => {
+        console.log({ error })
+        onError?.()
+      },
+    },
+  })
+
   const handleNext = () => {
     onComplete()
   }
 
-  const onSubmit = (data: Record<string, string | string[]>) => {
+  const onSubmit = async (data: AgentSessionCreateModel) => {
+    if (!agentId) return
     console.log({ data })
+
+    const hash = await writeContractAsync({
+      abi: KiteAAWalletABI,
+      address: CONTRACT_ADDRESSES.KiteAAWallet,
+      functionName: "addSessionKeyRule",
+      args: [
+        sessionKey as `0x${string}`,
+        agentId as `0x${string}`,
+        parseUnits(`${data.valueLimit}`, 18),
+        parseUnits(`${data.dailyLimit}`, 18),
+        BigInt(new Date(Number(data.validUntil)).getTime() / 1000),
+        data.allowedRecipients as `0x${string}`[],
+      ],
+    })
+    await pubClient?.waitForTransactionReceipt({ hash })
+    onComplete({ ...data, address: sessionKey })
   }
 
   return (
@@ -399,8 +422,9 @@ export const AgentSessionSetupForm = ({
           >
             Back
           </button>
-          <button onClick={handleNext} className="kite-button-primary px-10">
-            Continue <ChevronRight size={18} />
+          <button type="submit" className="kite-button-primary px-10">
+            {isPending ? <Loader2 size={18} className="animate-spin" /> : null}
+            Continue {isPending ? null : <ChevronRight size={18} />}
           </button>
         </div>
       </form>

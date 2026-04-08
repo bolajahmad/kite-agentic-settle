@@ -3,8 +3,6 @@ import {
   http,
   encodeFunctionData,
   decodeEventLog,
-  keccak256,
-  toHex,
   type PublicClient
 } from "viem";
 import {
@@ -65,61 +63,144 @@ export class ContractService {
   // -- Agent Registry --
 
   async registerAgent(
-    agentId: string,
-    domain: string,
     agentAddress: string,
-    walletContract: string
-  ): Promise<{ txHash: string; agentIdBytes32: `0x${string}` }> {
-    const agentIdBytes32 = keccak256(toHex(agentId));
+    walletContract: string,
+    agentIndex: number,
+    metadata: `0x${string}`,
+  ): Promise<{ txHash: string; agentId: `0x${string}` }> {
     const data = encodeFunctionData({
       abi: agentRegistryAbi,
       functionName: "registerAgent",
       args: [
-        agentIdBytes32,
-        domain,
         agentAddress as `0x${string}`,
         walletContract as `0x${string}`,
+        BigInt(agentIndex),
+        metadata,
       ],
     });
     const result = await this.sendTx(this.config.contracts.agentRegistry, data);
-    return { txHash: result.hash, agentIdBytes32 };
+
+    // Decode AgentRegistered event to get the on-chain generated agentId
+    const event = await this.waitAndDecodeLogs(
+      result.hash,
+      agentRegistryAbi,
+      "AgentRegistered",
+    );
+    const agentId = event?.args?.agentId as `0x${string}`;
+    if (!agentId) throw new Error("Failed to decode AgentRegistered event");
+
+    return { txHash: result.hash, agentId };
   }
 
   async registerSession(
-    agentId: string,
+    agentId: `0x${string}`,
     sessionKey: string,
-    validUntil: number
+    sessionIndex: number,
+    validUntil: number,
   ): Promise<string> {
-    const agentIdBytes32 = keccak256(toHex(agentId));
     const data = encodeFunctionData({
       abi: agentRegistryAbi,
       functionName: "registerSession",
-      args: [agentIdBytes32, sessionKey as `0x${string}`, BigInt(validUntil)],
+      args: [agentId, sessionKey as `0x${string}`, BigInt(sessionIndex), BigInt(validUntil)],
     });
     const result = await this.sendTx(this.config.contracts.agentRegistry, data);
     return result.hash;
   }
 
-  async getAgent(agentId: string) {
-    const agentIdBytes32 = keccak256(toHex(agentId));
+  async getAgent(agentId: `0x${string}`) {
     return await this.client.readContract({
       address: this.config.contracts.agentRegistry as `0x${string}`,
       abi: agentRegistryAbi,
       functionName: "getAgent",
-      args: [agentIdBytes32],
+      args: [agentId],
     });
   }
 
-  async resolveAgentByDomain(domain: string) {
+  async resolveAgentByAddress(agentAddr: string) {
     return await this.client.readContract({
       address: this.config.contracts.agentRegistry as `0x${string}`,
       abi: agentRegistryAbi,
-      functionName: "resolveAgentByDomain",
-      args: [domain],
+      functionName: "resolveAgentByAddress",
+      args: [agentAddr as `0x${string}`],
     });
   }
 
+  async getOwnerAgents(ownerAddr: string): Promise<readonly `0x${string}`[]> {
+    return (await this.client.readContract({
+      address: this.config.contracts.agentRegistry as `0x${string}`,
+      abi: agentRegistryAbi,
+      functionName: "getOwnerAgents",
+      args: [ownerAddr as `0x${string}`],
+    })) as readonly `0x${string}`[];
+  }
+
   // -- KiteAAWallet --
+
+  async registerUser(): Promise<string> {
+    const data = encodeFunctionData({
+      abi: kiteAAWalletAbi,
+      functionName: "register",
+    });
+    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    return result.hash;
+  }
+
+  async isUserRegistered(address: string): Promise<boolean> {
+    return (await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "isRegistered",
+      args: [address as `0x${string}`],
+    })) as boolean;
+  }
+
+  async addAgentId(agentId: `0x${string}`): Promise<string> {
+    const data = encodeFunctionData({
+      abi: kiteAAWalletAbi,
+      functionName: "addAgentId",
+      args: [agentId],
+    });
+    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    return result.hash;
+  }
+
+  async getUserAgentIds(address: string): Promise<readonly `0x${string}`[]> {
+    return (await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "getUserAgentIds",
+      args: [address as `0x${string}`],
+    })) as readonly `0x${string}`[];
+  }
+
+  async getAgentSessionKeys(agentId: `0x${string}`): Promise<readonly `0x${string}`[]> {
+    return (await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "getAgentSessionKeys",
+      args: [agentId],
+    })) as readonly `0x${string}`[];
+  }
+
+  async getUserBalance(address: string, token: string): Promise<bigint> {
+    return (await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "getUserBalance",
+      args: [address as `0x${string}`, token as `0x${string}`],
+    })) as bigint;
+  }
+
+  async getNativeBalance(address: string): Promise<bigint> {
+    return await this.client.getBalance({
+      address: address as `0x${string}`,
+    });
+  }
+
+  async sendNativeToken(to: string, value: bigint): Promise<string> {
+    const result = await this.sendTx(to, "0x" as `0x${string}`, value);
+    return result.hash;
+  }
 
   async depositToWallet(token: string, amount: bigint): Promise<string> {
     // First approve
@@ -148,28 +229,31 @@ export class ContractService {
 
   async addSessionKeyRule(
     sessionKey: string,
-    agentId: string,
+    agentId: `0x${string}`,
+    sessionIndex: number,
     valueLimit: bigint,
     dailyLimit: bigint,
     validUntil: number,
-    allowedRecipients: string[]
+    allowedRecipients: string[],
+    metadata: `0x${string}` = "0x",
   ): Promise<string> {
-    const agentIdBytes32 = keccak256(toHex(agentId));
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "addSessionKeyRule",
       args: [
         sessionKey as `0x${string}`,
-        agentIdBytes32,
+        agentId,
+        BigInt(sessionIndex),
         valueLimit,
         dailyLimit,
         BigInt(validUntil),
         allowedRecipients as `0x${string}`[],
+        metadata,
       ],
     });
     const result = await this.sendTx(
       this.config.contracts.kiteAAWallet,
-      data
+      data,
     );
     return result.hash;
   }
@@ -261,7 +345,8 @@ export class ContractService {
     sequenceNumber: number,
     cumulativeCost: bigint,
     timestamp: number,
-    providerSignature: `0x${string}`
+    providerSignature: `0x${string}`,
+    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
   ): Promise<string> {
     const data = encodeFunctionData({
       abi: paymentChannelAbi,
@@ -272,6 +357,7 @@ export class ContractService {
         cumulativeCost,
         BigInt(timestamp),
         providerSignature,
+        merkleRoot,
       ],
     });
     const result = await this.sendTx(

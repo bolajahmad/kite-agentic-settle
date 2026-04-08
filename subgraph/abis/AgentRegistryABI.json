@@ -1,4 +1,4 @@
-export const AgentRegistryABI = [
+[
   {
     "inputs": [],
     "stateMutability": "nonpayable",
@@ -49,12 +49,6 @@ export const AgentRegistryABI = [
         "type": "bytes32"
       },
       {
-        "indexed": false,
-        "internalType": "string",
-        "name": "agentDomain",
-        "type": "string"
-      },
-      {
         "indexed": true,
         "internalType": "address",
         "name": "agentAddress",
@@ -71,6 +65,18 @@ export const AgentRegistryABI = [
         "internalType": "address",
         "name": "ownerAddress",
         "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "agentIndex",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes",
+        "name": "metadata",
+        "type": "bytes"
       }
     ],
     "name": "AgentRegistered",
@@ -126,6 +132,12 @@ export const AgentRegistryABI = [
       {
         "indexed": false,
         "internalType": "uint256",
+        "name": "sessionIndex",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
         "name": "validUntil",
         "type": "uint256"
       }
@@ -168,9 +180,9 @@ export const AgentRegistryABI = [
         "type": "bytes32"
       },
       {
-        "internalType": "string",
-        "name": "agentDomain",
-        "type": "string"
+        "internalType": "bytes32",
+        "name": "metadataHash",
+        "type": "bytes32"
       },
       {
         "internalType": "address",
@@ -188,28 +200,14 @@ export const AgentRegistryABI = [
         "type": "address"
       },
       {
+        "internalType": "uint256",
+        "name": "agentIndex",
+        "type": "uint256"
+      },
+      {
         "internalType": "bool",
         "name": "active",
         "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "allAgentIds",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -245,25 +243,6 @@ export const AgentRegistryABI = [
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "name": "domainToAgent",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
         "name": "agentId",
         "type": "bytes32"
       }
@@ -271,9 +250,9 @@ export const AgentRegistryABI = [
     "name": "getAgent",
     "outputs": [
       {
-        "internalType": "string",
-        "name": "agentDomain",
-        "type": "string"
+        "internalType": "bytes32",
+        "name": "metadataHash",
+        "type": "bytes32"
       },
       {
         "internalType": "address",
@@ -289,6 +268,11 @@ export const AgentRegistryABI = [
         "internalType": "address",
         "name": "ownerAddr",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "agentIndex",
+        "type": "uint256"
       },
       {
         "internalType": "bool",
@@ -315,14 +299,24 @@ export const AgentRegistryABI = [
         "type": "bytes32"
       },
       {
-        "internalType": "string",
-        "name": "agentDomain",
-        "type": "string"
+        "internalType": "bytes32",
+        "name": "metadataHash",
+        "type": "bytes32"
       },
       {
         "internalType": "address",
         "name": "agentAddress",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "agentIndex",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "sessionIndex",
+        "type": "uint256"
       },
       {
         "internalType": "bool",
@@ -357,6 +351,19 @@ export const AgentRegistryABI = [
         "internalType": "bytes32[]",
         "name": "",
         "type": "bytes32[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nonce",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -402,16 +409,6 @@ export const AgentRegistryABI = [
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "string",
-        "name": "agentDomain",
-        "type": "string"
-      },
-      {
         "internalType": "address",
         "name": "agentAddress",
         "type": "address"
@@ -420,10 +417,26 @@ export const AgentRegistryABI = [
         "internalType": "address",
         "name": "walletContract",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "agentIndex",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes",
+        "name": "metadata",
+        "type": "bytes"
       }
     ],
     "name": "registerAgent",
-    "outputs": [],
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -438,6 +451,11 @@ export const AgentRegistryABI = [
         "internalType": "address",
         "name": "sessionKey",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "sessionIndex",
+        "type": "uint256"
       },
       {
         "internalType": "uint256",
@@ -473,48 +491,24 @@ export const AgentRegistryABI = [
         "type": "bytes32"
       },
       {
-        "internalType": "string",
-        "name": "agentDomain",
-        "type": "string"
-      },
-      {
-        "internalType": "address",
-        "name": "walletContract",
-        "type": "address"
-      },
-      {
-        "internalType": "bool",
-        "name": "active",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "string",
-        "name": "domain",
-        "type": "string"
-      }
-    ],
-    "name": "resolveAgentByDomain",
-    "outputs": [
-      {
         "internalType": "bytes32",
-        "name": "agentId",
+        "name": "metadataHash",
         "type": "bytes32"
       },
       {
         "internalType": "address",
-        "name": "agentAddress",
+        "name": "walletContract",
         "type": "address"
       },
       {
         "internalType": "address",
-        "name": "walletContract",
+        "name": "ownerAddr",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "agentIndex",
+        "type": "uint256"
       },
       {
         "internalType": "bool",
@@ -544,6 +538,11 @@ export const AgentRegistryABI = [
         "internalType": "address",
         "name": "sessionKey",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "sessionIndex",
+        "type": "uint256"
       },
       {
         "internalType": "uint256",
@@ -585,4 +584,4 @@ export const AgentRegistryABI = [
     "stateMutability": "nonpayable",
     "type": "function"
   }
-] as const;
+]

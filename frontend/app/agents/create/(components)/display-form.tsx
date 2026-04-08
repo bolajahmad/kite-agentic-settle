@@ -1,9 +1,13 @@
 "use client"
 
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { CONTRACT_ADDRESSES } from "@/utils/contracts"
 import { KiteAAWalletABI } from "@/utils/contracts/abi/KiteAAWalletABI"
-import { AgentCreateModel } from "@/utils/schemas/agent"
+import {
+  AgentCreateModel,
+  AgentSessionCreateModel,
+} from "@/utils/schemas/agent"
 import { Tab, TabGroup, TabList, TabPanel, TabPanels } from "@headlessui/react"
 import { AnimatePresence, motion } from "framer-motion"
 import {
@@ -17,13 +21,16 @@ import {
   UserPlus,
   Zap,
 } from "lucide-react"
-import React, { useState } from "react"
+import React, { useMemo, useState } from "react"
 import { toast } from "sonner"
-import { zeroAddress } from "viem"
+import { erc20Abi, formatUnits, parseUnits, zeroAddress } from "viem"
 import {
   useAccount,
+  useBalance,
   usePublicClient,
   useReadContract,
+  useReadContracts,
+  useSendTransaction,
   useWriteContract,
 } from "wagmi"
 import { AgentIdentity } from "./agent-identity-form"
@@ -75,29 +82,89 @@ const AgentFundingSetup = ({
   handleNext,
 }: {
   rules: { dailyLimit: string }
-  agent: { name: string }
+  agent: { name: string; agentAddress: string }
   handleNext: () => void
 }) => {
+  const { address } = useAccount()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [funding, setFunding] = useState({
     gasAmount: "0.1",
     stableAmount: "100",
   })
+  const { data: balanceData } = useBalance({
+    address,
+  })
+  const { sendTransaction } = useSendTransaction()
+  const { data: usdtBalanceData } = useReadContracts({
+    contracts: [
+      {
+        abi: erc20Abi,
+        address: CONTRACT_ADDRESSES.ERC20,
+        functionName: "balanceOf",
+        args: [address ?? zeroAddress],
+      },
+      {
+        abi: erc20Abi,
+        address: CONTRACT_ADDRESSES.ERC20,
+        functionName: "decimals",
+      },
+      {
+        abi: erc20Abi,
+        address: CONTRACT_ADDRESSES.ERC20,
+        functionName: "allowance",
+        args: [address ?? zeroAddress, CONTRACT_ADDRESSES.KiteAAWallet],
+      },
+    ],
+    query: {
+      enabled: !!address,
+    },
+  })
+  const { usdtBalance, usdtDecimals } = useMemo(() => {
+    const balance = usdtBalanceData?.[0].result as bigint | undefined
+    const decimals = usdtBalanceData?.[1].result as number | undefined
+    return {
+      usdtBalance: balance,
+      usdtDecimals: decimals,
+    }
+  }, [usdtBalanceData])
+  const pubClient = usePublicClient()
+  const { writeContractAsync } = useWriteContract({
+    mutation: {
+      onError: (error) => {
+        console.log({ error })
+        toast.error("Failed to complete deposit.")
+      },
+    },
+  })
 
   const handleFinalize = async () => {
     setIsSubmitting(true)
     try {
-      // Simulate funding transactions
-      toast.loading("Depositing KITE for gas...", { id: "funding" })
-      await new Promise((resolve) => setTimeout(resolve, 1500))
+      const allowance = (usdtBalanceData?.[2].result as bigint) || 0n
+      const requiredAmount = parseUnits(
+        funding.stableAmount,
+        usdtDecimals || 18
+      )
+      if (allowance < requiredAmount) {
+        const approveHash = await writeContractAsync({
+          abi: erc20Abi,
+          address: CONTRACT_ADDRESSES.ERC20,
+          functionName: "approve",
+          args: [CONTRACT_ADDRESSES.KiteAAWallet, requiredAmount],
+        })
+        await pubClient.waitForTransactionReceipt({ hash: approveHash })
 
-      toast.loading("Depositing KTT for operating capital...", {
-        id: "funding",
-      })
-      await new Promise((resolve) => setTimeout(resolve, 1500))
-
-      toast.success("Agent fully funded and registered!", { id: "funding" })
-      handleNext()
+        await writeContractAsync({
+          abi: KiteAAWalletABI,
+          address: CONTRACT_ADDRESSES.KiteAAWallet,
+          functionName: "deposit",
+          args: [
+            CONTRACT_ADDRESSES.ERC20,
+            parseUnits(funding.stableAmount, usdtDecimals || 18),
+          ],
+        })
+        toast.success("USDT transfer approved!", { id: "approval" })
+      }
     } catch (error) {
       toast.error("Funding failed.", { id: "funding" })
     } finally {
@@ -124,7 +191,7 @@ const AgentFundingSetup = ({
               <Zap size={18} className="text-kite-accent" />
             </div>
             <p className="text-xs text-slate-500">
-              Funds used for transaction fees on the Kite L1.
+              Fund agent to pay transaction fees on Kite.
             </p>
             <div className="space-y-2">
               <input
@@ -139,8 +206,29 @@ const AgentFundingSetup = ({
                 }
               />
               <p className="text-[10px] font-bold tracking-widest text-slate-400 uppercase">
-                Recommended: 0.1 KITE
+                Balance:{" "}
+                {Number(
+                  formatUnits(
+                    balanceData?.value || 0n,
+                    balanceData?.decimals || 18
+                  )
+                ).toFixed(3)}{" "}
+                KITE
               </p>
+            </div>
+
+            <div>
+              <Button
+                variant="outline"
+                onClick={() =>
+                  sendTransaction({
+                    to: agent.agentAddress as `0x${string}`,
+                    value: parseUnits(funding.gasAmount, 18),
+                  })
+                }
+              >
+                Send Now
+              </Button>
             </div>
           </div>
 
@@ -167,7 +255,11 @@ const AgentFundingSetup = ({
                 }
               />
               <p className="text-[10px] font-bold tracking-widest text-slate-400 uppercase">
-                Your Balance: 1,245 USDT
+                Your Balance:{" "}
+                {Number(
+                  formatUnits(usdtBalance || 0n, usdtDecimals || 18)
+                ).toFixed(3)}{" "}
+                USDT
               </p>
             </div>
           </div>
@@ -234,10 +326,12 @@ export const STEPS = [
 export const RegisterAgentFormLayout = () => {
   const { address } = useAccount()
   const [currentStep, setCurrentStep] = React.useState(0)
-  const [sessionKey, setSessionKey] = React.useState<{
-    address: string
-    privateKey: string
-  } | null>(null)
+  const [sessionKey, setSessionKey] = React.useState<
+    | ({
+        address: string
+      } & Partial<AgentSessionCreateModel>)
+    | null
+  >(null)
   const [agent, setAgentInformation] = useState<AgentCreateModel | null>(null)
 
   const { data: isRegistered } = useReadContract({
@@ -432,7 +526,13 @@ export const RegisterAgentFormLayout = () => {
                 <AgentSessionSetupForm
                   handleBack={() => handlePrevious()}
                   sessionKey={sessionKey?.address ?? ""}
-                  onComplete={() => handleNext()}
+                  onComplete={(
+                    agent?: AgentSessionCreateModel & { address: string }
+                  ) => {
+                    setSessionKey(agent || null)
+                    handleNext()
+                  }}
+                  agentId={agent?.agentId}
                 />
               </motion.div>
             </TabPanel>
@@ -451,7 +551,10 @@ export const RegisterAgentFormLayout = () => {
                     toast.success("Agent registration complete!")
                   }
                   rules={{ dailyLimit: "" }}
-                  agent={{ name: "" }}
+                  agent={{
+                    name: agent?.name || "",
+                    agentAddress: agent?.agentAddress || "",
+                  }}
                 />
               </motion.div>
             </TabPanel>

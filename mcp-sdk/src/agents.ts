@@ -1,19 +1,19 @@
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { resolveVar } from "./vars.js";
 
 export interface AgentRules {
-  maxPerCall: string;        // wei
-  maxPerSession: string;     // wei
+  maxPerCall: string; // wei
+  maxPerSession: string; // wei
   allowedProviders: string[];
   blockedProviders: string[];
   requireApprovalAbove: string; // wei — amounts above this trigger interactive approval
 }
 
 export interface BatchConfig {
-  maxDeposit: string;          // wei — max deposit allowed for a single batch session
-  maxDurationSeconds: number;  // auto-settle batch after this many seconds
-  maxCalls: number;            // auto-settle batch after this many calls
+  maxDeposit: string; // wei — max deposit allowed for a single batch session
+  maxDurationSeconds: number; // auto-settle batch after this many seconds
+  maxCalls: number; // auto-settle batch after this many calls
 }
 
 export interface AgentConfig {
@@ -39,8 +39,7 @@ export function loadAgents(filePath?: string): AgentsFile {
   const p = filePath || resolve(process.cwd(), "agents.json");
   if (!existsSync(p)) {
     throw new Error(
-      `agents.json not found at ${p}\n` +
-        `  Run:  npx kite init`
+      `agents.json not found at ${p}\n` + `  Run:  npx kite init`,
     );
   }
   const raw = readFileSync(p, "utf-8");
@@ -55,7 +54,10 @@ export function loadAgents(filePath?: string): AgentsFile {
 }
 
 // Get a specific agent or the default
-export function getAgent(agents: AgentsFile, id?: string): AgentConfig & { id: string } {
+export function getAgent(
+  agents: AgentsFile,
+  id?: string,
+): AgentConfig & { id: string } {
   const agentId = id || agents.defaultAgent;
   const agent = agents.agents[agentId];
   if (!agent) {
