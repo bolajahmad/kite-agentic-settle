@@ -1,0 +1,59 @@
+specVersion: 1.3.0
+indexerHints:
+  prune: auto
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: KiteAAWallet
+    network: sepolia
+    source:
+      address: "0xDbe183022eCCA66cc074e66f571Eee5FFa728BeD"
+      abi: KiteAAWallet
+      startBlock: 20846120
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - AgentLinked
+        - AgentRegistryUpdated
+        - FundsDeposited
+        - FundsWithdrawn
+        - OwnershipTransferred
+        - PaymentExecuted
+        - ProviderBlocked
+        - ProviderUnblocked
+        - SessionBlockedProvidersUpdated
+        - SessionKeyAdded
+        - SessionKeyRevoked
+        - UserRegistered
+      abis:
+        - name: KiteAAWallet
+          file: ./abis/KiteAAWallet.json
+      eventHandlers:
+        - event: AgentLinked(indexed address,indexed bytes32)
+          handler: handleAgentLinked
+        - event: AgentRegistryUpdated(indexed address)
+          handler: handleAgentRegistryUpdated
+        - event: FundsDeposited(indexed address,indexed address,uint256)
+          handler: handleFundsDeposited
+        - event: FundsWithdrawn(indexed address,indexed address,uint256)
+          handler: handleFundsWithdrawn
+        - event: OwnershipTransferred(indexed address,indexed address)
+          handler: handleOwnershipTransferred
+        - event: PaymentExecuted(indexed address,indexed bytes32,indexed address,address,uint256)
+          handler: handlePaymentExecuted
+        - event: ProviderBlocked(indexed address,indexed address)
+          handler: handleProviderBlocked
+        - event: ProviderUnblocked(indexed address,indexed address)
+          handler: handleProviderUnblocked
+        - event: SessionBlockedProvidersUpdated(indexed address,address[])
+          handler: handleSessionBlockedProvidersUpdated
+        - event: SessionKeyAdded(indexed address,indexed address,indexed bytes32,uint256,bytes32,uint256,uint256,uint256,bytes)
+          handler: handleSessionKeyAdded
+        - event: SessionKeyRevoked(indexed address,indexed bytes32)
+          handler: handleSessionKeyRevoked
+        - event: UserRegistered(indexed address)
+          handler: handleUserRegistered
+      file: ./src/kite-aa-wallet.ts

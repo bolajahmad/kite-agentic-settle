@@ -1,0 +1,117 @@
+type AgentLinked @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  agentId: Bytes! # bytes32
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type AgentRegistryUpdated @entity(immutable: true) {
+  id: Bytes!
+  registry: Bytes! # address
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type FundsDeposited @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  token: Bytes! # address
+  amount: BigInt! # uint256
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type FundsWithdrawn @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  token: Bytes! # address
+  amount: BigInt! # uint256
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type OwnershipTransferred @entity(immutable: true) {
+  id: Bytes!
+  previousOwner: Bytes! # address
+  newOwner: Bytes! # address
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type PaymentExecuted @entity(immutable: true) {
+  id: Bytes!
+  sessionKey: Bytes! # address
+  agentId: Bytes! # bytes32
+  recipient: Bytes! # address
+  token: Bytes! # address
+  amount: BigInt! # uint256
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type ProviderBlocked @entity(immutable: true) {
+  id: Bytes!
+  sessionKey: Bytes! # address
+  provider: Bytes! # address
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type ProviderUnblocked @entity(immutable: true) {
+  id: Bytes!
+  sessionKey: Bytes! # address
+  provider: Bytes! # address
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type SessionBlockedProvidersUpdated @entity(immutable: true) {
+  id: Bytes!
+  sessionKey: Bytes! # address
+  blockedProviders: [Bytes!]! # address[]
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type SessionKeyAdded @entity(immutable: true) {
+  id: Bytes!
+  sessionKey: Bytes! # address
+  user: Bytes! # address
+  agentId: Bytes! # bytes32
+  sessionIndex: BigInt! # uint256
+  metadataHash: Bytes! # bytes32
+  valueLimit: BigInt! # uint256
+  dailyLimit: BigInt! # uint256
+  validUntil: BigInt! # uint256
+  metadata: Bytes! # bytes
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type SessionKeyRevoked @entity(immutable: true) {
+  id: Bytes!
+  sessionKey: Bytes! # address
+  agentId: Bytes! # bytes32
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type UserRegistered @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}

@@ -1,0 +1,8 @@
+{
+  "sepolia": {
+    "KiteAAWallet": {
+      "address": "0xDbe183022eCCA66cc074e66f571Eee5FFa728BeD",
+      "startBlock": 20846120
+    }
+  }
+}
