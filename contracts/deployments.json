@@ -1,0 +1,11 @@
+{
+  "kiteTestnet": {
+    "AgentRegistry": "0x2A904dF5979Fbc3B65F0F298C0a3B4e06FF0881d",
+    "KiteAAWallet": "0xDbe183022eCCA66cc074e66f571Eee5FFa728BeD",
+    "AnchorMerkle": "0x9df3c50EFfE57A15347e5667a994b0fA1e155b37",
+    "PaymentChannel": "0x210a99B86D0a95C77Dcf995dAC3821af718399C6"
+  },
+  "usdt": {
+    "address": "0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489"
+  }
+}

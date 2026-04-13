@@ -48,6 +48,25 @@ export const KiteAAWalletABI = [
       {
         indexed: true,
         internalType: "address",
+        name: "user",
+        type: "address",
+      },
+      {
+        indexed: true,
+        internalType: "bytes32",
+        name: "agentId",
+        type: "bytes32",
+      },
+    ],
+    name: "AgentLinked",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "address",
         name: "registry",
         type: "address",
       },
@@ -173,6 +192,63 @@ export const KiteAAWalletABI = [
       {
         indexed: true,
         internalType: "address",
+        name: "provider",
+        type: "address",
+      },
+    ],
+    name: "ProviderBlocked",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "address",
+        name: "sessionKey",
+        type: "address",
+      },
+      {
+        indexed: true,
+        internalType: "address",
+        name: "provider",
+        type: "address",
+      },
+    ],
+    name: "ProviderUnblocked",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "address",
+        name: "sessionKey",
+        type: "address",
+      },
+      {
+        indexed: false,
+        internalType: "address[]",
+        name: "blockedProviders",
+        type: "address[]",
+      },
+    ],
+    name: "SessionBlockedProvidersUpdated",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "address",
+        name: "sessionKey",
+        type: "address",
+      },
+      {
+        indexed: true,
+        internalType: "address",
         name: "user",
         type: "address",
       },
@@ -261,6 +337,11 @@ export const KiteAAWalletABI = [
         name: "agentId",
         type: "bytes32",
       },
+      {
+        internalType: "address",
+        name: "owner",
+        type: "address",
+      },
     ],
     name: "addAgentId",
     outputs: [],
@@ -301,7 +382,7 @@ export const KiteAAWalletABI = [
       },
       {
         internalType: "address[]",
-        name: "allowedRecipients",
+        name: "blockedProviders",
         type: "address[]",
       },
       {
@@ -350,6 +431,24 @@ export const KiteAAWalletABI = [
       },
     ],
     stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "address",
+        name: "sessionKeyAddress",
+        type: "address",
+      },
+      {
+        internalType: "address",
+        name: "provider",
+        type: "address",
+      },
+    ],
+    name: "blockProvider",
+    outputs: [],
+    stateMutability: "nonpayable",
     type: "function",
   },
   {
@@ -473,7 +572,7 @@ export const KiteAAWalletABI = [
         type: "address",
       },
     ],
-    name: "getSessionAllowedRecipients",
+    name: "getSessionBlockedProviders",
     outputs: [
       {
         internalType: "address[]",
@@ -746,6 +845,42 @@ export const KiteAAWalletABI = [
     inputs: [
       {
         internalType: "address",
+        name: "sessionKeyAddress",
+        type: "address",
+      },
+      {
+        internalType: "address",
+        name: "provider",
+        type: "address",
+      },
+    ],
+    name: "unblockProvider",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "address",
+        name: "sessionKeyAddress",
+        type: "address",
+      },
+      {
+        internalType: "address[]",
+        name: "newBlockedProviders",
+        type: "address[]",
+      },
+    ],
+    name: "updateBlockedProviders",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "address",
         name: "",
         type: "address",
       },
@@ -803,4 +938,4 @@ export const KiteAAWalletABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
-] as const
+] as const;

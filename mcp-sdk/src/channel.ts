@@ -42,6 +42,7 @@ export class ChannelManager {
       token,
       mode,
       config.deposit,
+      config.maxSpend,
       config.maxDuration,
       config.ratePerCall
     );
@@ -117,12 +118,23 @@ export class ChannelManager {
     return { valid: true };
   }
 
-  // Close channel with the last receipt
-  async closeChannel(channelId: `0x${string}`): Promise<string> {
+  // Initiate settlement with the last receipt (starts challenge window)
+  async initiateSettlement(
+    channelId: `0x${string}`,
+    merkleRoot?: `0x${string}`
+  ): Promise<string> {
     const existing = this.receipts.get(channelId) || [];
 
     if (existing.length === 0) {
-      return await this.contractService.closeChannelEmpty(channelId);
+      // No receipts — initiate with zero claim
+      return await this.contractService.initiateSettlement(
+        channelId,
+        0,
+        0n,
+        0,
+        "0x" as `0x${string}`,
+        merkleRoot
+      );
     }
 
     const lastReceipt = existing[existing.length - 1];
@@ -130,17 +142,53 @@ export class ChannelManager {
       throw new Error("Last receipt has no signature");
     }
 
-    return await this.contractService.closeChannel(
+    return await this.contractService.initiateSettlement(
       channelId,
       lastReceipt.nonce,
       lastReceipt.cumulativeCost,
       lastReceipt.timestamp,
-      lastReceipt.signature
+      lastReceipt.signature,
+      merkleRoot
     );
+  }
+
+  // Submit a higher receipt during the challenge window (permissionless)
+  async submitReceipt(
+    channelId: `0x${string}`,
+    receipt: Receipt
+  ): Promise<string> {
+    if (!receipt.signature) {
+      throw new Error("Receipt has no signature");
+    }
+
+    return await this.contractService.submitReceipt(
+      channelId,
+      receipt.nonce,
+      receipt.cumulativeCost,
+      receipt.timestamp,
+      receipt.signature
+    );
+  }
+
+  // Finalize settlement after challenge window closes
+  async finalize(
+    channelId: `0x${string}`,
+    merkleRoot?: `0x${string}`
+  ): Promise<string> {
+    return await this.contractService.finalize(channelId, merkleRoot);
+  }
+
+  // Force close an expired channel (opens settlement window)
+  async forceCloseExpired(channelId: `0x${string}`): Promise<string> {
+    return await this.contractService.forceCloseExpired(channelId);
   }
 
   async getChannel(channelId: `0x${string}`): Promise<ChannelState> {
     return await this.contractService.getChannel(channelId);
+  }
+
+  async getSettlementState(channelId: `0x${string}`) {
+    return await this.contractService.getSettlementState(channelId);
   }
 
   getReceipts(channelId: `0x${string}`): Receipt[] {

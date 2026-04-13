@@ -147,13 +147,13 @@ export const AgentSessionSetupForm = ({
       valueLimit: "",
       dailyLimit: "",
       validUntil: "", // seconds
-      allowedRecipients: [] as string[],
+      blockedProviders: [] as string[],
       restrictedRecipients: [] as string[],
     },
   })
   const { append, remove } = useFieldArray({
     control: form.control,
-    name: "allowedRecipients" as never,
+    name: "blockedProviders" as never,
   })
 
   const pubClient = usePublicClient()
@@ -184,7 +184,7 @@ export const AgentSessionSetupForm = ({
         parseUnits(`${data.valueLimit}`, 18),
         parseUnits(`${data.dailyLimit}`, 18),
         BigInt(new Date(Number(data.validUntil)).getTime() / 1000),
-        data.allowedRecipients as `0x${string}`[],
+        data.blockedProviders as `0x${string}`[],
       ],
     })
     await pubClient?.waitForTransactionReceipt({ hash })
@@ -290,18 +290,18 @@ export const AgentSessionSetupForm = ({
           <div className="space-y-4">
             <Controller
               control={form.control}
-              name="allowedRecipients"
+              name="blockedProviders"
               render={({ field, fieldState }) => {
                 return (
                   <Field data-invalid={fieldState.invalid}>
-                    <FieldLabel htmlFor="form-rhf-input-allowed">
+                    <FieldLabel htmlFor="form-rhf-input-blocked">
                       {" "}
-                      Allowed Recipients (Whitelist)
+                      Blocked Providers (Blacklist)
                     </FieldLabel>
 
                     <div className="flex gap-3">
                       <Input
-                        id="form-rhf-input-allowed"
+                        id="form-rhf-input-blocked"
                         placeholder="0x..."
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && e.currentTarget.value) {

@@ -37,14 +37,14 @@ describe("KiteAAWallet", function () {
     const tx = await registry.connect(owner).registerAgent(
       sessionKey.address, // using sessionKey signer as the agentAddress for test convenience
       await wallet.getAddress(),
+      0, // agentIndex
       metadata
     );
     const receipt = await tx.wait();
     const event = receipt.logs.find(log => registry.interface.parseLog(log)?.name === "AgentRegistered");
     agentId = registry.interface.parseLog(event).args.agentId;
 
-    // Track agentId in the wallet
-    await wallet.connect(owner).addAgentId(agentId);
+    // agentId is now auto-linked to wallet by the AgentRegistry
 
     // Deposit tokens: owner approves and deposits into their wallet balance
     await token.connect(owner).approve(await wallet.getAddress(), ethers.parseEther("10000"));
@@ -80,7 +80,7 @@ describe("KiteAAWallet", function () {
       // Use a fresh address as the session key
       const newSessionKey = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        newSessionKey.address, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, [recipient.address]
+        newSessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
       );
 
       const rule = await wallet.getSessionRule(newSessionKey.address);
@@ -100,7 +100,7 @@ describe("KiteAAWallet", function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       await expect(
         wallet.connect(other).addSessionKeyRule(
-          sessionKey.address, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, []
+          sessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
         )
       ).to.be.revertedWith("Not registered");
     });
@@ -111,7 +111,7 @@ describe("KiteAAWallet", function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       await expect(
         wallet.connect(other).addSessionKeyRule(
-          sessionKey.address, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, []
+          sessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
         )
       ).to.be.revertedWith("Agent not owned by caller");
     });
@@ -120,7 +120,7 @@ describe("KiteAAWallet", function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       const newSessionKey = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        newSessionKey.address, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, []
+        newSessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
       );
       await wallet.connect(owner).revokeSessionKey(newSessionKey.address);
 
@@ -136,7 +136,7 @@ describe("KiteAAWallet", function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       const newSessionKey = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        newSessionKey.address, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, []
+        newSessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
       );
 
       await wallet.connect(other).register();
@@ -150,10 +150,10 @@ describe("KiteAAWallet", function () {
       const sk1 = ethers.Wallet.createRandom();
       const sk2 = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        sk1.address, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, []
+        sk1.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
       );
       await wallet.connect(owner).addSessionKeyRule(
-        sk2.address, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, []
+        sk2.address, agentId, 1, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
       );
 
       await wallet.connect(owner).revokeAllAgentSessions(agentId);
@@ -171,14 +171,14 @@ describe("KiteAAWallet", function () {
     it("should reject zero address session key", async function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       await expect(
-        wallet.connect(owner).addSessionKeyRule(ethers.ZeroAddress, agentId, VALUE_LIMIT, DAILY_LIMIT, expiry, [])
+        wallet.connect(owner).addSessionKeyRule(ethers.ZeroAddress, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x")
       ).to.be.revertedWith("Invalid session key");
     });
 
     it("should reject expired session key rule", async function () {
       const pastExpiry = Math.floor(Date.now() / 1000) - 100;
       await expect(
-        wallet.connect(owner).addSessionKeyRule(sessionKey.address, agentId, VALUE_LIMIT, DAILY_LIMIT, pastExpiry, [])
+        wallet.connect(owner).addSessionKeyRule(sessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, pastExpiry, [], "0x")
       ).to.be.revertedWith("Expiry must be in future");
     });
   });
@@ -193,15 +193,16 @@ describe("KiteAAWallet", function () {
       // We need a fresh agentId that uses a different agent address
       const agentAddr = ethers.Wallet.createRandom();
       const tx = await registry.connect(owner).registerAgent(
-        agentAddr.address, await wallet.getAddress(), metadata
+        agentAddr.address, await wallet.getAddress(), 1, metadata
       );
       const receipt = await tx.wait();
       const event = receipt.logs.find(log => registry.interface.parseLog(log)?.name === "AgentRegistered");
       const payAgentId = registry.interface.parseLog(event).args.agentId;
-      await wallet.connect(owner).addAgentId(payAgentId);
+
+      // agentId is auto-linked by registry
 
       await wallet.connect(owner).addSessionKeyRule(
-        paySessionKey.address, payAgentId, VALUE_LIMIT, DAILY_LIMIT, expiry, [recipient.address]
+        paySessionKey.address, payAgentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [other.address], "0x"
       );
     });
 
@@ -246,13 +247,13 @@ describe("KiteAAWallet", function () {
       ).to.be.revertedWith("Exceeds per-tx limit");
     });
 
-    it("should reject payment to non-allowed recipient", async function () {
+    it("should reject payment to blocked provider", async function () {
       const amount = ethers.parseEther("5");
       await expect(
         wallet.connect(paySessionKey).executePayment(
           paySessionKey.address, other.address, await token.getAddress(), amount
         )
-      ).to.be.revertedWith("Recipient not in allowlist");
+      ).to.be.revertedWith("Recipient is blocked");
     });
 
     it("should enforce daily limit across multiple payments", async function () {

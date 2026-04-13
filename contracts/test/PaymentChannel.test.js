@@ -6,7 +6,9 @@ describe("PaymentChannel", function () {
   let channel, token, consumer, provider, other;
   const RATE_PER_CALL = ethers.parseEther("0.001"); // 0.001 USDT per call
   const DEPOSIT = ethers.parseEther("1");            // 1 USDT deposit
+  const MAX_SPEND = ethers.parseEther("5");           // 5 USDT max spend
   const MAX_DURATION = 600;                          // 10 minutes
+  const CHALLENGE_WINDOW = 3600;                     // 1 hour
 
   beforeEach(async function () {
     [consumer, provider, other] = await ethers.getSigners();
@@ -34,30 +36,43 @@ describe("PaymentChannel", function () {
     return provider.signMessage(ethers.getBytes(receiptHash));
   }
 
+  // Helper: open + activate a prepaid channel
+  async function openAndActivatePrepaid() {
+    const tokenAddr = await token.getAddress();
+    const tx = await channel.connect(consumer).openChannel(
+      provider.address, tokenAddr, 0, DEPOSIT, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
+    );
+    const receipt = await tx.wait();
+    const event = receipt.logs.find(
+      l => l.fragment && l.fragment.name === "ChannelOpened"
+    );
+    const channelId = event.args.channelId;
+    await channel.connect(provider).activateChannel(channelId);
+    return channelId;
+  }
+
   describe("Opening Channels", function () {
-    it("should open a prepaid channel with deposit", async function () {
+    it("should open a prepaid channel with deposit and maxSpend", async function () {
       const tokenAddr = await token.getAddress();
       const balanceBefore = await token.balanceOf(consumer.address);
 
       const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
+        provider.address, tokenAddr, 0, DEPOSIT, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
       );
-      const receipt = await tx.wait();
+      await tx.wait();
 
       const balanceAfter = await token.balanceOf(consumer.address);
       expect(balanceBefore - balanceAfter).to.equal(DEPOSIT);
 
-      // Verify locked funds
       const locked = await channel.getLockedFunds(consumer.address, tokenAddr);
       expect(locked).to.equal(DEPOSIT);
-
       expect(await channel.totalChannels()).to.equal(1);
     });
 
     it("should open a postpaid channel with zero deposit", async function () {
       const tokenAddr = await token.getAddress();
       await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 1, 0, MAX_DURATION, RATE_PER_CALL
+        provider.address, tokenAddr, 1, 0, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
       );
       expect(await channel.totalChannels()).to.equal(1);
     });
@@ -66,7 +81,7 @@ describe("PaymentChannel", function () {
       const tokenAddr = await token.getAddress();
       await expect(
         channel.connect(consumer).openChannel(
-          provider.address, tokenAddr, 0, 0, MAX_DURATION, RATE_PER_CALL
+          provider.address, tokenAddr, 0, 0, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
         )
       ).to.be.revertedWith("Prepaid requires deposit");
     });
@@ -75,7 +90,7 @@ describe("PaymentChannel", function () {
       const tokenAddr = await token.getAddress();
       await expect(
         channel.connect(consumer).openChannel(
-          provider.address, tokenAddr, 1, DEPOSIT, MAX_DURATION, RATE_PER_CALL
+          provider.address, tokenAddr, 1, DEPOSIT, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
         )
       ).to.be.revertedWith("Postpaid must have 0 deposit");
     });
@@ -84,7 +99,7 @@ describe("PaymentChannel", function () {
       const tokenAddr = await token.getAddress();
       await expect(
         channel.connect(consumer).openChannel(
-          consumer.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
+          consumer.address, tokenAddr, 0, DEPOSIT, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
         )
       ).to.be.revertedWith("Invalid provider");
     });
@@ -93,7 +108,7 @@ describe("PaymentChannel", function () {
       const tokenAddr = await token.getAddress();
       await expect(
         channel.connect(consumer).openChannel(
-          provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, 0
+          provider.address, tokenAddr, 0, DEPOSIT, MAX_SPEND, MAX_DURATION, 0
         )
       ).to.be.revertedWith("Rate must be > 0");
     });
@@ -102,9 +117,18 @@ describe("PaymentChannel", function () {
       const tokenAddr = await token.getAddress();
       await expect(
         channel.connect(consumer).openChannel(
-          provider.address, tokenAddr, 0, DEPOSIT, 0, RATE_PER_CALL
+          provider.address, tokenAddr, 0, DEPOSIT, MAX_SPEND, 0, RATE_PER_CALL
         )
       ).to.be.revertedWith("Invalid duration");
+    });
+
+    it("should reject zero max spend", async function () {
+      const tokenAddr = await token.getAddress();
+      await expect(
+        channel.connect(consumer).openChannel(
+          provider.address, tokenAddr, 0, DEPOSIT, 0, MAX_DURATION, RATE_PER_CALL
+        )
+      ).to.be.revertedWith("Max spend must be > 0");
     });
   });
 
@@ -114,7 +138,7 @@ describe("PaymentChannel", function () {
     beforeEach(async function () {
       const tokenAddr = await token.getAddress();
       const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
+        provider.address, tokenAddr, 0, DEPOSIT, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
       );
       const receipt = await tx.wait();
       const event = receipt.logs.find(
@@ -142,140 +166,279 @@ describe("PaymentChannel", function () {
     });
   });
 
-  describe("Closing with Signed Receipt (Prepaid)", function () {
+  describe("Settlement Phase — Initiate", function () {
     let channelId;
 
     beforeEach(async function () {
-      const tokenAddr = await token.getAddress();
-      const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
-      );
-      const receipt = await tx.wait();
-      const event = receipt.logs.find(
-        l => l.fragment && l.fragment.name === "ChannelOpened"
-      );
-      channelId = event.args.channelId;
-      await channel.connect(provider).activateChannel(channelId);
+      channelId = await openAndActivatePrepaid();
     });
 
-    it("should settle and refund remainder on close", async function () {
+    it("should initiate settlement with a receipt", async function () {
       const numCalls = 100;
-      const cumulativeCost = RATE_PER_CALL * BigInt(numCalls); // 0.1 USDT
+      const cost = RATE_PER_CALL * BigInt(numCalls);
       const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
 
-      const sig = await signReceipt(channelId, numCalls, cumulativeCost, ts);
-
-      const providerBefore = await token.balanceOf(provider.address);
-      const consumerBefore = await token.balanceOf(consumer.address);
-
-      await channel.connect(consumer).closeChannel(
-        channelId, numCalls, cumulativeCost, ts, sig
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes("test-root"));
+      await channel.connect(consumer).initiateSettlement(
+        channelId, numCalls, cost, ts, sig, merkleRoot
       );
 
-      const providerAfter = await token.balanceOf(provider.address);
-      const consumerAfter = await token.balanceOf(consumer.address);
-
-      // Provider gets 0.1 USDT
-      expect(providerAfter - providerBefore).to.equal(cumulativeCost);
-      // Consumer gets 0.9 USDT refund
-      expect(consumerAfter - consumerBefore).to.equal(DEPOSIT - cumulativeCost);
-
       const ch = await channel.getChannel(channelId);
-      expect(ch.status).to.equal(3); // Closed
-      expect(ch.settledAmount).to.equal(cumulativeCost);
+      expect(ch.status).to.equal(2); // SettlementPending
+      expect(ch.highestClaimedCost).to.equal(cost);
+      expect(ch.highestSequenceNumber).to.equal(numCalls);
     });
 
-    it("should cap payment at deposit for prepaid", async function () {
-      // Try to claim more than deposit
-      const numCalls = 2000;
-      const cumulativeCost = RATE_PER_CALL * BigInt(numCalls); // 2 USDT > 1 USDT deposit
-      const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      const sig = await signReceipt(channelId, numCalls, cumulativeCost, ts);
-
-      const providerBefore = await token.balanceOf(provider.address);
-
-      await channel.connect(consumer).closeChannel(
-        channelId, numCalls, cumulativeCost, ts, sig
+    it("should initiate settlement with zero claim (no calls)", async function () {
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
       );
 
-      const providerAfter = await token.balanceOf(provider.address);
-      // Provider gets at most the deposit
-      expect(providerAfter - providerBefore).to.equal(DEPOSIT);
-
       const ch = await channel.getChannel(channelId);
-      expect(ch.settledAmount).to.equal(DEPOSIT);
+      expect(ch.status).to.equal(2); // SettlementPending
+      expect(ch.highestClaimedCost).to.equal(0);
     });
 
-    it("should reject invalid provider signature", async function () {
+    it("should reject settlement from non-party", async function () {
+      await expect(
+        channel.connect(other).initiateSettlement(
+          channelId, 0, 0, 0, "0x", ethers.ZeroHash
+        )
+      ).to.be.revertedWith("Not a channel party");
+    });
+
+    it("should reject settlement with invalid signature", async function () {
       const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      // Consumer signs instead of provider
       const receiptHash = await channel.getReceiptHash(channelId, 10, RATE_PER_CALL * 10n, ts);
       const badSig = await consumer.signMessage(ethers.getBytes(receiptHash));
 
       await expect(
-        channel.connect(consumer).closeChannel(
-          channelId, 10, RATE_PER_CALL * 10n, ts, badSig
+        channel.connect(consumer).initiateSettlement(
+          channelId, 10, RATE_PER_CALL * 10n, ts, badSig, ethers.ZeroHash
         )
       ).to.be.revertedWith("Invalid provider signature");
     });
 
-    it("should reject inflated cumulative cost", async function () {
+    it("should reject cost exceeding max spend", async function () {
+      const numCalls = 10000;
+      const inflatedCost = MAX_SPEND + 1n;
       const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      // 10 calls but claims 20 calls worth
+      const sig = await signReceipt(channelId, numCalls, inflatedCost, ts);
+
+      await expect(
+        channel.connect(consumer).initiateSettlement(
+          channelId, numCalls, inflatedCost, ts, sig, ethers.ZeroHash
+        )
+      ).to.be.revertedWith("Exceeds max spend");
+    });
+
+    it("should reject cost exceeding rate * calls", async function () {
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
       const inflatedCost = RATE_PER_CALL * 20n;
       const sig = await signReceipt(channelId, 10, inflatedCost, ts);
 
       await expect(
-        channel.connect(consumer).closeChannel(
-          channelId, 10, inflatedCost, ts, sig
+        channel.connect(consumer).initiateSettlement(
+          channelId, 10, inflatedCost, ts, sig, ethers.ZeroHash
         )
-      ).to.be.revertedWith("Cumulative cost exceeds expected total");
-    });
-
-    it("should reject close from non-party", async function () {
-      const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      const sig = await signReceipt(channelId, 1, RATE_PER_CALL, ts);
-
-      await expect(
-        channel.connect(other).closeChannel(
-          channelId, 1, RATE_PER_CALL, ts, sig
-        )
-      ).to.be.revertedWith("Not a channel party");
+      ).to.be.revertedWith("Cost exceeds rate * calls");
     });
   });
 
-  describe("Empty Close", function () {
+  describe("Settlement Phase — Submit Receipt (Challenge)", function () {
     let channelId;
 
     beforeEach(async function () {
-      const tokenAddr = await token.getAddress();
-      const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
+      channelId = await openAndActivatePrepaid();
+      // Consumer initiates with zero claim
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
       );
-      const receipt = await tx.wait();
-      const event = receipt.logs.find(
-        l => l.fragment && l.fragment.name === "ChannelOpened"
-      );
-      channelId = event.args.channelId;
-      await channel.connect(provider).activateChannel(channelId);
     });
 
-    it("should return full deposit on empty close", async function () {
+    it("should accept a higher receipt from provider", async function () {
+      const numCalls = 50;
+      const cost = RATE_PER_CALL * BigInt(numCalls);
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
+
+      await channel.connect(provider).submitReceipt(channelId, numCalls, cost, ts, sig);
+
+      const ch = await channel.getChannel(channelId);
+      expect(ch.highestClaimedCost).to.equal(cost);
+      expect(ch.highestSequenceNumber).to.equal(numCalls);
+    });
+
+    it("should accept a higher receipt from third party (permissionless)", async function () {
+      const numCalls = 50;
+      const cost = RATE_PER_CALL * BigInt(numCalls);
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
+
+      // Third party submits — permissionless
+      await channel.connect(other).submitReceipt(channelId, numCalls, cost, ts, sig);
+
+      const ch = await channel.getChannel(channelId);
+      expect(ch.highestClaimedCost).to.equal(cost);
+    });
+
+    it("should accept an even higher receipt replacing a previous one", async function () {
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+
+      // First receipt: 50 calls
+      const sig1 = await signReceipt(channelId, 50, RATE_PER_CALL * 50n, ts);
+      await channel.connect(provider).submitReceipt(channelId, 50, RATE_PER_CALL * 50n, ts, sig1);
+
+      // Higher receipt: 100 calls
+      const sig2 = await signReceipt(channelId, 100, RATE_PER_CALL * 100n, ts);
+      await channel.connect(provider).submitReceipt(channelId, 100, RATE_PER_CALL * 100n, ts, sig2);
+
+      const ch = await channel.getChannel(channelId);
+      expect(ch.highestClaimedCost).to.equal(RATE_PER_CALL * 100n);
+    });
+
+    it("should reject a receipt not higher than current claim", async function () {
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+
+      // Submit 50 calls
+      const sig1 = await signReceipt(channelId, 50, RATE_PER_CALL * 50n, ts);
+      await channel.connect(provider).submitReceipt(channelId, 50, RATE_PER_CALL * 50n, ts, sig1);
+
+      // Try 30 calls (lower)
+      const sig2 = await signReceipt(channelId, 30, RATE_PER_CALL * 30n, ts);
+      await expect(
+        channel.connect(provider).submitReceipt(channelId, 30, RATE_PER_CALL * 30n, ts, sig2)
+      ).to.be.revertedWith("Not higher than current claim");
+    });
+
+    it("should reject receipt after challenge window closes", async function () {
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, 10, RATE_PER_CALL * 10n, ts);
+
+      await expect(
+        channel.connect(provider).submitReceipt(channelId, 10, RATE_PER_CALL * 10n, ts, sig)
+      ).to.be.revertedWith("Challenge window closed");
+    });
+  });
+
+  describe("Settlement Phase — Finalize", function () {
+    let channelId;
+
+    beforeEach(async function () {
+      channelId = await openAndActivatePrepaid();
+    });
+
+    it("should finalize with receipt — pay provider, refund consumer", async function () {
+      const numCalls = 100;
+      const cost = RATE_PER_CALL * BigInt(numCalls); // 0.1 USDT
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
+
+      // Initiate with receipt
+      await channel.connect(consumer).initiateSettlement(
+        channelId, numCalls, cost, ts, sig, ethers.ZeroHash
+      );
+
+      // Wait for challenge window to close
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      const providerBefore = await token.balanceOf(provider.address);
       const consumerBefore = await token.balanceOf(consumer.address);
-      await channel.connect(consumer).closeChannelEmpty(channelId);
+
+      await channel.connect(consumer).finalize(channelId, ethers.ZeroHash);
+
+      const providerAfter = await token.balanceOf(provider.address);
       const consumerAfter = await token.balanceOf(consumer.address);
 
-      expect(consumerAfter - consumerBefore).to.equal(DEPOSIT);
+      expect(providerAfter - providerBefore).to.equal(cost);
+      expect(consumerAfter - consumerBefore).to.equal(DEPOSIT - cost);
 
       const ch = await channel.getChannel(channelId);
       expect(ch.status).to.equal(3); // Closed
-      expect(ch.settledAmount).to.equal(0);
+      expect(ch.settledAmount).to.equal(cost);
     });
 
-    it("should reject empty close from provider", async function () {
+    it("should finalize with zero claim — full refund", async function () {
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+      );
+
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      const consumerBefore = await token.balanceOf(consumer.address);
+      await channel.connect(consumer).finalize(channelId, ethers.ZeroHash);
+      const consumerAfter = await token.balanceOf(consumer.address);
+
+      expect(consumerAfter - consumerBefore).to.equal(DEPOSIT);
+    });
+
+    it("should cap payment at deposit for prepaid", async function () {
+      // maxSpend > deposit, so claim up to maxSpend
+      const numCalls = 2000;
+      const cost = RATE_PER_CALL * BigInt(numCalls); // 2 USDT > 1 USDT deposit
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
+
+      await channel.connect(consumer).initiateSettlement(
+        channelId, numCalls, cost, ts, sig, ethers.ZeroHash
+      );
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      const providerBefore = await token.balanceOf(provider.address);
+      await channel.connect(consumer).finalize(channelId, ethers.ZeroHash);
+      const providerAfter = await token.balanceOf(provider.address);
+
+      // Capped at deposit
+      expect(providerAfter - providerBefore).to.equal(DEPOSIT);
+    });
+
+    it("should allow anyone to finalize (permissionless)", async function () {
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+      );
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      // Third party finalizes
+      await channel.connect(other).finalize(channelId, ethers.ZeroHash);
+
+      const ch = await channel.getChannel(channelId);
+      expect(ch.status).to.equal(3); // Closed
+    });
+
+    it("should reject finalize before challenge window closes", async function () {
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+      );
+
       await expect(
-        channel.connect(provider).closeChannelEmpty(channelId)
-      ).to.be.revertedWith("Only consumer");
+        channel.connect(consumer).finalize(channelId, ethers.ZeroHash)
+      ).to.be.revertedWith("Challenge window still open");
+    });
+
+    it("should finalize with challenge-updated amount", async function () {
+      // Consumer initiates with zero
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+      );
+
+      // Provider challenges with actual receipt
+      const numCalls = 200;
+      const cost = RATE_PER_CALL * BigInt(numCalls);
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
+      await channel.connect(provider).submitReceipt(channelId, numCalls, cost, ts, sig);
+
+      // Finalize after window
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      const providerBefore = await token.balanceOf(provider.address);
+      await channel.connect(other).finalize(channelId, ethers.ZeroHash);
+      const providerAfter = await token.balanceOf(provider.address);
+
+      expect(providerAfter - providerBefore).to.equal(cost);
     });
   });
 
@@ -285,7 +448,7 @@ describe("PaymentChannel", function () {
     beforeEach(async function () {
       const tokenAddr = await token.getAddress();
       const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 1, 0, MAX_DURATION, RATE_PER_CALL
+        provider.address, tokenAddr, 1, 0, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
       );
       const receipt = await tx.wait();
       const event = receipt.logs.find(
@@ -295,21 +458,24 @@ describe("PaymentChannel", function () {
       await channel.connect(provider).activateChannel(channelId);
     });
 
-    it("should pull payment from consumer on close", async function () {
+    it("should pull payment from consumer on finalize", async function () {
       const numCalls = 50;
-      const cumulativeCost = RATE_PER_CALL * BigInt(numCalls);
+      const cost = RATE_PER_CALL * BigInt(numCalls);
       const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      const sig = await signReceipt(channelId, numCalls, cumulativeCost, ts);
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
+
+      await channel.connect(consumer).initiateSettlement(
+        channelId, numCalls, cost, ts, sig, ethers.ZeroHash
+      );
+      await time.increase(CHALLENGE_WINDOW + 1);
 
       const providerBefore = await token.balanceOf(provider.address);
       const consumerBefore = await token.balanceOf(consumer.address);
 
-      await channel.connect(consumer).closeChannel(
-        channelId, numCalls, cumulativeCost, ts, sig
-      );
+      await channel.connect(consumer).finalize(channelId, ethers.ZeroHash);
 
-      expect(await token.balanceOf(provider.address) - providerBefore).to.equal(cumulativeCost);
-      expect(consumerBefore - await token.balanceOf(consumer.address)).to.equal(cumulativeCost);
+      expect(await token.balanceOf(provider.address) - providerBefore).to.equal(cost);
+      expect(consumerBefore - await token.balanceOf(consumer.address)).to.equal(cost);
     });
   });
 
@@ -317,24 +483,47 @@ describe("PaymentChannel", function () {
     let channelId;
 
     beforeEach(async function () {
-      const tokenAddr = await token.getAddress();
-      const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
-      );
-      const receipt = await tx.wait();
-      const event = receipt.logs.find(
-        l => l.fragment && l.fragment.name === "ChannelOpened"
-      );
-      channelId = event.args.channelId;
-      await channel.connect(provider).activateChannel(channelId);
+      channelId = await openAndActivatePrepaid();
     });
 
-    it("should force-close after expiry + grace, refunding consumer", async function () {
-      // Fast forward past expiry + grace
+    it("should force-close (initiate settlement) after expiry + grace", async function () {
       await time.increase(MAX_DURATION + 300 + 1);
 
-      const consumerBefore = await token.balanceOf(consumer.address);
       await channel.connect(other).forceCloseExpired(channelId);
+
+      const ch = await channel.getChannel(channelId);
+      expect(ch.status).to.equal(2); // SettlementPending — challenge window open
+    });
+
+    it("should allow provider to submit receipt during force-close challenge", async function () {
+      await time.increase(MAX_DURATION + 300 + 1);
+      await channel.connect(other).forceCloseExpired(channelId);
+
+      const numCalls = 200;
+      const cost = RATE_PER_CALL * BigInt(numCalls);
+      const ts = (await ethers.provider.getBlock("latest")).timestamp;
+      const sig = await signReceipt(channelId, numCalls, cost, ts);
+
+      await channel.connect(provider).submitReceipt(channelId, numCalls, cost, ts, sig);
+
+      // Finalize after window
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      const providerBefore = await token.balanceOf(provider.address);
+      await channel.connect(other).finalize(channelId, ethers.ZeroHash);
+      const providerAfter = await token.balanceOf(provider.address);
+
+      expect(providerAfter - providerBefore).to.equal(cost);
+    });
+
+    it("should refund consumer if no receipt submitted after force-close", async function () {
+      await time.increase(MAX_DURATION + 300 + 1);
+      await channel.connect(other).forceCloseExpired(channelId);
+
+      await time.increase(CHALLENGE_WINDOW + 1);
+
+      const consumerBefore = await token.balanceOf(consumer.address);
+      await channel.connect(other).finalize(channelId, ethers.ZeroHash);
       const consumerAfter = await token.balanceOf(consumer.address);
 
       expect(consumerAfter - consumerBefore).to.equal(DEPOSIT);
@@ -345,106 +534,37 @@ describe("PaymentChannel", function () {
         channel.connect(other).forceCloseExpired(channelId)
       ).to.be.revertedWith("Not yet expired + grace");
     });
-
-    it("should allow provider to force-close with receipt after expiry", async function () {
-      const numCalls = 200;
-      const cumulativeCost = RATE_PER_CALL * BigInt(numCalls);
-      const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      const sig = await signReceipt(channelId, numCalls, cumulativeCost, ts);
-
-      await time.increase(MAX_DURATION + 1);
-
-      const providerBefore = await token.balanceOf(provider.address);
-      await channel.connect(provider).forceCloseWithReceipt(
-        channelId, numCalls, cumulativeCost, ts, sig
-      );
-      const providerAfter = await token.balanceOf(provider.address);
-
-      expect(providerAfter - providerBefore).to.equal(cumulativeCost);
-    });
   });
 
-  describe("Disputes", function () {
+  describe("Settlement State View", function () {
     let channelId;
 
     beforeEach(async function () {
-      const tokenAddr = await token.getAddress();
-      const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
+      channelId = await openAndActivatePrepaid();
+    });
+
+    it("should return settlement state", async function () {
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
       );
-      const receipt = await tx.wait();
-      const event = receipt.logs.find(
-        l => l.fragment && l.fragment.name === "ChannelOpened"
+
+      const state = await channel.getSettlementState(channelId);
+      expect(state.deadline).to.be.greaterThan(0);
+      expect(state.highestCost).to.equal(0);
+      expect(state.highestSeq).to.equal(0);
+      expect(state.initiator).to.equal(consumer.address);
+      expect(state.challengeOpen).to.be.true;
+    });
+
+    it("should report challenge closed after window", async function () {
+      await channel.connect(consumer).initiateSettlement(
+        channelId, 0, 0, 0, "0x", ethers.ZeroHash
       );
-      channelId = event.args.channelId;
-      await channel.connect(provider).activateChannel(channelId);
-    });
 
-    it("should allow a party to dispute", async function () {
-      await channel.connect(consumer).disputeChannel(channelId);
-      const ch = await channel.getChannel(channelId);
-      expect(ch.status).to.equal(4); // Disputed
-    });
+      await time.increase(CHALLENGE_WINDOW + 1);
 
-    it("should reject dispute from non-party", async function () {
-      await expect(
-        channel.connect(other).disputeChannel(channelId)
-      ).to.be.revertedWith("Not a channel party");
-    });
-
-    it("should resolve dispute with valid receipt", async function () {
-      await channel.connect(consumer).disputeChannel(channelId);
-
-      const numCalls = 50;
-      const cumulativeCost = RATE_PER_CALL * BigInt(numCalls);
-      const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      const sig = await signReceipt(channelId, numCalls, cumulativeCost, ts);
-
-      const providerBefore = await token.balanceOf(provider.address);
-      await channel.connect(provider).resolveDispute(
-        channelId, numCalls, cumulativeCost, ts, sig
-      );
-      const providerAfter = await token.balanceOf(provider.address);
-
-      expect(providerAfter - providerBefore).to.equal(cumulativeCost);
-      const ch = await channel.getChannel(channelId);
-      expect(ch.status).to.equal(3); // Closed
-    });
-
-    it("should allow finalize if dispute deadline passes", async function () {
-      await channel.connect(consumer).disputeChannel(channelId);
-
-      // Fast forward past dispute timeout
-      await time.increase(3601);
-
-      const consumerBefore = await token.balanceOf(consumer.address);
-      await channel.connect(consumer).finalizeExpiredDispute(channelId);
-      const consumerAfter = await token.balanceOf(consumer.address);
-
-      // Full refund since no receipt was submitted
-      expect(consumerAfter - consumerBefore).to.equal(DEPOSIT);
-    });
-
-    it("should reject resolve after deadline", async function () {
-      await channel.connect(consumer).disputeChannel(channelId);
-      await time.increase(3601);
-
-      const ts = (await ethers.provider.getBlock("latest")).timestamp;
-      const sig = await signReceipt(channelId, 1, RATE_PER_CALL, ts);
-
-      await expect(
-        channel.connect(provider).resolveDispute(
-          channelId, 1, RATE_PER_CALL, ts, sig
-        )
-      ).to.be.revertedWith("Dispute deadline passed");
-    });
-
-    it("should reject finalize before deadline", async function () {
-      await channel.connect(consumer).disputeChannel(channelId);
-
-      await expect(
-        channel.connect(consumer).finalizeExpiredDispute(channelId)
-      ).to.be.revertedWith("Dispute still active");
+      const state = await channel.getSettlementState(channelId);
+      expect(state.challengeOpen).to.be.false;
     });
   });
 
@@ -454,7 +574,7 @@ describe("PaymentChannel", function () {
     beforeEach(async function () {
       const tokenAddr = await token.getAddress();
       const tx = await channel.connect(consumer).openChannel(
-        provider.address, tokenAddr, 0, DEPOSIT, MAX_DURATION, RATE_PER_CALL
+        provider.address, tokenAddr, 0, DEPOSIT, MAX_SPEND, MAX_DURATION, RATE_PER_CALL
       );
       const receipt = await tx.wait();
       const event = receipt.logs.find(
@@ -463,11 +583,12 @@ describe("PaymentChannel", function () {
       channelId = event.args.channelId;
     });
 
-    it("should return channel details", async function () {
+    it("should return channel details with new fields", async function () {
       const ch = await channel.getChannel(channelId);
       expect(ch.consumer).to.equal(consumer.address);
       expect(ch.provider).to.equal(provider.address);
       expect(ch.deposit).to.equal(DEPOSIT);
+      expect(ch.maxSpend).to.equal(MAX_SPEND);
       expect(ch.ratePerCall).to.equal(RATE_PER_CALL);
       expect(ch.status).to.equal(0); // Open
     });

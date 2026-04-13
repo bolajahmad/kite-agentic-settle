@@ -23,6 +23,12 @@ describe("AgentRegistry", function () {
     const KiteAAWallet = await ethers.getContractFactory("KiteAAWallet");
     wallet = await KiteAAWallet.deploy();
     await wallet.waitForDeployment();
+
+    // Link wallet to registry so auto-link works
+    await wallet.setAgentRegistry(await registry.getAddress());
+
+    // Register the EOA on the wallet (needed for auto-link)
+    await wallet.connect(owner).register();
   });
 
   describe("Agent Registration", function () {
@@ -30,6 +36,7 @@ describe("AgentRegistry", function () {
       const tx = await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0, // agentIndex
         metadata,
       );
       const receipt = await tx.wait();
@@ -48,18 +55,25 @@ describe("AgentRegistry", function () {
       expect(info.agentAddress).to.equal(agentAddr.address);
       expect(info.walletContract).to.equal(await wallet.getAddress());
       expect(info.active).to.be.true;
+
+      // Verify auto-link: agentId should be in owner's wallet agent list
+      const userAgentIds = await wallet.getUserAgentIds(owner.address);
+      expect(userAgentIds.length).to.equal(1);
+      expect(userAgentIds[0]).to.equal(agentId);
     });
 
     it("should reject duplicate agent address registration", async function () {
       await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       await expect(
         registry.registerAgent(
           agentAddr.address,
           await wallet.getAddress(),
+          0,
           metadata,
         ),
       ).to.be.revertedWith("Agent address already registered");
@@ -70,6 +84,7 @@ describe("AgentRegistry", function () {
         registry.registerAgent(
           ethers.ZeroAddress,
           await wallet.getAddress(),
+          0,
           metadata,
         ),
       ).to.be.revertedWith("Invalid agent address");
@@ -77,7 +92,7 @@ describe("AgentRegistry", function () {
 
     it("should reject zero-address wallet", async function () {
       await expect(
-        registry.registerAgent(agentAddr.address, ethers.ZeroAddress, metadata),
+        registry.registerAgent(agentAddr.address, ethers.ZeroAddress, 0, metadata),
       ).to.be.revertedWith("Invalid wallet contract");
     });
 
@@ -86,12 +101,14 @@ describe("AgentRegistry", function () {
       await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       expect(await registry.nonce()).to.equal(2);
       await registry.registerAgent(
         other.address,
         await wallet.getAddress(),
+        1,
         metadata,
       );
       expect(await registry.nonce()).to.equal(3);
@@ -101,6 +118,7 @@ describe("AgentRegistry", function () {
       const tx = await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       const receipt = await tx.wait();
@@ -119,6 +137,7 @@ describe("AgentRegistry", function () {
       const tx = await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       const receipt = await tx.wait();
@@ -136,11 +155,13 @@ describe("AgentRegistry", function () {
       await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       await registry.registerAgent(
         other.address,
         await wallet.getAddress(),
+        1,
         metadata,
       );
 
@@ -153,6 +174,7 @@ describe("AgentRegistry", function () {
       await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       expect(await registry.totalAgents()).to.equal(1);
@@ -163,6 +185,7 @@ describe("AgentRegistry", function () {
         registry.registerAgent(
           agentAddr.address,
           await wallet.getAddress(),
+          0,
           metadata,
         ),
       ).to.emit(registry, "AgentRegistered");
@@ -176,6 +199,7 @@ describe("AgentRegistry", function () {
       const tx = await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       const receipt = await tx.wait();
@@ -200,16 +224,12 @@ describe("AgentRegistry", function () {
     beforeEach(async function () {
       [, , , , sessionAddr] = await ethers.getSigners();
 
-      // Link wallet to registry
-      await wallet.setAgentRegistry(await registry.getAddress());
-
-      // Register EOA on wallet
-      await wallet.connect(owner).register();
-
       // Register agent on registry with walletContract = wallet address
+      // (auto-links agentId to wallet)
       const tx = await registry.registerAgent(
         agentAddr.address,
         await wallet.getAddress(),
+        0,
         metadata,
       );
       const receipt = await tx.wait();
@@ -217,9 +237,6 @@ describe("AgentRegistry", function () {
         (log) => registry.interface.parseLog(log)?.name === "AgentRegistered",
       );
       agentId = registry.interface.parseLog(event).args.agentId;
-
-      // Track agentId in wallet
-      await wallet.connect(owner).addAgentId(agentId);
     });
 
     it("should register a session via wallet's addSessionKeyRule", async function () {
@@ -227,7 +244,7 @@ describe("AgentRegistry", function () {
       const VALUE_LIMIT = ethers.parseEther("10");
       const DAILY_LIMIT = ethers.parseEther("50");
       await wallet.connect(owner).addSessionKeyRule(
-        sessionAddr.address, agentId, VALUE_LIMIT, DAILY_LIMIT, validUntil, []
+        sessionAddr.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, validUntil, [], "0x"
       );
 
       const info = await registry.getAgentBySession(sessionAddr.address);
@@ -238,7 +255,7 @@ describe("AgentRegistry", function () {
 
     it("should reject direct session registration from EOA", async function () {
       await expect(
-        registry.connect(owner).registerSession(agentId, sessionAddr.address, validUntil),
+        registry.connect(owner).registerSession(agentId, sessionAddr.address, 0, validUntil),
       ).to.be.revertedWith("Only wallet contract");
     });
 
@@ -248,7 +265,7 @@ describe("AgentRegistry", function () {
       const DAILY_LIMIT = ethers.parseEther("50");
       await expect(
         wallet.connect(owner).addSessionKeyRule(
-          sessionAddr.address, agentId, VALUE_LIMIT, DAILY_LIMIT, validUntil, []
+          sessionAddr.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, validUntil, [], "0x"
         ),
       ).to.be.reverted;
     });
@@ -257,7 +274,7 @@ describe("AgentRegistry", function () {
       const VALUE_LIMIT = ethers.parseEther("10");
       const DAILY_LIMIT = ethers.parseEther("50");
       await wallet.connect(owner).addSessionKeyRule(
-        sessionAddr.address, agentId, VALUE_LIMIT, DAILY_LIMIT, validUntil, []
+        sessionAddr.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, validUntil, [], "0x"
       );
 
       await wallet.connect(owner).revokeSessionKey(sessionAddr.address);
@@ -270,13 +287,13 @@ describe("AgentRegistry", function () {
       const VALUE_LIMIT = ethers.parseEther("10");
       const DAILY_LIMIT = ethers.parseEther("50");
       await wallet.connect(owner).addSessionKeyRule(
-        sessionAddr.address, agentId, VALUE_LIMIT, DAILY_LIMIT, validUntil, []
+        sessionAddr.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, validUntil, [], "0x"
       );
 
       // Update with a new expiry
       const newValidUntil = validUntil + 86400;
       await wallet.connect(owner).addSessionKeyRule(
-        sessionAddr.address, agentId, VALUE_LIMIT, DAILY_LIMIT, newValidUntil, []
+        sessionAddr.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, newValidUntil, [], "0x"
       );
 
       const info = await registry.getAgentBySession(sessionAddr.address);
@@ -288,7 +305,7 @@ describe("AgentRegistry", function () {
       const VALUE_LIMIT = ethers.parseEther("10");
       const DAILY_LIMIT = ethers.parseEther("50");
       await wallet.connect(owner).addSessionKeyRule(
-        sessionAddr.address, agentId, VALUE_LIMIT, DAILY_LIMIT, validUntil, []
+        sessionAddr.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, validUntil, [], "0x"
       );
 
       await expect(

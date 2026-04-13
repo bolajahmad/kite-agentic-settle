@@ -62,7 +62,7 @@ A step-by-step wizard for users who have never used the platform.
   - **Daily Limit** (KTT): rolling 24h spending cap
   - **Valid Until**: date picker → converted to unix timestamp
   - **Allowed Recipients**: optional list of provider addresses the agent is allowed to pay (empty = any)
-- On submit: call `KiteAAWallet.addSessionKeyRule(sessionKey, agentId, valueLimit, dailyLimit, validUntil, allowedRecipients)`
+- On submit: call `KiteAAWallet.addSessionKeyRule(sessionKey, agentId, valueLimit, dailyLimit, validUntil, blockedProviders)`
 - Show summary card of the rule with all parameters
 
 ### Step 5: Done
@@ -116,7 +116,7 @@ The primary interface after onboarding. Tabs or sidebar navigation.
 - **Session Keys Section**
   - Table: Session Key Address | Value Limit | Daily Limit | Valid Until | Active | Actions
   - Each row data from `KiteAAWallet.getSessionRule(sessionKey)`
-  - Expandable row shows `allowedRecipients` list
+  - Expandable row shows `blockedProviders` list
   - Daily spend indicator per key from `KiteAAWallet.getDailySpend(sessionKey)`
   - Actions: Revoke (calls `KiteAAWallet.revokeSessionKey`)
   - "Add Session Key" button opens form (same as onboarding Step 4)

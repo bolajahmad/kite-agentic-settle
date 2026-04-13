@@ -22,6 +22,10 @@ interface IAgentRegistry {
  *         - User Identity (EOA) — root authority, isolated funds, can revoke everything
  *         - Agent Identity (agentId) — delegated, bound to session keys
  *         - Session Identity (sessionKey) — ephemeral, per-task, auto-expires
+ *
+ *         Session keys use a blocklist model: agents can call ANY provider
+ *         except those explicitly blocked. The blocklist can be updated at
+ *         any time by the session owner without creating a new session.
  */
 contract KiteAAWallet is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -39,7 +43,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         uint256 valueLimit;        // max per-transaction (in token units)
         uint256 dailyLimit;        // max aggregate per rolling 24h window
         uint256 validUntil;        // expiry timestamp
-        address[] allowedRecipients;
+        address[] blockedProviders; // providers the agent is NOT allowed to pay
         bool active;
     }
 
@@ -62,6 +66,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
     address public agentRegistry;
 
     event UserRegistered(address indexed user);
+    event AgentLinked(address indexed user, bytes32 indexed agentId);
     event SessionKeyAdded(
         address indexed sessionKey,
         address indexed user,
@@ -74,6 +79,9 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         bytes   metadata
     );
     event SessionKeyRevoked(address indexed sessionKey, bytes32 indexed agentId);
+    event SessionBlockedProvidersUpdated(address indexed sessionKey, address[] blockedProviders);
+    event ProviderBlocked(address indexed sessionKey, address indexed provider);
+    event ProviderUnblocked(address indexed sessionKey, address indexed provider);
     event PaymentExecuted(
         address indexed sessionKey,
         bytes32 indexed agentId,
@@ -117,8 +125,25 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
 
     // ─── User Functions ────────────────────────────────────────────────
 
-    function addAgentId(bytes32 agentId) external onlyRegistered {
+    /**
+     * @notice Link an agentId to a user's wallet account. Can be called by:
+     *         1. The registered user themselves (msg.sender == owner)
+     *         2. The AgentRegistry contract (auto-linking after agent registration)
+     * @param agentId The agent identifier to link
+     * @param owner The EOA user that owns this agent (only used when called by registry)
+     */
+    function addAgentId(bytes32 agentId, address owner) external {
+        // Allow the AgentRegistry to call this on behalf of the owner
+        if (msg.sender == agentRegistry) {
+            require(users[owner].registered, "Owner not registered");
+            users[owner].agentIds.push(agentId);
+            emit AgentLinked(owner, agentId);
+            return;
+        }
+        // Otherwise, only the registered user themselves
+        require(users[msg.sender].registered, "Not registered");
         users[msg.sender].agentIds.push(agentId);
+        emit AgentLinked(msg.sender, agentId);
     }
 
     function addSessionKeyRule(
@@ -128,7 +153,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         uint256 valueLimit,
         uint256 dailyLimit,
         uint256 validUntil,
-        address[] calldata allowedRecipients,
+        address[] calldata blockedProviders,
         bytes calldata metadata
     ) external onlyRegistered {
         require(sessionKeyAddress != address(0), "Invalid session key");
@@ -157,7 +182,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
             valueLimit: valueLimit,
             dailyLimit: dailyLimit,
             validUntil: validUntil,
-            allowedRecipients: allowedRecipients,
+            blockedProviders: blockedProviders,
             active: true
         });
 
@@ -202,6 +227,58 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         }
     }
 
+    // ─── Session Blocklist Management ──────────────────────────────────
+
+    /**
+     * @notice Replace the entire blocked providers list for a session key.
+     *         Only the session's owner (EOA) can update this.
+     */
+    function updateBlockedProviders(
+        address sessionKeyAddress,
+        address[] calldata newBlockedProviders
+    ) external onlyRegistered {
+        SessionKeyRule storage rule = sessionKeys[sessionKeyAddress];
+        require(rule.user == msg.sender, "Not session owner");
+        require(rule.active, "Session not active");
+        rule.blockedProviders = newBlockedProviders;
+        emit SessionBlockedProvidersUpdated(sessionKeyAddress, newBlockedProviders);
+    }
+
+    /**
+     * @notice Add a single provider to the blocklist. No-op if already blocked.
+     */
+    function blockProvider(address sessionKeyAddress, address provider) external onlyRegistered {
+        SessionKeyRule storage rule = sessionKeys[sessionKeyAddress];
+        require(rule.user == msg.sender, "Not session owner");
+        require(rule.active, "Session not active");
+
+        // Check if already blocked
+        for (uint256 i = 0; i < rule.blockedProviders.length; i++) {
+            if (rule.blockedProviders[i] == provider) return; // already blocked
+        }
+        rule.blockedProviders.push(provider);
+        emit ProviderBlocked(sessionKeyAddress, provider);
+    }
+
+    /**
+     * @notice Remove a single provider from the blocklist.
+     */
+    function unblockProvider(address sessionKeyAddress, address provider) external onlyRegistered {
+        SessionKeyRule storage rule = sessionKeys[sessionKeyAddress];
+        require(rule.user == msg.sender, "Not session owner");
+        require(rule.active, "Session not active");
+
+        address[] storage blocked = rule.blockedProviders;
+        for (uint256 i = 0; i < blocked.length; i++) {
+            if (blocked[i] == provider) {
+                blocked[i] = blocked[blocked.length - 1];
+                blocked.pop();
+                emit ProviderUnblocked(sessionKeyAddress, provider);
+                return;
+            }
+        }
+    }
+
     function deposit(address token, uint256 amount) external onlyRegistered {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         userBalances[msg.sender][token] += amount;
@@ -242,16 +319,9 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         // Per-transaction limit
         require(amount <= rule.valueLimit, "Exceeds per-tx limit");
 
-        // Recipient allowlist (empty = any recipient allowed)
-        if (rule.allowedRecipients.length > 0) {
-            bool allowed = false;
-            for (uint256 i = 0; i < rule.allowedRecipients.length; i++) {
-                if (rule.allowedRecipients[i] == recipient) {
-                    allowed = true;
-                    break;
-                }
-            }
-            require(allowed, "Recipient not in allowlist");
+        // Recipient blocklist check (blocked providers cannot receive payments)
+        for (uint256 i = 0; i < rule.blockedProviders.length; i++) {
+            require(rule.blockedProviders[i] != recipient, "Recipient is blocked");
         }
 
         // Rolling 24h daily limit
@@ -287,8 +357,8 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         return (rule.user, rule.agentId, rule.valueLimit, rule.dailyLimit, rule.validUntil, rule.active);
     }
 
-    function getSessionAllowedRecipients(address sessionKey) external view returns (address[] memory) {
-        return sessionKeys[sessionKey].allowedRecipients;
+    function getSessionBlockedProviders(address sessionKey) external view returns (address[] memory) {
+        return sessionKeys[sessionKey].blockedProviders;
     }
 
     function getAgentSessionKeys(bytes32 agentId) external view returns (address[] memory) {

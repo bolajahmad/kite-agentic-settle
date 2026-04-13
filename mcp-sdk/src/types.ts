@@ -16,6 +16,7 @@ export interface ChannelConfig {
   token?: string;
   mode: "prepaid" | "postpaid";
   deposit: bigint;
+  maxSpend: bigint;
   maxDuration: number;
   ratePerCall: bigint;
 }
@@ -51,20 +52,23 @@ export interface ChannelState {
   token: string;
   mode: number;
   deposit: bigint;
+  maxSpend: bigint;
   maxDuration: number;
   openedAt: number;
   expiresAt: number;
   ratePerCall: bigint;
   settledAmount: bigint;
   status: number;
+  settlementDeadline: number;
+  highestClaimedCost: bigint;
+  highestSequenceNumber: number;
 }
 
 export enum ChannelStatus {
   Open = 0,
   Active = 1,
-  Settling = 2,
+  SettlementPending = 2,
   Closed = 3,
-  Disputed = 4,
 }
 
 export enum PaymentMode {

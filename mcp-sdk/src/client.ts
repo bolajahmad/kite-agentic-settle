@@ -198,10 +198,35 @@ export class KitePaymentClient {
     return await this.channelManager.activateChannel(channelId);
   }
 
-  async closeChannel(channelId: `0x${string}`): Promise<string> {
+  async initiateSettlement(
+    channelId: `0x${string}`,
+    merkleRoot?: `0x${string}`
+  ): Promise<string> {
+    return await this.channelManager.initiateSettlement(channelId, merkleRoot);
+  }
+
+  async submitReceipt(
+    channelId: `0x${string}`,
+    receipt: Receipt
+  ): Promise<string> {
+    return await this.channelManager.submitReceipt(channelId, receipt);
+  }
+
+  async finalize(
+    channelId: `0x${string}`,
+    merkleRoot?: `0x${string}`
+  ): Promise<string> {
     const channel = await this.channelManager.getChannel(channelId);
     this.interceptor.removeChannelForProvider(channel.provider);
-    return await this.channelManager.closeChannel(channelId);
+    return await this.channelManager.finalize(channelId, merkleRoot);
+  }
+
+  async forceCloseExpired(channelId: `0x${string}`): Promise<string> {
+    return await this.channelManager.forceCloseExpired(channelId);
+  }
+
+  async getSettlementState(channelId: `0x${string}`) {
+    return await this.channelManager.getSettlementState(channelId);
   }
 
   async getChannel(channelId: `0x${string}`): Promise<ChannelState> {

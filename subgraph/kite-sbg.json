@@ -10,25 +10,25 @@
   "instances": [
     {
       "abi": "agentRegistry",
-      "address": "0xafb3FF4863380118767377Fd33169FB52FD464c1",
+      "address": "0x2A904dF5979Fbc3B65F0F298C0a3B4e06FF0881d",
       "startBlock": 20749220,
       "chain": "kite-ai-testnet"
     },
     {
       "abi": "aawallet",
-      "address": "0xf9b2F8836938743A861a3e737aBae50bc35b7553",
+      "address": "0xDbe183022eCCA66cc074e66f571Eee5FFa728BeD",
       "startBlock": 20749220,
       "chain": "kite-ai-testnet"
     },
     {
       "abi": "merkle",
-      "address": "0x7054359323bF53244879B837d72aa029341eF49a",
+      "address": "0x9df3c50EFfE57A15347e5667a994b0fA1e155b37",
       "startBlock": 20749220,
       "chain": "kite-ai-testnet"
     },
     {
       "abi": "paymentChannel",
-      "address": "0x27d5aeae3962dd5Ba157F94Ee0e0C94D1bfCc08F",
+      "address": "0x210a99B86D0a95C77Dcf995dAC3821af718399C6",
       "startBlock": 20749220,
       "chain": "kite-ai-testnet"
     }

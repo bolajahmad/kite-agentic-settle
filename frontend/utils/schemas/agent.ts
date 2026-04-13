@@ -31,7 +31,7 @@ export type AgentSessionCreateModel = {
   valueLimit: string
   dailyLimit: string
   validUntil: string
-  allowedRecipients?: string[]
+  blockedProviders?: string[]
   restrictedRecipients?: string[]
 }
 
@@ -58,7 +58,7 @@ export const agentSessionSchema = z
         (val) => !isNaN(Number(val)) && Number(val) > 0,
         "Session validity must be a positive number"
       ),
-    allowedRecipients: z.array(z.string()).optional(),
+    blockedProviders: z.array(z.string()).optional(),
     restrictedRecipients: z.array(z.string()).optional(),
   })
   .refine((data) => Number(data.valueLimit) <= Number(data.dailyLimit), {

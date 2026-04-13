@@ -5,10 +5,10 @@ export const KITE_TESTNET: KiteConfig = {
   rpcUrl: "https://rpc-testnet.gokite.ai",
   chainId: 2368,
   contracts: {
-    agentRegistry: "0x8E706f71473A80603a9e86AE9E5164E296996e7A",
-    kiteAAWallet: "0x18A1e425C762A37fc4c78Dd327D9d7823193046D",
-    anchorMerkle: "0xf7Ba449B63C07c84604cC671e41a3e58AEd30d3f",
-    paymentChannel: "0x1BFbeeE10F0d06A24a6c7493Eee5b13485d6418a",
+    agentRegistry: "0x2A904dF5979Fbc3B65F0F298C0a3B4e06FF0881d",
+    kiteAAWallet: "0xDbe183022eCCA66cc074e66f571Eee5FFa728BeD",
+    anchorMerkle: "0x9df3c50EFfE57A15347e5667a994b0fA1e155b37",
+    paymentChannel: "0x210a99B86D0a95C77Dcf995dAC3821af718399C6",
   },
-  token: "0x1f98772C698FEb08cCF2364B83599908c93BaDA9",
+  token: "0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489",
 };

@@ -584,4 +584,4 @@ export const AgentRegistryABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
-] as const
+] as const;

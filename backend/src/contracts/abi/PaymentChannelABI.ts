@@ -64,27 +64,26 @@ export const PaymentChannelABI = [
         name: "channelId",
         type: "bytes32",
       },
-    ],
-    name: "ChannelClosed",
-    type: "event",
-  },
-  {
-    anonymous: false,
-    inputs: [
       {
-        indexed: true,
+        indexed: false,
+        internalType: "uint256",
+        name: "payment",
+        type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "refund",
+        type: "uint256",
+      },
+      {
+        indexed: false,
         internalType: "bytes32",
-        name: "channelId",
+        name: "usageMerkleRoot",
         type: "bytes32",
       },
-      {
-        indexed: true,
-        internalType: "address",
-        name: "disputedBy",
-        type: "address",
-      },
     ],
-    name: "ChannelDisputed",
+    name: "ChannelFinalized",
     type: "event",
   },
   {
@@ -129,6 +128,12 @@ export const PaymentChannelABI = [
       {
         indexed: false,
         internalType: "uint256",
+        name: "maxSpend",
+        type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
         name: "maxDuration",
         type: "uint256",
       },
@@ -140,56 +145,6 @@ export const PaymentChannelABI = [
       },
     ],
     name: "ChannelOpened",
-    type: "event",
-  },
-  {
-    anonymous: false,
-    inputs: [
-      {
-        indexed: true,
-        internalType: "bytes32",
-        name: "channelId",
-        type: "bytes32",
-      },
-      {
-        indexed: false,
-        internalType: "uint256",
-        name: "amount",
-        type: "uint256",
-      },
-      {
-        indexed: false,
-        internalType: "uint256",
-        name: "refund",
-        type: "uint256",
-      },
-      {
-        indexed: false,
-        internalType: "bytes32",
-        name: "usageMerkleRoot",
-        type: "bytes32",
-      },
-    ],
-    name: "ChannelSettled",
-    type: "event",
-  },
-  {
-    anonymous: false,
-    inputs: [
-      {
-        indexed: true,
-        internalType: "bytes32",
-        name: "channelId",
-        type: "bytes32",
-      },
-      {
-        indexed: false,
-        internalType: "uint256",
-        name: "finalAmount",
-        type: "uint256",
-      },
-    ],
-    name: "DisputeResolved",
     type: "event",
   },
   {
@@ -243,8 +198,70 @@ export const PaymentChannelABI = [
     type: "event",
   },
   {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "bytes32",
+        name: "channelId",
+        type: "bytes32",
+      },
+      {
+        indexed: true,
+        internalType: "address",
+        name: "submitter",
+        type: "address",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "sequenceNumber",
+        type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "cumulativeCost",
+        type: "uint256",
+      },
+    ],
+    name: "ReceiptSubmitted",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "bytes32",
+        name: "channelId",
+        type: "bytes32",
+      },
+      {
+        indexed: true,
+        internalType: "address",
+        name: "initiator",
+        type: "address",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "claimedAmount",
+        type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "settlementDeadline",
+        type: "uint256",
+      },
+    ],
+    name: "SettlementInitiated",
+    type: "event",
+  },
+  {
     inputs: [],
-    name: "CLOSE_GRACE_PERIOD",
+    name: "CHALLENGE_WINDOW",
     outputs: [
       {
         internalType: "uint256",
@@ -257,7 +274,7 @@ export const PaymentChannelABI = [
   },
   {
     inputs: [],
-    name: "DISPUTE_TIMEOUT",
+    name: "CLOSE_GRACE_PERIOD",
     outputs: [
       {
         internalType: "uint256",
@@ -323,6 +340,11 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "uint256",
+        name: "maxSpend",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
         name: "maxDuration",
         type: "uint256",
       },
@@ -356,6 +378,26 @@ export const PaymentChannelABI = [
         name: "status",
         type: "uint8",
       },
+      {
+        internalType: "uint256",
+        name: "settlementDeadline",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "highestClaimedCost",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "highestSequenceNumber",
+        type: "uint256",
+      },
+      {
+        internalType: "address",
+        name: "settlementInitiator",
+        type: "address",
+      },
     ],
     stateMutability: "view",
     type: "function",
@@ -366,26 +408,6 @@ export const PaymentChannelABI = [
         internalType: "bytes32",
         name: "channelId",
         type: "bytes32",
-      },
-      {
-        internalType: "uint256",
-        name: "sequenceNumber",
-        type: "uint256",
-      },
-      {
-        internalType: "uint256",
-        name: "cumulativeCost",
-        type: "uint256",
-      },
-      {
-        internalType: "uint256",
-        name: "timestamp",
-        type: "uint256",
-      },
-      {
-        internalType: "bytes",
-        name: "providerSignature",
-        type: "bytes",
       },
       {
         internalType: "bytes32",
@@ -393,65 +415,7 @@ export const PaymentChannelABI = [
         type: "bytes32",
       },
     ],
-    name: "closeChannel",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
-  {
-    inputs: [
-      {
-        internalType: "bytes32",
-        name: "channelId",
-        type: "bytes32",
-      },
-    ],
-    name: "closeChannelEmpty",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
-  {
-    inputs: [
-      {
-        internalType: "bytes32",
-        name: "channelId",
-        type: "bytes32",
-      },
-    ],
-    name: "disputeChannel",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
-  {
-    inputs: [
-      {
-        internalType: "bytes32",
-        name: "",
-        type: "bytes32",
-      },
-    ],
-    name: "disputeDeadline",
-    outputs: [
-      {
-        internalType: "uint256",
-        name: "",
-        type: "uint256",
-      },
-    ],
-    stateMutability: "view",
-    type: "function",
-  },
-  {
-    inputs: [
-      {
-        internalType: "bytes32",
-        name: "channelId",
-        type: "bytes32",
-      },
-    ],
-    name: "finalizeExpiredDispute",
+    name: "finalize",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
@@ -465,44 +429,6 @@ export const PaymentChannelABI = [
       },
     ],
     name: "forceCloseExpired",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
-  {
-    inputs: [
-      {
-        internalType: "bytes32",
-        name: "channelId",
-        type: "bytes32",
-      },
-      {
-        internalType: "uint256",
-        name: "sequenceNumber",
-        type: "uint256",
-      },
-      {
-        internalType: "uint256",
-        name: "cumulativeCost",
-        type: "uint256",
-      },
-      {
-        internalType: "uint256",
-        name: "timestamp",
-        type: "uint256",
-      },
-      {
-        internalType: "bytes",
-        name: "providerSignature",
-        type: "bytes",
-      },
-      {
-        internalType: "bytes32",
-        name: "merkleRoot",
-        type: "bytes32",
-      },
-    ],
-    name: "forceCloseWithReceipt",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
@@ -544,6 +470,11 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "uint256",
+        name: "maxSpend",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
         name: "maxDuration",
         type: "uint256",
       },
@@ -571,6 +502,21 @@ export const PaymentChannelABI = [
         internalType: "enum PaymentChannel.ChannelStatus",
         name: "status",
         type: "uint8",
+      },
+      {
+        internalType: "uint256",
+        name: "settlementDeadline",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "highestClaimedCost",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "highestSequenceNumber",
+        type: "uint256",
       },
     ],
     stateMutability: "view",
@@ -661,6 +607,83 @@ export const PaymentChannelABI = [
         type: "bytes32",
       },
     ],
+    name: "getSettlementState",
+    outputs: [
+      {
+        internalType: "uint256",
+        name: "deadline",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "highestCost",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "highestSeq",
+        type: "uint256",
+      },
+      {
+        internalType: "address",
+        name: "initiator",
+        type: "address",
+      },
+      {
+        internalType: "bool",
+        name: "challengeOpen",
+        type: "bool",
+      },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "bytes32",
+        name: "channelId",
+        type: "bytes32",
+      },
+      {
+        internalType: "uint256",
+        name: "sequenceNumber",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "cumulativeCost",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "timestamp",
+        type: "uint256",
+      },
+      {
+        internalType: "bytes",
+        name: "providerSignature",
+        type: "bytes",
+      },
+      {
+        internalType: "bytes32",
+        name: "merkleRoot",
+        type: "bytes32",
+      },
+    ],
+    name: "initiateSettlement",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "bytes32",
+        name: "channelId",
+        type: "bytes32",
+      },
+    ],
     name: "isChannelExpired",
     outputs: [
       {
@@ -720,6 +743,11 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "uint256",
+        name: "maxSpend",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
         name: "maxDuration",
         type: "uint256",
       },
@@ -767,13 +795,8 @@ export const PaymentChannelABI = [
         name: "providerSignature",
         type: "bytes",
       },
-      {
-        internalType: "bytes32",
-        name: "merkleRoot",
-        type: "bytes32",
-      },
     ],
-    name: "resolveDispute",
+    name: "submitReceipt",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",

@@ -3,6 +3,10 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 
+interface IKiteAAWallet {
+    function addAgentId(bytes32 agentId, address owner) external;
+}
+
 /**
  * @title AgentRegistry
  * @notice On-chain registry for Kite agent identities. Maps agent IDs to
@@ -19,23 +23,22 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  *         Metadata is emitted in events; only its keccak256 hash is stored.
  */
 contract AgentRegistry is Ownable {
-
     struct AgentInfo {
         bytes32 agentId;
-        bytes32 metadataHash;      // keccak256 of the metadata bytes
-        address agentAddress;      // BIP-32 derived agent address
-        address walletContract;    // KiteAAWallet that funds this agent
-        address ownerAddress;      // user EOA that controls this agent
-        uint256 agentIndex;        // derivation index for deterministic key regeneration
-        bool    active;
+        bytes32 metadataHash; // keccak256 of the metadata bytes
+        address agentAddress; // BIP-32 derived agent address
+        address walletContract; // KiteAAWallet that funds this agent
+        address ownerAddress; // user EOA that controls this agent
+        uint256 agentIndex; // derivation index for deterministic key regeneration
+        bool active;
     }
 
     struct SessionInfo {
         bytes32 agentId;
         address sessionKey;
-        uint256 sessionIndex;      // derivation index for deterministic key regeneration
+        uint256 sessionIndex; // derivation index for deterministic key regeneration
         uint256 validUntil;
-        bool    active;
+        bool active;
     }
 
     // agentId => AgentInfo
@@ -55,10 +58,15 @@ contract AgentRegistry is Ownable {
         address indexed walletContract,
         address ownerAddress,
         uint256 agentIndex,
-        bytes   metadata
+        bytes metadata
     );
     event AgentDeactivated(bytes32 indexed agentId);
-    event SessionRegistered(bytes32 indexed agentId, address indexed sessionKey, uint256 sessionIndex, uint256 validUntil);
+    event SessionRegistered(
+        bytes32 indexed agentId,
+        address indexed sessionKey,
+        uint256 sessionIndex,
+        uint256 validUntil
+    );
     event SessionDeactivated(address indexed sessionKey);
 
     constructor() Ownable(msg.sender) {
@@ -73,6 +81,7 @@ contract AgentRegistry is Ownable {
      *         Metadata is emitted in the event; only its hash is stored.
      * @param agentAddress The agent's address (e.g. BIP-32 derived)
      * @param walletContract The KiteAAWallet that funds this agent
+     * @param agentIndex The index of the agent (Used in BIP-32 generation)
      * @param metadata Arbitrary bytes encoding agent metadata (name, description, etc.)
      * @return agentId The deterministically generated agent identifier
      */
@@ -84,10 +93,18 @@ contract AgentRegistry is Ownable {
     ) external returns (bytes32) {
         require(agentAddress != address(0), "Invalid agent address");
         require(walletContract != address(0), "Invalid wallet contract");
-        require(addressToAgent[agentAddress] == bytes32(0), "Agent address already registered");
+        require(
+            addressToAgent[agentAddress] == bytes32(0),
+            "Agent address already registered"
+        );
 
-        bytes32 agentId = keccak256(abi.encodePacked(agentAddress, walletContract, msg.sender, nonce));
-        require(agents[agentId].agentAddress == address(0), "Agent ID collision");
+        bytes32 agentId = keccak256(
+            abi.encodePacked(agentAddress, walletContract, msg.sender, nonce)
+        );
+        require(
+            agents[agentId].agentAddress == address(0),
+            "Agent ID collision"
+        );
 
         agents[agentId] = AgentInfo({
             agentId: agentId,
@@ -103,7 +120,18 @@ contract AgentRegistry is Ownable {
         ownerAgents[msg.sender].push(agentId);
         nonce++;
 
-        emit AgentRegistered(agentId, agentAddress, walletContract, msg.sender, agentIndex, metadata);
+        emit AgentRegistered(
+            agentId,
+            agentAddress,
+            walletContract,
+            msg.sender,
+            agentIndex,
+            metadata
+        );
+
+        // Auto-link the agentId on the wallet contract so the owner
+        // doesn't need a separate addAgentId() transaction.
+        IKiteAAWallet(walletContract).addAgentId(agentId, msg.sender);
 
         return agentId;
     }
@@ -154,41 +182,73 @@ contract AgentRegistry is Ownable {
 
     // ─── Resolution Functions (Permissionless) ─────────────────────────
 
-    function getAgent(bytes32 agentId) external view returns (
-        bytes32 metadataHash,
-        address agentAddress,
-        address walletContract,
-        address ownerAddr,
-        uint256 agentIndex,
-        bool active
-    ) {
+    function getAgent(
+        bytes32 agentId
+    )
+        external
+        view
+        returns (
+            bytes32 metadataHash,
+            address agentAddress,
+            address walletContract,
+            address ownerAddr,
+            uint256 agentIndex,
+            bool active
+        )
+    {
         AgentInfo storage a = agents[agentId];
-        return (a.metadataHash, a.agentAddress, a.walletContract, a.ownerAddress, a.agentIndex, a.active);
+        return (
+            a.metadataHash,
+            a.agentAddress,
+            a.walletContract,
+            a.ownerAddress,
+            a.agentIndex,
+            a.active
+        );
     }
 
-    function resolveAgentByAddress(address agentAddr) external view returns (
-        bytes32 agentId,
-        bytes32 metadataHash,
-        address walletContract,
-        address ownerAddr,
-        uint256 agentIndex,
-        bool active
-    ) {
+    function resolveAgentByAddress(
+        address agentAddr
+    )
+        external
+        view
+        returns (
+            bytes32 agentId,
+            bytes32 metadataHash,
+            address walletContract,
+            address ownerAddr,
+            uint256 agentIndex,
+            bool active
+        )
+    {
         bytes32 id = addressToAgent[agentAddr];
         AgentInfo storage a = agents[id];
-        return (id, a.metadataHash, a.walletContract, a.ownerAddress, a.agentIndex, a.active);
+        return (
+            id,
+            a.metadataHash,
+            a.walletContract,
+            a.ownerAddress,
+            a.agentIndex,
+            a.active
+        );
     }
 
-    function getAgentBySession(address sessionKey) external view returns (
-        bytes32 agentId,
-        bytes32 metadataHash,
-        address agentAddress,
-        uint256 agentIndex,
-        uint256 sessionIndex,
-        bool agentActive,
-        bool sessionActive,
-        uint256 sessionValidUntil
-    ) {
+    function getAgentBySession(
+        address sessionKey
+    )
+        external
+        view
+        returns (
+            bytes32 agentId,
+            bytes32 metadataHash,
+            address agentAddress,
+            uint256 agentIndex,
+            uint256 sessionIndex,
+            bool agentActive,
+            bool sessionActive,
+            uint256 sessionValidUntil
+        )
+    {
         SessionInfo storage s = sessionToAgent[sessionKey];
         AgentInfo storage a = agents[s.agentId];
         return (
@@ -203,7 +263,9 @@ contract AgentRegistry is Ownable {
         );
     }
 
-    function getOwnerAgents(address ownerAddr) external view returns (bytes32[] memory) {
+    function getOwnerAgents(
+        address ownerAddr
+    ) external view returns (bytes32[] memory) {
         return ownerAgents[ownerAddr];
     }
 

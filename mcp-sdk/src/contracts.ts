@@ -154,11 +154,11 @@ export class ContractService {
     })) as boolean;
   }
 
-  async addAgentId(agentId: `0x${string}`): Promise<string> {
+  async addAgentId(agentId: `0x${string}`, owner: string): Promise<string> {
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "addAgentId",
-      args: [agentId],
+      args: [agentId, owner as `0x${string}`],
     });
     const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
     return result.hash;
@@ -234,7 +234,7 @@ export class ContractService {
     valueLimit: bigint,
     dailyLimit: bigint,
     validUntil: number,
-    allowedRecipients: string[],
+    blockedProviders: string[],
     metadata: `0x${string}` = "0x",
   ): Promise<string> {
     const data = encodeFunctionData({
@@ -247,7 +247,7 @@ export class ContractService {
         valueLimit,
         dailyLimit,
         BigInt(validUntil),
-        allowedRecipients as `0x${string}`[],
+        blockedProviders as `0x${string}`[],
         metadata,
       ],
     });
@@ -255,6 +255,42 @@ export class ContractService {
       this.config.contracts.kiteAAWallet,
       data,
     );
+    return result.hash;
+  }
+
+  async updateBlockedProviders(
+    sessionKey: string,
+    blockedProviders: string[],
+  ): Promise<string> {
+    const data = encodeFunctionData({
+      abi: kiteAAWalletAbi,
+      functionName: "updateBlockedProviders",
+      args: [
+        sessionKey as `0x${string}`,
+        blockedProviders as `0x${string}`[],
+      ],
+    });
+    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    return result.hash;
+  }
+
+  async blockProvider(sessionKey: string, provider: string): Promise<string> {
+    const data = encodeFunctionData({
+      abi: kiteAAWalletAbi,
+      functionName: "blockProvider",
+      args: [sessionKey as `0x${string}`, provider as `0x${string}`],
+    });
+    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    return result.hash;
+  }
+
+  async unblockProvider(sessionKey: string, provider: string): Promise<string> {
+    const data = encodeFunctionData({
+      abi: kiteAAWalletAbi,
+      functionName: "unblockProvider",
+      args: [sessionKey as `0x${string}`, provider as `0x${string}`],
+    });
+    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
     return result.hash;
   }
 
@@ -283,6 +319,7 @@ export class ContractService {
     token: string,
     mode: number,
     deposit: bigint,
+    maxSpend: bigint,
     maxDuration: number,
     ratePerCall: bigint
   ): Promise<{ txHash: string; channelId: `0x${string}` | undefined }> {
@@ -307,6 +344,7 @@ export class ContractService {
         token as `0x${string}`,
         mode,
         deposit,
+        maxSpend,
         BigInt(maxDuration),
         ratePerCall,
       ],
@@ -340,7 +378,7 @@ export class ContractService {
     return result.hash;
   }
 
-  async closeChannel(
+  async initiateSettlement(
     channelId: `0x${string}`,
     sequenceNumber: number,
     cumulativeCost: bigint,
@@ -350,7 +388,7 @@ export class ContractService {
   ): Promise<string> {
     const data = encodeFunctionData({
       abi: paymentChannelAbi,
-      functionName: "closeChannel",
+      functionName: "initiateSettlement",
       args: [
         channelId,
         BigInt(sequenceNumber),
@@ -367,10 +405,51 @@ export class ContractService {
     return result.hash;
   }
 
-  async closeChannelEmpty(channelId: `0x${string}`): Promise<string> {
+  async submitReceipt(
+    channelId: `0x${string}`,
+    sequenceNumber: number,
+    cumulativeCost: bigint,
+    timestamp: number,
+    providerSignature: `0x${string}`,
+  ): Promise<string> {
     const data = encodeFunctionData({
       abi: paymentChannelAbi,
-      functionName: "closeChannelEmpty",
+      functionName: "submitReceipt",
+      args: [
+        channelId,
+        BigInt(sequenceNumber),
+        cumulativeCost,
+        BigInt(timestamp),
+        providerSignature,
+      ],
+    });
+    const result = await this.sendTx(
+      this.config.contracts.paymentChannel,
+      data
+    );
+    return result.hash;
+  }
+
+  async finalize(
+    channelId: `0x${string}`,
+    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+  ): Promise<string> {
+    const data = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "finalize",
+      args: [channelId, merkleRoot],
+    });
+    const result = await this.sendTx(
+      this.config.contracts.paymentChannel,
+      data
+    );
+    return result.hash;
+  }
+
+  async forceCloseExpired(channelId: `0x${string}`): Promise<string> {
+    const data = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "forceCloseExpired",
       args: [channelId],
     });
     const result = await this.sendTx(
@@ -395,12 +474,39 @@ export class ContractService {
       token: result[2],
       mode: Number(result[3]),
       deposit: result[4],
-      maxDuration: Number(result[5]),
-      openedAt: Number(result[6]),
-      expiresAt: Number(result[7]),
-      ratePerCall: result[8],
-      settledAmount: result[9],
-      status: Number(result[10]),
+      maxSpend: result[5],
+      maxDuration: Number(result[6]),
+      openedAt: Number(result[7]),
+      expiresAt: Number(result[8]),
+      ratePerCall: result[9],
+      settledAmount: result[10],
+      status: Number(result[11]),
+      settlementDeadline: Number(result[12]),
+      highestClaimedCost: result[13],
+      highestSequenceNumber: Number(result[14]),
+    };
+  }
+
+  async getSettlementState(channelId: `0x${string}`): Promise<{
+    deadline: number;
+    highestCost: bigint;
+    highestSeq: number;
+    initiator: string;
+    challengeOpen: boolean;
+  }> {
+    const result = (await this.client.readContract({
+      address: this.config.contracts.paymentChannel as `0x${string}`,
+      abi: paymentChannelAbi,
+      functionName: "getSettlementState",
+      args: [channelId],
+    })) as any;
+
+    return {
+      deadline: Number(result[0]),
+      highestCost: result[1],
+      highestSeq: Number(result[2]),
+      initiator: result[3],
+      challengeOpen: result[4],
     };
   }
 

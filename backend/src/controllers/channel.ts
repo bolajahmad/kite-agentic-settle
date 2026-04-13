@@ -2,19 +2,19 @@ import { Request, Response } from "express";
 import {
   openChannelOnChain,
   activateChannelOnChain,
-  closeChannelOnChain,
-  closeChannelEmptyOnChain,
-  disputeChannelOnChain,
-  resolveDisputeOnChain,
+  initiateSettlementOnChain,
+  submitReceiptOnChain,
+  finalizeOnChain,
   forceCloseExpiredOnChain,
   getChannelOnChain,
+  getSettlementStateOnChain,
   isChannelExpiredOnChain,
   getChannelTimeRemainingOnChain,
   getReceiptHashOnChain,
   getLockedFundsOnChain,
 } from "../services/contract-service.js";
 
-const STATUS_NAMES = ["Open", "Active", "Settling", "Closed", "Disputed"];
+const STATUS_NAMES = ["Open", "Active", "SettlementPending", "Closed"];
 const MODE_NAMES = ["Prepaid", "Postpaid"];
 
 function isChannelConfigured(): boolean {
@@ -23,16 +23,16 @@ function isChannelConfigured(): boolean {
 
 export const openChannel = async (req: Request, res: Response) => {
   try {
-    const { provider, token, mode, deposit, maxDuration, ratePerCall } = req.body;
-    if (!provider || !token || mode === undefined || !maxDuration || !ratePerCall) {
-      return res.status(400).json({ error: "provider, token, mode, maxDuration, ratePerCall are required" });
+    const { provider, token, mode, deposit, maxSpend, maxDuration, ratePerCall } = req.body;
+    if (!provider || !token || mode === undefined || !maxSpend || !maxDuration || !ratePerCall) {
+      return res.status(400).json({ error: "provider, token, mode, maxSpend, maxDuration, ratePerCall are required" });
     }
     if (!isChannelConfigured()) {
       return res.status(503).json({ error: "PaymentChannel contract not configured" });
     }
 
     const result = await openChannelOnChain(
-      provider, token, mode, BigInt(deposit || 0), maxDuration, BigInt(ratePerCall)
+      provider, token, mode, BigInt(deposit || 0), BigInt(maxSpend), maxDuration, BigInt(ratePerCall)
     );
     res.json({ success: true, ...result });
   } catch (err: any) {
@@ -57,19 +57,23 @@ export const activateChannel = async (req: Request, res: Response) => {
   }
 };
 
-export const closeChannel = async (req: Request, res: Response) => {
+export const initiateSettlement = async (req: Request, res: Response) => {
   try {
-    const { channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature } = req.body;
-    if (!channelId || !providerSignature) {
-      return res.status(400).json({ error: "channelId and providerSignature are required" });
+    const { channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature, merkleRoot } = req.body;
+    if (!channelId) {
+      return res.status(400).json({ error: "channelId is required" });
     }
     if (!isChannelConfigured()) {
       return res.status(503).json({ error: "PaymentChannel contract not configured" });
     }
 
-    const result = await closeChannelOnChain(
-      channelId, sequenceNumber || 0, BigInt(cumulativeCost || 0),
-      timestamp || Math.floor(Date.now() / 1000), providerSignature
+    const result = await initiateSettlementOnChain(
+      channelId,
+      sequenceNumber || 0,
+      BigInt(cumulativeCost || 0),
+      timestamp || 0,
+      providerSignature || "0x",
+      merkleRoot
     );
     res.json({ success: true, ...result });
   } catch (err: any) {
@@ -77,41 +81,7 @@ export const closeChannel = async (req: Request, res: Response) => {
   }
 };
 
-export const closeChannelEmpty = async (req: Request, res: Response) => {
-  try {
-    const { channelId } = req.body;
-    if (!channelId) {
-      return res.status(400).json({ error: "channelId is required" });
-    }
-    if (!isChannelConfigured()) {
-      return res.status(503).json({ error: "PaymentChannel contract not configured" });
-    }
-
-    const result = await closeChannelEmptyOnChain(channelId);
-    res.json({ success: true, ...result });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-export const disputeChannel = async (req: Request, res: Response) => {
-  try {
-    const { channelId } = req.body;
-    if (!channelId) {
-      return res.status(400).json({ error: "channelId is required" });
-    }
-    if (!isChannelConfigured()) {
-      return res.status(503).json({ error: "PaymentChannel contract not configured" });
-    }
-
-    const result = await disputeChannelOnChain(channelId);
-    res.json({ success: true, ...result });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-export const resolveDispute = async (req: Request, res: Response) => {
+export const submitReceipt = async (req: Request, res: Response) => {
   try {
     const { channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature } = req.body;
     if (!channelId || !providerSignature) {
@@ -121,9 +91,26 @@ export const resolveDispute = async (req: Request, res: Response) => {
       return res.status(503).json({ error: "PaymentChannel contract not configured" });
     }
 
-    const result = await resolveDisputeOnChain(
+    const result = await submitReceiptOnChain(
       channelId, sequenceNumber, BigInt(cumulativeCost), timestamp, providerSignature
     );
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const finalizeChannel = async (req: Request, res: Response) => {
+  try {
+    const { channelId, merkleRoot } = req.body;
+    if (!channelId) {
+      return res.status(400).json({ error: "channelId is required" });
+    }
+    if (!isChannelConfigured()) {
+      return res.status(503).json({ error: "PaymentChannel contract not configured" });
+    }
+
+    const result = await finalizeOnChain(channelId, merkleRoot);
     res.json({ success: true, ...result });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -142,6 +129,23 @@ export const forceCloseExpired = async (req: Request, res: Response) => {
 
     const result = await forceCloseExpiredOnChain(channelId);
     res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const getSettlementState = async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.params;
+    if (!channelId) {
+      return res.status(400).json({ error: "channelId is required" });
+    }
+    if (!isChannelConfigured()) {
+      return res.status(503).json({ error: "PaymentChannel contract not configured" });
+    }
+
+    const state = await getSettlementStateOnChain(channelId);
+    res.json({ channelId, ...state });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

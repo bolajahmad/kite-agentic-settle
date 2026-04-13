@@ -11,15 +11,25 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  * @title PaymentChannel
  * @notice Manages payment channels between agent consumers and providers.
  *         Supports prepaid (escrow) and postpaid (credit) modes.
- *         Each channel tracks cumulative cost via signed receipts.
- *         Settlement uses the last valid signed receipt to determine total owed.
+ *
+ *         Uses a challenge-based settlement model:
+ *           Open → Active → SettlementPending → Closed
+ *
+ *         When either party initiates settlement, a challenge window opens.
+ *         During this window ANYONE can submit a higher valid receipt (permissionless).
+ *         After the window closes, `finalize()` settles based on the highest
+ *         receipt seen, ensuring neither party can cheat — even if the other
+ *         is offline at settlement time.
+ *
+ *         Merkle roots are stored for audit / attestation / reputation purposes
+ *         only — they do NOT determine payment amounts.
  */
 contract PaymentChannel is ReentrancyGuard {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
 
-    enum ChannelStatus { Open, Active, Settling, Closed, Disputed }
+    enum ChannelStatus { Open, Active, SettlementPending, Closed }
     enum PaymentMode { Prepaid, Postpaid }
 
     struct Channel {
@@ -29,24 +39,19 @@ contract PaymentChannel is ReentrancyGuard {
         address token;             // ERC20 token for payment
         PaymentMode mode;
         uint256 deposit;           // locked funds (0 for postpaid)
+        uint256 maxSpend;          // hard cap on total payment
         uint256 maxDuration;       // seconds
         uint256 openedAt;
         uint256 expiresAt;
         uint256 ratePerCall;       // agreed cost per API call
-        uint256 settledAmount;     // final settlement amount
-        bytes32 usageMerkleRoot;   // optional: root anchoring off-chain usage receipts
+        uint256 settledAmount;     // final settlement amount (set on finalize)
+        bytes32 usageMerkleRoot;   // optional: root for off-chain audit / attestation
         ChannelStatus status;
-    }
-
-    // Receipt that the provider signs after each API call.
-    // The consumer verifies and stores these off-chain.
-    // Only the last receipt is needed for settlement.
-    struct Receipt {
-        bytes32 channelId;
-        uint256 sequenceNumber;
-        uint256 callCost;
-        uint256 cumulativeCost;
-        uint256 timestamp;
+        // Settlement state
+        uint256 settlementDeadline;    // challenge window end timestamp
+        uint256 highestClaimedCost;    // best valid cumulativeCost submitted so far
+        uint256 highestSequenceNumber; // sequence number of the best receipt
+        address settlementInitiator;   // who started settlement
     }
 
     mapping(bytes32 => Channel) public channels;
@@ -56,12 +61,10 @@ contract PaymentChannel is ReentrancyGuard {
     // wallet address => token => locked amount
     mapping(address => mapping(address => uint256)) public lockedFunds;
 
-    // Dispute timeout: if a dispute is raised, the other party has this long to respond
-    uint256 public constant DISPUTE_TIMEOUT = 1 hours;
+    // Challenge window: how long parties have to submit counter-evidence
+    uint256 public constant CHALLENGE_WINDOW = 1 hours;
     // Grace period after expiry before anyone can force-close
     uint256 public constant CLOSE_GRACE_PERIOD = 5 minutes;
-
-    mapping(bytes32 => uint256) public disputeDeadline;
 
     event ChannelOpened(
         bytes32 indexed channelId,
@@ -70,14 +73,29 @@ contract PaymentChannel is ReentrancyGuard {
         address token,
         PaymentMode mode,
         uint256 deposit,
+        uint256 maxSpend,
         uint256 maxDuration,
         uint256 ratePerCall
     );
     event ChannelActivated(bytes32 indexed channelId);
-    event ChannelSettled(bytes32 indexed channelId, uint256 amount, uint256 refund, bytes32 usageMerkleRoot);
-    event ChannelClosed(bytes32 indexed channelId);
-    event ChannelDisputed(bytes32 indexed channelId, address indexed disputedBy);
-    event DisputeResolved(bytes32 indexed channelId, uint256 finalAmount);
+    event SettlementInitiated(
+        bytes32 indexed channelId,
+        address indexed initiator,
+        uint256 claimedAmount,
+        uint256 settlementDeadline
+    );
+    event ReceiptSubmitted(
+        bytes32 indexed channelId,
+        address indexed submitter,
+        uint256 sequenceNumber,
+        uint256 cumulativeCost
+    );
+    event ChannelFinalized(
+        bytes32 indexed channelId,
+        uint256 payment,
+        uint256 refund,
+        bytes32 usageMerkleRoot
+    );
     event FundsLocked(address indexed wallet, address indexed token, uint256 amount);
     event FundsUnlocked(address indexed wallet, address indexed token, uint256 amount);
 
@@ -95,15 +113,15 @@ contract PaymentChannel is ReentrancyGuard {
         _;
     }
 
-    // -- Channel Lifecycle --
+    // ─── Channel Lifecycle ─────────────────────────────────────────────
 
     /**
-     * @notice Open a new payment channel. For prepaid mode, the consumer must
-     *         first approve this contract to transfer the deposit amount.
-     * @param provider The provider agent address
-     * @param token ERC20 token address
-     * @param mode Prepaid (escrow) or Postpaid (credit)
-     * @param deposit Amount to lock (must be > 0 for prepaid, 0 for postpaid)
+     * @notice Open a new payment channel.
+     * @param provider   The provider agent address
+     * @param token      ERC20 token address
+     * @param mode       Prepaid (escrow) or Postpaid (credit)
+     * @param deposit    Amount to lock (must be > 0 for prepaid, 0 for postpaid)
+     * @param maxSpend   Hard cap on total payment (deposit acts as cap for prepaid if maxSpend > deposit)
      * @param maxDuration Channel duration in seconds
      * @param ratePerCall Agreed cost per API call in token units
      */
@@ -112,6 +130,7 @@ contract PaymentChannel is ReentrancyGuard {
         address token,
         PaymentMode mode,
         uint256 deposit,
+        uint256 maxSpend,
         uint256 maxDuration,
         uint256 ratePerCall
     ) external nonReentrant returns (bytes32 channelId) {
@@ -122,11 +141,13 @@ contract PaymentChannel is ReentrancyGuard {
 
         if (mode == PaymentMode.Prepaid) {
             require(deposit > 0, "Prepaid requires deposit");
+            require(maxSpend > 0, "Max spend must be > 0");
             IERC20(token).safeTransferFrom(msg.sender, address(this), deposit);
             lockedFunds[msg.sender][token] += deposit;
             emit FundsLocked(msg.sender, token, deposit);
         } else {
             require(deposit == 0, "Postpaid must have 0 deposit");
+            require(maxSpend > 0, "Max spend must be > 0");
         }
 
         totalChannels++;
@@ -141,18 +162,23 @@ contract PaymentChannel is ReentrancyGuard {
             token: token,
             mode: mode,
             deposit: deposit,
+            maxSpend: maxSpend,
             maxDuration: maxDuration,
             openedAt: block.timestamp,
             expiresAt: block.timestamp + maxDuration,
             ratePerCall: ratePerCall,
             settledAmount: 0,
             usageMerkleRoot: bytes32(0),
-            status: ChannelStatus.Open
+            status: ChannelStatus.Open,
+            settlementDeadline: 0,
+            highestClaimedCost: 0,
+            highestSequenceNumber: 0,
+            settlementInitiator: address(0)
         });
 
         emit ChannelOpened(
             channelId, msg.sender, provider, token,
-            mode, deposit, maxDuration, ratePerCall
+            mode, deposit, maxSpend, maxDuration, ratePerCall
         );
     }
 
@@ -169,17 +195,24 @@ contract PaymentChannel is ReentrancyGuard {
         emit ChannelActivated(channelId);
     }
 
+    // ─── Settlement Phase ──────────────────────────────────────────────
+
     /**
-     * @notice Close a channel with the last signed receipt from the provider.
-     *         Either party can call this. The receipt's cumulativeCost determines
-     *         the settlement amount.
-     * @param channelId The channel to close
-     * @param sequenceNumber Receipt sequence number
-     * @param cumulativeCost Total accumulated cost from the receipt
-     * @param timestamp Receipt timestamp
-     * @param providerSignature Provider's signature over the receipt data
+     * @notice Initiate settlement on a channel. Either party can call this.
+     *         Opens a challenge window during which anyone can submit a higher receipt.
+     *
+     *         To claim zero usage (no calls made), pass sequenceNumber = 0 and
+     *         cumulativeCost = 0 with an empty signature. The provider can still
+     *         submit a valid receipt during the challenge window.
+     *
+     * @param channelId         The channel to settle
+     * @param sequenceNumber    Receipt sequence number (0 for empty claim)
+     * @param cumulativeCost    Claimed total cost (0 for empty claim)
+     * @param timestamp         Receipt timestamp (ignored if empty claim)
+     * @param providerSignature Provider's signature (empty bytes for zero claim)
+     * @param merkleRoot        Optional merkle root for audit
      */
-    function closeChannel(
+    function initiateSettlement(
         bytes32 channelId,
         uint256 sequenceNumber,
         uint256 cumulativeCost,
@@ -190,51 +223,80 @@ contract PaymentChannel is ReentrancyGuard {
         Channel storage ch = channels[channelId];
         require(
             ch.status == ChannelStatus.Active || ch.status == ChannelStatus.Open,
-            "Channel not closeable"
+            "Channel not settleable"
         );
 
-        // Verify receipt signature from provider
-        bytes32 receiptHash = getReceiptHash(
-            channelId, sequenceNumber, cumulativeCost, timestamp
-        );
-        address signer = receiptHash.toEthSignedMessageHash().recover(providerSignature);
-        require(signer == ch.provider, "Invalid provider signature");
+        // If a receipt is provided (non-zero claim), verify it
+        if (cumulativeCost > 0 || sequenceNumber > 0) {
+            _verifyReceipt(ch, channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature);
+            ch.highestClaimedCost = cumulativeCost;
+            ch.highestSequenceNumber = sequenceNumber;
+        }
 
-        // Verify cumulative cost is consistent with rate
-        // cumulativeCost should be sequenceNumber * ratePerCall
-        // Allow a small tolerance for the last call (might be partial)
-        require(
-            cumulativeCost <= (sequenceNumber * ch.ratePerCall),
-            "Cumulative cost exceeds expected total"
-        );
+        ch.usageMerkleRoot = merkleRoot;
+        ch.status = ChannelStatus.SettlementPending;
+        ch.settlementDeadline = block.timestamp + CHALLENGE_WINDOW;
+        ch.settlementInitiator = msg.sender;
 
-        ch.status = ChannelStatus.Settling;
-        _settle(channelId, cumulativeCost, merkleRoot);
+        emit SettlementInitiated(channelId, msg.sender, cumulativeCost, ch.settlementDeadline);
     }
 
     /**
-     * @notice Close a channel with zero payment (no API calls were made).
-     *         Only consumer can call this. Returns full deposit if prepaid.
+     * @notice Submit a receipt during the challenge window. PERMISSIONLESS —
+     *         anyone holding a valid provider-signed receipt can call this.
+     *         Only updates state if the submitted receipt is higher than the current best.
+     *
+     * @param channelId         The channel in settlement
+     * @param sequenceNumber    Receipt sequence number
+     * @param cumulativeCost    Total cost from receipt (must be > current highest)
+     * @param timestamp         Receipt timestamp
+     * @param providerSignature Provider's signature over the receipt
      */
-    function closeChannelEmpty(bytes32 channelId)
-        external
-        nonReentrant
-    {
+    function submitReceipt(
+        bytes32 channelId,
+        uint256 sequenceNumber,
+        uint256 cumulativeCost,
+        uint256 timestamp,
+        bytes calldata providerSignature
+    ) external nonReentrant channelInStatus(channelId, ChannelStatus.SettlementPending) {
         Channel storage ch = channels[channelId];
-        require(msg.sender == ch.consumer, "Only consumer");
-        require(
-            ch.status == ChannelStatus.Active || ch.status == ChannelStatus.Open,
-            "Channel not closeable"
-        );
+        require(block.timestamp <= ch.settlementDeadline, "Challenge window closed");
+        require(cumulativeCost > ch.highestClaimedCost, "Not higher than current claim");
 
-        ch.status = ChannelStatus.Settling;
-        _settle(channelId, 0, bytes32(0));
+        _verifyReceipt(ch, channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature);
+
+        ch.highestClaimedCost = cumulativeCost;
+        ch.highestSequenceNumber = sequenceNumber;
+
+        emit ReceiptSubmitted(channelId, msg.sender, sequenceNumber, cumulativeCost);
     }
 
     /**
-     * @notice Force-close an expired channel. Anyone can call this after
-     *         expiry + grace period. If no receipt was submitted, consumer
-     *         gets full refund (prepaid) or pays nothing (postpaid).
+     * @notice Finalize settlement after the challenge window has closed.
+     *         Anyone can call this. Pays based on the highest valid receipt
+     *         submitted during the challenge window.
+     *
+     * @param channelId The channel to finalize
+     * @param merkleRoot Optional final merkle root for audit (overrides if non-zero)
+     */
+    function finalize(
+        bytes32 channelId,
+        bytes32 merkleRoot
+    ) external nonReentrant channelInStatus(channelId, ChannelStatus.SettlementPending) {
+        Channel storage ch = channels[channelId];
+        require(block.timestamp > ch.settlementDeadline, "Challenge window still open");
+
+        if (merkleRoot != bytes32(0)) {
+            ch.usageMerkleRoot = merkleRoot;
+        }
+
+        _settle(channelId, ch.highestClaimedCost);
+    }
+
+    /**
+     * @notice Force-close an expired channel by initiating settlement.
+     *         Anyone can call this after expiry + grace period.
+     *         Starts the challenge window so provider can still submit receipts.
      */
     function forceCloseExpired(bytes32 channelId) external nonReentrant {
         Channel storage ch = channels[channelId];
@@ -247,127 +309,40 @@ contract PaymentChannel is ReentrancyGuard {
             "Not yet expired + grace"
         );
 
-        ch.status = ChannelStatus.Settling;
-        _settle(channelId, 0, bytes32(0));
+        ch.status = ChannelStatus.SettlementPending;
+        ch.settlementDeadline = block.timestamp + CHALLENGE_WINDOW;
+        ch.settlementInitiator = msg.sender;
+
+        emit SettlementInitiated(channelId, msg.sender, 0, ch.settlementDeadline);
     }
 
-    /**
-     * @notice Force-close with a receipt when the channel has expired.
-     *         Provider calls this to claim payment for work done.
-     */
-    function forceCloseWithReceipt(
+    // ─── Internal ──────────────────────────────────────────────────────
+
+    function _verifyReceipt(
+        Channel storage ch,
         bytes32 channelId,
         uint256 sequenceNumber,
         uint256 cumulativeCost,
         uint256 timestamp,
-        bytes calldata providerSignature,
-        bytes32 merkleRoot
-    ) external nonReentrant {
-        Channel storage ch = channels[channelId];
+        bytes calldata providerSignature
+    ) internal view {
+        require(sequenceNumber > 0, "Invalid sequence number");
+        require(cumulativeCost > 0, "Cost must be > 0");
+        require(cumulativeCost <= ch.maxSpend, "Exceeds max spend");
         require(
-            ch.status == ChannelStatus.Active || ch.status == ChannelStatus.Open,
-            "Channel not closeable"
+            cumulativeCost <= (sequenceNumber * ch.ratePerCall),
+            "Cost exceeds rate * calls"
         );
-        require(block.timestamp >= ch.expiresAt, "Not yet expired");
-        require(msg.sender == ch.provider, "Only provider");
 
         bytes32 receiptHash = getReceiptHash(
             channelId, sequenceNumber, cumulativeCost, timestamp
         );
         address signer = receiptHash.toEthSignedMessageHash().recover(providerSignature);
         require(signer == ch.provider, "Invalid provider signature");
-
-        require(
-            cumulativeCost <= (sequenceNumber * ch.ratePerCall),
-            "Cumulative cost exceeds expected total"
-        );
-
-        ch.status = ChannelStatus.Settling;
-        _settle(channelId, cumulativeCost, merkleRoot);
     }
 
-    // -- Dispute --
-
-    /**
-     * @notice Raise a dispute on a channel that is being settled or is active.
-     *         The other party has DISPUTE_TIMEOUT to respond with a valid receipt.
-     */
-    function disputeChannel(bytes32 channelId)
-        external
-        onlyChannelParty(channelId)
-    {
+    function _settle(bytes32 channelId, uint256 amount) internal {
         Channel storage ch = channels[channelId];
-        require(
-            ch.status == ChannelStatus.Active || ch.status == ChannelStatus.Settling,
-            "Cannot dispute this channel"
-        );
-
-        ch.status = ChannelStatus.Disputed;
-        disputeDeadline[channelId] = block.timestamp + DISPUTE_TIMEOUT;
-
-        emit ChannelDisputed(channelId, msg.sender);
-    }
-
-    /**
-     * @notice Resolve a dispute by submitting a valid signed receipt.
-     *         The receipt with the highest sequence number wins.
-     */
-    function resolveDispute(
-        bytes32 channelId,
-        uint256 sequenceNumber,
-        uint256 cumulativeCost,
-        uint256 timestamp,
-        bytes calldata providerSignature,
-        bytes32 merkleRoot
-    ) external nonReentrant onlyChannelParty(channelId)
-        channelInStatus(channelId, ChannelStatus.Disputed)
-    {
-        require(
-            block.timestamp <= disputeDeadline[channelId],
-            "Dispute deadline passed"
-        );
-
-        Channel storage ch = channels[channelId];
-
-        bytes32 receiptHash = getReceiptHash(
-            channelId, sequenceNumber, cumulativeCost, timestamp
-        );
-        address signer = receiptHash.toEthSignedMessageHash().recover(providerSignature);
-        require(signer == ch.provider, "Invalid provider signature");
-
-        require(
-            cumulativeCost <= (sequenceNumber * ch.ratePerCall),
-            "Cumulative cost exceeds expected total"
-        );
-
-        _settle(channelId, cumulativeCost, merkleRoot);
-        emit DisputeResolved(channelId, cumulativeCost);
-    }
-
-    /**
-     * @notice If dispute deadline passes with no resolution, either party
-     *         can finalize. Consumer gets full refund (prepaid) or pays nothing (postpaid).
-     */
-    function finalizeExpiredDispute(bytes32 channelId)
-        external
-        nonReentrant
-        onlyChannelParty(channelId)
-        channelInStatus(channelId, ChannelStatus.Disputed)
-    {
-        require(
-            block.timestamp > disputeDeadline[channelId],
-            "Dispute still active"
-        );
-        _settle(channelId, 0, bytes32(0));
-    }
-
-    // -- Internal --
-
-    function _settle(bytes32 channelId, uint256 amount, bytes32 merkleRoot) internal {
-        Channel storage ch = channels[channelId];
-
-        // Store merkle root if provided
-        ch.usageMerkleRoot = merkleRoot;
 
         if (ch.mode == PaymentMode.Prepaid) {
             uint256 payment = amount > ch.deposit ? ch.deposit : amount;
@@ -384,22 +359,20 @@ contract PaymentChannel is ReentrancyGuard {
             emit FundsUnlocked(ch.consumer, ch.token, ch.deposit);
 
             ch.settledAmount = payment;
-            emit ChannelSettled(channelId, payment, refund, merkleRoot);
+            emit ChannelFinalized(channelId, payment, refund, ch.usageMerkleRoot);
         } else {
-            // Postpaid: consumer must have approved this contract or funds
-            // are pulled from consumer's wallet
+            // Postpaid: pull payment from consumer
             if (amount > 0) {
                 IERC20(ch.token).safeTransferFrom(ch.consumer, ch.provider, amount);
             }
             ch.settledAmount = amount;
-            emit ChannelSettled(channelId, amount, 0, merkleRoot);
+            emit ChannelFinalized(channelId, amount, 0, ch.usageMerkleRoot);
         }
 
         ch.status = ChannelStatus.Closed;
-        emit ChannelClosed(channelId);
     }
 
-    // -- View Functions --
+    // ─── View Functions ────────────────────────────────────────────────
 
     function getChannel(bytes32 channelId) external view returns (
         address consumer,
@@ -407,18 +380,23 @@ contract PaymentChannel is ReentrancyGuard {
         address token,
         PaymentMode mode,
         uint256 deposit,
+        uint256 maxSpend,
         uint256 maxDuration,
         uint256 openedAt,
         uint256 expiresAt,
         uint256 ratePerCall,
         uint256 settledAmount,
-        ChannelStatus status
+        ChannelStatus status,
+        uint256 settlementDeadline,
+        uint256 highestClaimedCost,
+        uint256 highestSequenceNumber
     ) {
         Channel storage ch = channels[channelId];
         return (
             ch.consumer, ch.provider, ch.token, ch.mode,
-            ch.deposit, ch.maxDuration, ch.openedAt, ch.expiresAt,
-            ch.ratePerCall, ch.settledAmount, ch.status
+            ch.deposit, ch.maxSpend, ch.maxDuration, ch.openedAt, ch.expiresAt,
+            ch.ratePerCall, ch.settledAmount, ch.status,
+            ch.settlementDeadline, ch.highestClaimedCost, ch.highestSequenceNumber
         );
     }
 
@@ -445,5 +423,22 @@ contract PaymentChannel is ReentrancyGuard {
 
     function getLockedFunds(address wallet, address token) external view returns (uint256) {
         return lockedFunds[wallet][token];
+    }
+
+    function getSettlementState(bytes32 channelId) external view returns (
+        uint256 deadline,
+        uint256 highestCost,
+        uint256 highestSeq,
+        address initiator,
+        bool challengeOpen
+    ) {
+        Channel storage ch = channels[channelId];
+        return (
+            ch.settlementDeadline,
+            ch.highestClaimedCost,
+            ch.highestSequenceNumber,
+            ch.settlementInitiator,
+            ch.status == ChannelStatus.SettlementPending && block.timestamp <= ch.settlementDeadline
+        );
     }
 }

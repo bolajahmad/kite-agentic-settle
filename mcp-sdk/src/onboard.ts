@@ -145,19 +145,23 @@ export async function onboardAgent(
     return newAgentId;
   }
 
-  // ── Step 5: Link agent to user's wallet (idempotent) ────────────
-  // Check if already linked by looking at user's agent IDs on the wallet
+  // ── Step 5: Agent is auto-linked to wallet by AgentRegistry ──────
+  // The AgentRegistry.registerAgent() call automatically calls
+  // KiteAAWallet.addAgentId(agentId, owner), so no separate step needed.
+  // Just verify it was linked:
   const userAgentIds = await contracts.getUserAgentIds(eoaAddress);
   const alreadyLinked = userAgentIds.some(
     (id) => id.toLowerCase() === agentId.toLowerCase(),
   );
 
-  if (!alreadyLinked) {
-    log("Linking agent to wallet...");
-    const addIdHash = await contracts.addAgentId(agentId);
+  if (!alreadyLinked && !agentAlreadyRegistered) {
+    // Fallback: if auto-link didn't work (e.g. old registry deployment),
+    // manually link it.
+    log("Auto-link not detected, manually linking agent to wallet...");
+    const addIdHash = await contracts.addAgentId(agentId, eoaAddress);
     txHashes.push({ step: "Link Agent to Wallet", hash: addIdHash });
   } else {
-    log("Agent already linked to wallet.");
+    log("Agent linked to wallet (auto-linked by registry).");
   }
 
   // ── Step 6: Derive session key deterministically ────────────────

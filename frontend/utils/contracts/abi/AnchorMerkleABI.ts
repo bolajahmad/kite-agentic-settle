@@ -386,4 +386,4 @@ export const AnchorMerkleABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
-] as const
+] as const;

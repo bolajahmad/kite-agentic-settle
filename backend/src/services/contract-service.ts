@@ -2,7 +2,7 @@ import { ethers } from "ethers";
 import { AgentRegistryABI } from "../contracts/AgentRegistryABI.js";
 import { KiteAAWalletABI } from "../contracts/KiteAAWalletABI.js";
 import { AnchorMerkleABI } from "../contracts/AnchorMerkleABI.js";
-import { PaymentChannelABI } from "../contracts/PaymentChannelABI.js";
+import { PaymentChannelABI } from "../contracts/abi/PaymentChannelABI.js";
 
 // ─── Provider & Signer ────────────────────────────────────────────────
 
@@ -128,7 +128,7 @@ export async function addSessionKeyRuleOnChain(
   valueLimit: bigint,
   dailyLimit: bigint,
   validUntil: number,
-  allowedRecipients: string[]
+  blockedProviders: string[]
 ) {
   const wallet = getKiteAAWallet();
   const agentIdBytes32 = ethers.id(agentId);
@@ -138,7 +138,7 @@ export async function addSessionKeyRuleOnChain(
     valueLimit,
     dailyLimit,
     validUntil,
-    allowedRecipients
+    blockedProviders
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash };
@@ -247,6 +247,7 @@ export async function openChannelOnChain(
   token: string,
   mode: number, // 0 = Prepaid, 1 = Postpaid
   deposit: bigint,
+  maxSpend: bigint,
   maxDuration: number,
   ratePerCall: bigint
 ) {
@@ -263,7 +264,7 @@ export async function openChannelOnChain(
     await approveTx.wait();
   }
 
-  const tx = await pc.openChannel(provider, token, mode, deposit, maxDuration, ratePerCall);
+  const tx = await pc.openChannel(provider, token, mode, deposit, maxSpend, maxDuration, ratePerCall);
   const receipt = await tx.wait();
 
   // Extract channelId from ChannelOpened event
@@ -289,7 +290,23 @@ export async function activateChannelOnChain(channelId: string) {
   return { txHash: receipt.hash };
 }
 
-export async function closeChannelOnChain(
+export async function initiateSettlementOnChain(
+  channelId: string,
+  sequenceNumber: number,
+  cumulativeCost: bigint,
+  timestamp: number,
+  providerSignature: string,
+  merkleRoot: string = "0x0000000000000000000000000000000000000000000000000000000000000000"
+) {
+  const pc = getPaymentChannel();
+  const tx = await pc.initiateSettlement(
+    channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature, merkleRoot
+  );
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash };
+}
+
+export async function submitReceiptOnChain(
   channelId: string,
   sequenceNumber: number,
   cumulativeCost: bigint,
@@ -297,38 +314,19 @@ export async function closeChannelOnChain(
   providerSignature: string
 ) {
   const pc = getPaymentChannel();
-  const tx = await pc.closeChannel(
+  const tx = await pc.submitReceipt(
     channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash };
 }
 
-export async function closeChannelEmptyOnChain(channelId: string) {
-  const pc = getPaymentChannel();
-  const tx = await pc.closeChannelEmpty(channelId);
-  const receipt = await tx.wait();
-  return { txHash: receipt.hash };
-}
-
-export async function disputeChannelOnChain(channelId: string) {
-  const pc = getPaymentChannel();
-  const tx = await pc.disputeChannel(channelId);
-  const receipt = await tx.wait();
-  return { txHash: receipt.hash };
-}
-
-export async function resolveDisputeOnChain(
+export async function finalizeOnChain(
   channelId: string,
-  sequenceNumber: number,
-  cumulativeCost: bigint,
-  timestamp: number,
-  providerSignature: string
+  merkleRoot: string = "0x0000000000000000000000000000000000000000000000000000000000000000"
 ) {
   const pc = getPaymentChannel();
-  const tx = await pc.resolveDispute(
-    channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature
-  );
+  const tx = await pc.finalize(channelId, merkleRoot);
   const receipt = await tx.wait();
   return { txHash: receipt.hash };
 }
@@ -343,19 +341,37 @@ export async function forceCloseExpiredOnChain(channelId: string) {
 export async function getChannelOnChain(channelId: string) {
   const pc = getPaymentChannel(getProvider());
   const [
-    consumer, provider, token, mode, deposit, maxDuration,
-    openedAt, expiresAt, ratePerCall, settledAmount, status
+    consumer, provider, token, mode, deposit, maxSpend, maxDuration,
+    openedAt, expiresAt, ratePerCall, settledAmount, status,
+    settlementDeadline, highestClaimedCost, highestSequenceNumber
   ] = await pc.getChannel(channelId);
   return {
     consumer, provider, token,
     mode: Number(mode),
     deposit: deposit.toString(),
+    maxSpend: maxSpend.toString(),
     maxDuration: Number(maxDuration),
     openedAt: Number(openedAt),
     expiresAt: Number(expiresAt),
     ratePerCall: ratePerCall.toString(),
     settledAmount: settledAmount.toString(),
     status: Number(status),
+    settlementDeadline: Number(settlementDeadline),
+    highestClaimedCost: highestClaimedCost.toString(),
+    highestSequenceNumber: Number(highestSequenceNumber),
+  };
+}
+
+export async function getSettlementStateOnChain(channelId: string) {
+  const pc = getPaymentChannel(getProvider());
+  const [deadline, highestCost, highestSeq, initiator, challengeOpen] =
+    await pc.getSettlementState(channelId);
+  return {
+    deadline: Number(deadline),
+    highestCost: highestCost.toString(),
+    highestSeq: Number(highestSeq),
+    initiator,
+    challengeOpen,
   };
 }
 
