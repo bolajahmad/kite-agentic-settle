@@ -1,31 +1,34 @@
 "use client"
 
+import { Button } from "@/components/ui/button"
+import { cn, truncateString } from "@/lib/utils"
+import { useKiteData } from "@/utils/hooks/use-kite-data"
 import {
+  Menu as HeadlessMenu,
+  MenuButton,
+  MenuItem,
+  MenuItems,
+} from "@headlessui/react"
+import {
+  Bell,
+  ChevronDown,
+  HelpCircle,
   LayoutDashboard,
+  LogOut,
+  Menu,
+  RefreshCw,
+  Settings,
+  ShieldCheck,
+  ShoppingCart,
   Users,
   Wallet,
-  ShoppingCart,
-  History,
-  Settings,
-  HelpCircle,
-  Menu,
-  X,
-  Bell,
-  ShieldCheck,
   Zap,
-  ChevronDown,
-  RefreshCw,
-  LogOut,
 } from "lucide-react"
-import { Menu as HeadlessMenu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { useEffect, useState } from "react"
-import { cn, truncateAddress } from "@/lib/utils"
-import { OnboardingWizard } from "./onboarding-wizard"
-import { useKiteData } from "@/utils/hooks/use-kite-data"
-import { Button } from "@/components/ui/button"
+import { useState } from "react"
 import { injected, useAccount, useConnect, useDisconnect } from "wagmi"
+import { OnboardingWizard } from "./onboarding-wizard"
 
 const navItems = [
   { name: "Overview", href: "/", icon: LayoutDashboard },
@@ -40,7 +43,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const location = usePathname()
   const { address, agents, isLoading } = useKiteData()
-  const { isConnected } = useAccount();
+  const { isConnected } = useAccount()
   const [showOnboarding, setShowOnboarding] = useState(
     !isLoading && address && agents.length === 0
   )
@@ -52,7 +55,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="bg-kite-bg text-kite-text min-h-screen font-sans">
+    <div className="min-h-screen bg-kite-bg font-sans text-kite-text">
       {/* Mobile Sidebar Overlay */}
       {isSidebarOpen && (
         <div
@@ -64,23 +67,26 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
       {/* Sidebar */}
       <aside
         className={cn(
-          "border-kite-border fixed inset-y-0 left-0 z-50 w-64 border-r bg-white transition-transform lg:translate-x-0",
+          "fixed inset-y-0 left-0 z-50 w-64 border-r border-kite-border bg-white transition-transform lg:translate-x-0",
           isSidebarOpen ? "translate-x-0" : "-translate-x-full"
         )}
       >
         <div className="flex h-full flex-col">
           <div className="flex items-center gap-3 p-8">
-            <div className="bg-kite-primary shadow-kite-primary/20 flex h-10 w-10 items-center justify-center rounded-xl font-bold text-white shadow-lg">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kite-primary font-bold text-white shadow-lg shadow-kite-primary/20">
               K
             </div>
-            <span className="font-display text-kite-primary text-2xl font-bold tracking-tight">
+            <span className="font-display text-2xl font-bold tracking-tight text-kite-primary">
               Kite Pay
             </span>
           </div>
 
           <nav className="flex-1 space-y-2 px-6">
             {navItems.map((item) => {
-              const isActive = item.href === "/" ? location === item.href : location.includes(item.href)
+              const isActive =
+                item.href === "/"
+                  ? location === item.href
+                  : location.includes(item.href)
               return (
                 <Link
                   key={item.name}
@@ -88,8 +94,8 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
                   className={cn(
                     "flex items-center gap-3 rounded-xl px-4 py-3 transition-all duration-200",
                     isActive
-                      ? "bg-kite-primary shadow-kite-primary/10 text-white shadow-md"
-                      : "hover:text-kite-primary hover:bg-kite-bg text-slate-500"
+                      ? "bg-kite-primary text-white shadow-md shadow-kite-primary/10"
+                      : "text-slate-500 hover:bg-kite-bg hover:text-kite-primary"
                   )}
                 >
                   <item.icon size={20} />
@@ -99,17 +105,17 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
             })}
           </nav>
 
-          <div className="border-kite-border space-y-2 border-t p-6">
+          <div className="space-y-2 border-t border-kite-border p-6">
             <Link
               href="/settings"
-              className="hover:text-kite-primary hover:bg-kite-bg flex items-center gap-3 rounded-xl px-4 py-2 text-slate-500 transition-all"
+              className="flex items-center gap-3 rounded-xl px-4 py-2 text-slate-500 transition-all hover:bg-kite-bg hover:text-kite-primary"
             >
               <Settings size={20} />
               Settings
             </Link>
             <Link
               href="/help"
-              className="hover:text-kite-primary hover:bg-kite-bg flex items-center gap-3 rounded-xl px-4 py-2 text-slate-500 transition-all"
+              className="flex items-center gap-3 rounded-xl px-4 py-2 text-slate-500 transition-all hover:bg-kite-bg hover:text-kite-primary"
             >
               <HelpCircle size={20} />
               Help & Docs
@@ -121,9 +127,9 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
       {/* Main Content */}
       <div className="flex min-h-screen flex-col lg:pl-64">
         {/* Header */}
-        <header className="border-kite-border sticky top-0 z-30 flex h-20 items-center justify-between border-b bg-white/80 px-6 backdrop-blur-md lg:px-10">
+        <header className="sticky top-0 z-30 flex h-20 items-center justify-between border-b border-kite-border bg-white/80 px-6 backdrop-blur-md lg:px-10">
           <button
-            className="hover:text-kite-primary p-2 text-slate-500 lg:hidden"
+            className="p-2 text-slate-500 hover:text-kite-primary lg:hidden"
             onClick={() => setIsSidebarOpen(true)}
           >
             <Menu size={24} />
@@ -132,11 +138,11 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
           <div className="flex-1" />
 
           <div className="flex items-center gap-6">
-            <button className="hover:text-kite-primary relative p-2 text-slate-400 transition-colors">
+            <button className="relative p-2 text-slate-400 transition-colors hover:text-kite-primary">
               <Bell size={22} />
-              <span className="bg-kite-accent absolute top-2 right-2 h-2.5 w-2.5 rounded-full border-2 border-white" />
+              <span className="absolute top-2 right-2 h-2.5 w-2.5 rounded-full border-2 border-white bg-kite-accent" />
             </button>
-            <div className="bg-kite-border mx-2 h-8 w-px" />
+            <div className="mx-2 h-8 w-px bg-kite-border" />
             {isConnected ? (
               <HeadlessMenu as="div" className="relative">
                 {({ open }) => (
@@ -145,7 +151,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
                       <Button variant="secondary" size="sm">
                         <Wallet size={14} />
                         <span className="hidden sm:inline">
-                          {truncateAddress(address ?? "")}
+                          {truncateString(address ?? "")}
                         </span>
                         <ChevronDown
                           size={14}

@@ -1,18 +1,18 @@
 import {
   createPublicClient,
-  http,
-  encodeFunctionData,
   decodeEventLog,
-  type PublicClient
+  encodeFunctionData,
+  http,
+  type PublicClient,
 } from "viem";
 import {
-  paymentChannelAbi,
   agentRegistryAbi,
-  kiteAAWalletAbi,
-  walletFactoryAbi,
   erc20Abi,
+  kiteAAWalletAbi,
+  paymentChannelAbi,
+  walletFactoryAbi,
 } from "./abis.js";
-import type { KiteConfig, ChannelState } from "./types.js";
+import type { ChannelState, KiteConfig } from "./types.js";
 
 export class ContractService {
   private readonly client: PublicClient;
@@ -32,7 +32,7 @@ export class ContractService {
   private async sendTx(
     to: string,
     data: `0x${string}`,
-    value: bigint = 0n
+    value: bigint = 0n,
   ): Promise<{ hash: string; fee: bigint }> {
     return await this.wdkAccount.sendTransaction({ to, value, data });
   }
@@ -40,7 +40,7 @@ export class ContractService {
   private async waitAndDecodeLogs(
     hash: string,
     abi: any,
-    eventName: string
+    eventName: string,
   ): Promise<any> {
     const receipt = await this.wdkAccount.getTransactionReceipt(hash);
     if (!receipt) return null;
@@ -51,7 +51,10 @@ export class ContractService {
           data: log.data,
           topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
         });
-        const d = decoded as { eventName: string; args: Record<string, unknown> };
+        const d = decoded as {
+          eventName: string;
+          args: Record<string, unknown>;
+        };
         if (d.eventName === eventName) return d;
       } catch {
         continue;
@@ -101,7 +104,12 @@ export class ContractService {
     const data = encodeFunctionData({
       abi: agentRegistryAbi,
       functionName: "registerSession",
-      args: [agentId, sessionKey as `0x${string}`, BigInt(sessionIndex), BigInt(validUntil)],
+      args: [
+        agentId,
+        sessionKey as `0x${string}`,
+        BigInt(sessionIndex),
+        BigInt(validUntil),
+      ],
     });
     const result = await this.sendTx(this.config.contracts.agentRegistry, data);
     return result.hash;
@@ -146,12 +154,12 @@ export class ContractService {
   }
 
   async isUserRegistered(address: string): Promise<boolean> {
-    return (await this.client.readContract({
+    return await this.client.readContract({
       address: this.config.contracts.kiteAAWallet as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "isRegistered",
       args: [address as `0x${string}`],
-    })) as boolean;
+    });
   }
 
   async addAgentId(agentId: `0x${string}`, owner: string): Promise<string> {
@@ -173,7 +181,9 @@ export class ContractService {
     })) as readonly `0x${string}`[];
   }
 
-  async getAgentSessionKeys(agentId: `0x${string}`): Promise<readonly `0x${string}`[]> {
+  async getAgentSessionKeys(
+    agentId: `0x${string}`,
+  ): Promise<readonly `0x${string}`[]> {
     return (await this.client.readContract({
       address: this.config.contracts.kiteAAWallet as `0x${string}`,
       abi: kiteAAWalletAbi,
@@ -207,10 +217,7 @@ export class ContractService {
     const approveData = encodeFunctionData({
       abi: erc20Abi,
       functionName: "approve",
-      args: [
-        this.config.contracts.kiteAAWallet as `0x${string}`,
-        amount,
-      ],
+      args: [this.config.contracts.kiteAAWallet as `0x${string}`, amount],
     });
     await this.sendTx(token, approveData);
 
@@ -222,7 +229,7 @@ export class ContractService {
     });
     const result = await this.sendTx(
       this.config.contracts.kiteAAWallet,
-      depositData
+      depositData,
     );
     return result.hash;
   }
@@ -251,10 +258,7 @@ export class ContractService {
         metadata,
       ],
     });
-    const result = await this.sendTx(
-      this.config.contracts.kiteAAWallet,
-      data,
-    );
+    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
     return result.hash;
   }
 
@@ -265,10 +269,7 @@ export class ContractService {
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "updateBlockedProviders",
-      args: [
-        sessionKey as `0x${string}`,
-        blockedProviders as `0x${string}`[],
-      ],
+      args: [sessionKey as `0x${string}`, blockedProviders as `0x${string}`[]],
     });
     const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
     return result.hash;
@@ -321,17 +322,14 @@ export class ContractService {
     deposit: bigint,
     maxSpend: bigint,
     maxDuration: number,
-    ratePerCall: bigint
+    ratePerCall: bigint,
   ): Promise<{ txHash: string; channelId: `0x${string}` | undefined }> {
     // Approve deposit for prepaid
     if (mode === 0 && deposit > 0n) {
       const approveData = encodeFunctionData({
         abi: erc20Abi,
         functionName: "approve",
-        args: [
-          this.config.contracts.paymentChannel as `0x${string}`,
-          deposit,
-        ],
+        args: [this.config.contracts.paymentChannel as `0x${string}`, deposit],
       });
       await this.sendTx(token, approveData);
     }
@@ -351,14 +349,14 @@ export class ContractService {
     });
     const result = await this.sendTx(
       this.config.contracts.paymentChannel,
-      data
+      data,
     );
 
     // Decode ChannelOpened event to get channelId
     const event = await this.waitAndDecodeLogs(
       result.hash,
       paymentChannelAbi,
-      "ChannelOpened"
+      "ChannelOpened",
     );
     const channelId = event?.args?.channelId as `0x${string}` | undefined;
 
@@ -373,7 +371,7 @@ export class ContractService {
     });
     const result = await this.sendTx(
       this.config.contracts.paymentChannel,
-      data
+      data,
     );
     return result.hash;
   }
@@ -400,7 +398,7 @@ export class ContractService {
     });
     const result = await this.sendTx(
       this.config.contracts.paymentChannel,
-      data
+      data,
     );
     return result.hash;
   }
@@ -425,7 +423,7 @@ export class ContractService {
     });
     const result = await this.sendTx(
       this.config.contracts.paymentChannel,
-      data
+      data,
     );
     return result.hash;
   }
@@ -441,7 +439,7 @@ export class ContractService {
     });
     const result = await this.sendTx(
       this.config.contracts.paymentChannel,
-      data
+      data,
     );
     return result.hash;
   }
@@ -454,7 +452,7 @@ export class ContractService {
     });
     const result = await this.sendTx(
       this.config.contracts.paymentChannel,
-      data
+      data,
     );
     return result.hash;
   }
@@ -514,13 +512,18 @@ export class ContractService {
     channelId: `0x${string}`,
     sequenceNumber: number,
     cumulativeCost: bigint,
-    timestamp: number
+    timestamp: number,
   ): Promise<`0x${string}`> {
     return (await this.client.readContract({
       address: this.config.contracts.paymentChannel as `0x${string}`,
       abi: paymentChannelAbi,
       functionName: "getReceiptHash",
-      args: [channelId, BigInt(sequenceNumber), cumulativeCost, BigInt(timestamp)],
+      args: [
+        channelId,
+        BigInt(sequenceNumber),
+        cumulativeCost,
+        BigInt(timestamp),
+      ],
     })) as `0x${string}`;
   }
 
@@ -566,7 +569,7 @@ export class ContractService {
     sessionKey: string,
     recipient: string,
     token: string,
-    amount: bigint
+    amount: bigint,
   ): Promise<string> {
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
@@ -587,7 +590,7 @@ export class ContractService {
   async transferToken(
     token: string,
     to: string,
-    amount: bigint
+    amount: bigint,
   ): Promise<string> {
     const data = encodeFunctionData({
       abi: erc20Abi,
@@ -601,7 +604,7 @@ export class ContractService {
   async getAllowance(
     token: string,
     owner: string,
-    spender: string
+    spender: string,
   ): Promise<bigint> {
     return (await this.client.readContract({
       address: token as `0x${string}`,

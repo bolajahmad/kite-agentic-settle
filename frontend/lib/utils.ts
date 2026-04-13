@@ -5,8 +5,15 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-
-export function truncateAddress(address: string) {
-  if (!address) return "";
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+export const truncateString = (
+  str: string,
+  start: number = 6,
+  end: number = 4
+) => {
+  if (!str) return ""
+  if (str.length <= start + end) return str
+  return `${str.slice(0, start)}...${str.slice(-end)}`
 }
+
+export const baseUrl =
+  process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"

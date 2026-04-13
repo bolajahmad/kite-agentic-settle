@@ -5,11 +5,11 @@
  * Replaces the 5-step frontend wizard with a single programmatic call.
  */
 
-import { stringToHex, parseUnits, formatUnits, toHex } from "viem";
+import { formatUnits, parseUnits, stringToHex } from "viem";
 import type { ContractService } from "./contracts.js";
-import { deriveAgentAccount, deriveSessionAccount } from "./wallet.js";
 import type { KiteConfig } from "./types.js";
-import { getVar, setVar } from "./vars.js";
+import { setVar } from "./vars.js";
+import { deriveAgentAccount, deriveSessionAccount } from "./wallet.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -75,12 +75,12 @@ export async function onboardAgent(
   log("Checking user registration...");
   const wasAlreadyRegistered = await contracts.isUserRegistered(eoaAddress);
 
-  if (!wasAlreadyRegistered) {
+  if (wasAlreadyRegistered) {
+    log("EOA already registered.");
+  } else {
     log("Registering EOA on KiteAAWallet...");
     const hash = await contracts.registerUser();
     txHashes.push({ step: "Register EOA", hash });
-  } else {
-    log("EOA already registered.");
   }
 
   // ── Step 2: Determine agent index ────────────────────────────────
@@ -95,7 +95,9 @@ export async function onboardAgent(
   } else {
     // Create the next agent
     agentIndex = existingAgents.length;
-    log(`Found ${existingAgents.length} existing agent(s). Next index: ${agentIndex}`);
+    log(
+      `Found ${existingAgents.length} existing agent(s). Next index: ${agentIndex}`,
+    );
   }
 
   // ── Step 3: Derive agent address deterministically ──────────────
@@ -112,7 +114,11 @@ export async function onboardAgent(
     const resolved = await contracts.resolveAgentByAddress(agent.address);
     const resolvedId = (resolved as any)[0] ?? (resolved as any).agentId;
     // A non-zero agentId means the agent is registered
-    if (resolvedId && resolvedId !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
+    if (
+      resolvedId &&
+      resolvedId !==
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+    ) {
       agentId = resolvedId as `0x${string}`;
       agentAlreadyRegistered = true;
       log(`Agent already registered. ID: ${agentId}`);
@@ -134,12 +140,13 @@ export async function onboardAgent(
       tags: options.tags || [],
     });
     const metadataHex = stringToHex(metadata);
-    const { txHash: regHash, agentId: newAgentId } = await contracts.registerAgent(
-      agent.address,
-      config.contracts.kiteAAWallet,
-      agentIndex,
-      metadataHex,
-    );
+    const { txHash: regHash, agentId: newAgentId } =
+      await contracts.registerAgent(
+        agent.address,
+        config.contracts.kiteAAWallet,
+        agentIndex,
+        metadataHex,
+      );
     txHashes.push({ step: "Register Agent", hash: regHash });
     log(`Agent registered. ID: ${newAgentId}`);
     return newAgentId;
@@ -228,7 +235,10 @@ export async function onboardAgent(
     setVar(`AGENT_${agentIndex}_PRIVATE_KEY`, agent.privateKey);
     setVar(`AGENT_${agentIndex}_ADDRESS`, agent.address);
     setVar(`AGENT_${agentIndex}_ID`, agentId);
-    setVar(`SESSION_${agentIndex}_${sessionIndex}_PRIVATE_KEY`, session.privateKey);
+    setVar(
+      `SESSION_${agentIndex}_${sessionIndex}_PRIVATE_KEY`,
+      session.privateKey,
+    );
     setVar(`SESSION_${agentIndex}_${sessionIndex}_ADDRESS`, session.address);
   } catch {
     log("Warning: Could not persist credentials to vars.");
@@ -237,10 +247,7 @@ export async function onboardAgent(
   // ── Step 9: Read balances ───────────────────────────────────────
   log("Reading balances...");
   const kiteBalance = await contracts.getNativeBalance(eoaAddress);
-  const kttBalance = await contracts.getTokenBalance(
-    config.token,
-    eoaAddress,
-  );
+  const kttBalance = await contracts.getTokenBalance(config.token, eoaAddress);
   const walletKttBalance = await contracts.getUserBalance(
     eoaAddress,
     config.token,
@@ -255,8 +262,14 @@ export async function onboardAgent(
       txHashes.push({ step: "Deposit KTT", hash: depositHash });
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      if (msg.includes("e450d38c") || msg.includes("InsufficientBalance") || msg.includes("insufficient")) {
-        log(`Skipped KTT deposit — insufficient balance (need ${options.fundAmount} KTT)`);
+      if (
+        msg.includes("e450d38c") ||
+        msg.includes("InsufficientBalance") ||
+        msg.includes("insufficient")
+      ) {
+        log(
+          `Skipped KTT deposit — insufficient balance (need ${options.fundAmount} KTT)`,
+        );
       } else {
         log(`Skipped KTT deposit — ${msg.slice(0, 120)}`);
       }
@@ -271,8 +284,13 @@ export async function onboardAgent(
       txHashes.push({ step: "Fund Agent Gas", hash: gasHash });
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      if (msg.includes("insufficient funds") || msg.includes("insufficient balance")) {
-        log(`Skipped gas funding — insufficient native balance (need ${options.gasAmount} KITE)`);
+      if (
+        msg.includes("insufficient funds") ||
+        msg.includes("insufficient balance")
+      ) {
+        log(
+          `Skipped gas funding — insufficient native balance (need ${options.gasAmount} KITE)`,
+        );
       } else {
         log(`Skipped gas funding — ${msg.slice(0, 120)}`);
       }

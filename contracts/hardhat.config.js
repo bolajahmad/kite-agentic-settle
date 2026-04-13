@@ -17,7 +17,7 @@ module.exports = {
     },
   },
   sourcify: {
-    enabled: false
+    enabled: false,
   },
   networks: {
     kiteTestnet: {
@@ -33,13 +33,13 @@ module.exports = {
     },
     customChains: [
       {
-        network: 'kiteTestnet',
+        network: "kiteTestnet",
         chainId: 2368,
         urls: {
-          apiURL: 'https://kitescan.ai',
-          browserURL: 'https://testnet.kitescan.ai',
+          apiURL: "https://testnet.kitescan.ai",
+          browserURL: "https://testnet.kitescan.ai",
         },
       },
     ],
-  }
+  },
 };

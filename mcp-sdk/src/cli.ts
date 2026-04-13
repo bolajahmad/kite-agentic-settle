@@ -20,13 +20,12 @@
 
 import readline from "node:readline";
 import {
-  getVar,
-  setVar,
   deleteVar,
-  listVars,
-  hasVar,
+  getVar,
   getVarsPath,
-  resolveVar,
+  hasVar,
+  listVars,
+  setVar,
 } from "./vars.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -252,16 +251,12 @@ async function cmdOnboard(args: string[]) {
   let gasAmountStr = findFlag(args, "--gas");
   const agentIndexStr = findFlag(args, "--agent-index");
 
-  // Seed / private key — always from vars, never from agents.json
   let credential: string | undefined;
 
   // Check vars first, then prompt
   credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
   if (!credential) {
-    credential = await prompt(
-      "  Seed phrase or private key: ",
-      true,
-    );
+    credential = await prompt("  Seed phrase or private key: ", true);
   }
 
   if (!credential) die("Seed phrase or private key is required");
@@ -270,17 +265,28 @@ async function cmdOnboard(args: string[]) {
   if (!name) name = await prompt("  Agent name: ");
   if (!name) die("Agent name is required");
 
-  if (!category) category = (await prompt("  Category (e.g. defi, social, data) [general]: ")) || "general";
+  if (!category)
+    category =
+      (await prompt("  Category (e.g. defi, social, data) [general]: ")) ||
+      "general";
   if (!description) description = (await prompt("  Description []: ")) || "";
 
-  if (!valueLimitStr) valueLimitStr = (await prompt("  Value limit per tx in KTT [1.0]: ")) || "1.0";
-  if (!dailyLimitStr) dailyLimitStr = (await prompt("  Daily limit in KTT [10.0]: ")) || "10.0";
-  if (!validDaysStr) validDaysStr = (await prompt("  Session validity in days [30]: ")) || "30";
+  if (!valueLimitStr)
+    valueLimitStr =
+      (await prompt("  Value limit per tx in KTT [1.0]: ")) || "1.0";
+  if (!dailyLimitStr)
+    dailyLimitStr = (await prompt("  Daily limit in KTT [10.0]: ")) || "10.0";
+  if (!validDaysStr)
+    validDaysStr = (await prompt("  Session validity in days [30]: ")) || "30";
 
   const wantFund = await prompt("  Fund agent wallet? (y/N): ");
   if (wantFund.toLowerCase() === "y") {
-    if (!fundAmountStr) fundAmountStr = (await prompt("  KTT amount to deposit [1.0]: ")) || "1.0";
-    if (!gasAmountStr) gasAmountStr = (await prompt("  Native gas to send in ETH [0.001]: ")) || "0.001";
+    if (!fundAmountStr)
+      fundAmountStr =
+        (await prompt("  KTT amount to deposit [1.0]: ")) || "1.0";
+    if (!gasAmountStr)
+      gasAmountStr =
+        (await prompt("  Native gas to send in ETH [0.001]: ")) || "0.001";
   }
 
   // Create client
@@ -299,7 +305,8 @@ async function cmdOnboard(args: string[]) {
         agentName: name,
         category,
         description,
-        agentIndex: agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : undefined,
+        agentIndex:
+          agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : undefined,
         valueLimit: valueLimitStr,
         dailyLimit: dailyLimitStr,
         validDays: parseInt(validDaysStr!, 10),
@@ -348,7 +355,8 @@ async function cmdWhoami(args: string[]) {
       seedPhrase: credential,
     });
 
-    const agentIndex = agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : 0;
+    const agentIndex =
+      agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : 0;
 
     // Derive agent address at the given index
     const { deriveAgentAccount } = await import("./wallet.js");
@@ -362,7 +370,11 @@ async function cmdWhoami(args: string[]) {
     try {
       const resolved = await client.resolveAgentByAddress(agent.address);
       const agentId = (resolved as any)[0] ?? (resolved as any).agentId;
-      if (agentId && agentId !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
+      if (
+        agentId &&
+        agentId !==
+          "0x0000000000000000000000000000000000000000000000000000000000000000"
+      ) {
         info(`  Agent ID:       ${agentId}`);
         info(`  Status:         Registered on-chain`);
       } else {
