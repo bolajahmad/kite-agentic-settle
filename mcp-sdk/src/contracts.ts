@@ -308,6 +308,36 @@ export class ContractService {
     });
   }
 
+  async revokeSessionKey(sessionKey: string): Promise<string> {
+    const data = encodeFunctionData({
+      abi: kiteAAWalletAbi,
+      functionName: "revokeSessionKey",
+      args: [sessionKey as `0x${string}`],
+    });
+    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    return result.hash;
+  }
+
+  async getSessionBlockedProviders(
+    sessionKey: string,
+  ): Promise<readonly `0x${string}`[]> {
+    return (await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "getSessionBlockedProviders",
+      args: [sessionKey as `0x${string}`],
+    })) as readonly `0x${string}`[];
+  }
+
+  async isSessionValid(sessionKey: string): Promise<boolean> {
+    return await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "isSessionValid",
+      args: [sessionKey as `0x${string}`],
+    });
+  }
+
   async getDepositedTokenBalance(
     token: `0x${string}`,
     address: `0x${string}`,

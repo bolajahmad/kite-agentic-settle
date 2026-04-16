@@ -501,7 +501,13 @@ async function main() {
       case "whoami":
         await cmdWhoami(args.slice(1));
         break;
-      
+
+      case "channel": {
+        const { cmdChannels } = await import("./commands/channels.js");
+        await cmdChannels(args.slice(1));
+        break;
+      }
+
       case "session": {
         const { cmdSessions } = await import("./commands/sessions.js");
         await cmdSessions(args.slice(1));
