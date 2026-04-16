@@ -14,11 +14,13 @@
  * npx kite call                 Call a paid API endpoint
  * npx kite balance              Show agent token balance
  * npx kite usage                Show usage logs
- * npx kite fund <addr> [amt]    Fund wallet with test tokens
+ * npx kite fund <token> [amt]    Fund wallet with test tokens
+ * npx kite withdraw [token] [amt]  Withdraw tokens from wallet (to EOA)
  * npx kite simulate             Run payment simulation
  */
 
 import readline from "node:readline";
+import { zeroAddress } from "viem";
 import {
   deleteVar,
   getVar,
@@ -30,17 +32,16 @@ import {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-function prompt(question: string, hidden = false): Promise<string> {
+export async function prompt(
+  question: string,
+  hidden = false,
+): Promise<string> {
   return new Promise((res) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
     if (hidden && process.stdin.isTTY) {
-      // Hide input for secrets
-      process.stdout.write(question);
       const stdin = process.stdin;
+
+      process.stdout.write(question);
+
       const wasRaw = stdin.isRaw;
 
       stdin.setRawMode(true);
@@ -48,31 +49,57 @@ function prompt(question: string, hidden = false): Promise<string> {
       stdin.setEncoding("utf-8");
 
       let value = "";
-      const onData = (ch: string) => {
-        const c = ch.toString();
-        if (c === "\n" || c === "\r" || c === "\u0004") {
+
+      const onData = (chunk: string) => {
+        const str = chunk.toString();
+
+        // ENTER / RETURN
+        if (str === "\n" || str === "\r" || str === "\u0004") {
           stdin.setRawMode(wasRaw ?? false);
           stdin.pause();
           stdin.removeListener("data", onData);
-          rl.close();
           process.stdout.write("\n");
-          res(value);
-        } else if (c === "\u0003") {
-          // Ctrl+C
+          return res(value);
+        }
+
+        // CTRL + C
+        if (str === "\u0003") {
           process.exit(1);
-        } else if (c === "\u007F" || c === "\b") {
-          // Backspace
+        }
+
+        // BACKSPACE (can come as multiple chars too)
+        if (str === "\u007F" || str === "\b") {
           if (value.length > 0) {
             value = value.slice(0, -1);
             process.stdout.write("\b \b");
           }
-        } else {
-          value += c;
-          process.stdout.write("*");
+          return;
         }
+
+        // 🔥 HANDLE NORMAL INPUT + PASTE
+        // Remove any newline chars inside paste
+        const clean = str.replace(/[\r\n]/g, "");
+
+        if (!clean) return;
+
+        // Append full chunk
+        value += clean;
+
+        // 🔥 CRITICAL: overwrite what terminal already printed
+        // Move cursor back by length of pasted string
+        process.stdout.write("\b".repeat(clean.length));
+
+        // Replace with masked output
+        process.stdout.write("*".repeat(clean.length));
       };
+
       stdin.on("data", onData);
     } else {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
       rl.question(question, (answer) => {
         rl.close();
         res(answer.trim());
@@ -102,7 +129,7 @@ function getCliArgs(): string[] {
   return process.argv.slice(2);
 }
 
-function findFlag(args: string[], flag: string): string | undefined {
+export function findFlag(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   if (idx !== -1 && args[idx + 1]) return args[idx + 1];
   return undefined;
@@ -201,10 +228,10 @@ async function cmdVars(args: string[]) {
 // ── init subcommand ────────────────────────────────────────────────
 
 async function cmdInit() {
-  header("Kite Agent Pay — Setup");
+  header("KiteSettler — EOA Setup");
 
   // Store seed phrase / private key in vars
-  const existing = getVar("PRIVATE_KEY") || getVar("AGENT_SEED");
+  const existing = getVar("PRIVATE_KEY");
   if (existing) {
     info("Credential already stored in vars.");
     const overwrite = await prompt("  Overwrite? (y/N): ");
@@ -220,13 +247,8 @@ async function cmdInit() {
   const credential = await prompt("  Seed phrase or private key: ", true);
   if (!credential) die("Credential cannot be empty");
 
-  if (credential.startsWith("0x")) {
-    setVar("PRIVATE_KEY", credential);
-    info(`✓ Stored PRIVATE_KEY in ${getVarsPath()}`);
-  } else {
-    setVar("AGENT_SEED", credential);
-    info(`✓ Stored AGENT_SEED in ${getVarsPath()}`);
-  }
+  setVar("PRIVATE_KEY", credential);
+  info(`✓ Stored PRIVATE_KEY in ${getVarsPath()}`);
 
   info("");
   info("Next steps:");
@@ -254,7 +276,7 @@ async function cmdOnboard(args: string[]) {
   let credential: string | undefined;
 
   // Check vars first, then prompt
-  credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+  credential = getVar("PRIVATE_KEY");
   if (!credential) {
     credential = await prompt("  Seed phrase or private key: ", true);
   }
@@ -346,7 +368,7 @@ async function cmdWhoami(args: string[]) {
 
   try {
     // Load credential from vars
-    const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+    const credential = getVar("PRIVATE_KEY");
     if (!credential) die("No credential found. Run: npx kite init");
 
     const { KitePaymentClient } = await import("./client.js");
@@ -355,40 +377,54 @@ async function cmdWhoami(args: string[]) {
       seedPhrase: credential,
     });
 
-    const agentIndex =
-      agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : 0;
+    const isRegistered = await client
+      .getContractService()
+      .isUserRegistered(client.address);
 
-    // Derive agent address at the given index
-    const { deriveAgentAccount } = await import("./wallet.js");
-    const agent = await deriveAgentAccount(client.getPrivateKey(), agentIndex);
-
-    header(`Agent (index: ${agentIndex})`);
-    info(`  EOA Address:    ${client.address}`);
-    info(`  Agent Address:  ${agent.address}`);
-
-    // Check on-chain registration
-    try {
-      const resolved = await client.resolveAgentByAddress(agent.address);
-      const agentId = (resolved as any)[0] ?? (resolved as any).agentId;
-      if (
-        agentId &&
-        agentId !==
-          "0x0000000000000000000000000000000000000000000000000000000000000000"
-      ) {
-        info(`  Agent ID:       ${agentId}`);
-        info(`  Status:         Registered on-chain`);
-      } else {
-        info(`  Status:         Not registered on-chain`);
+    if (agentIndexStr == undefined) {
+      info(`  EOA Address:    ${client.address}`);
+      info(
+        `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
+      );
+    } else {
+      let agentIndex = Number.parseInt(agentIndexStr, 10);
+      if (Number.isNaN(agentIndex) || agentIndex < 0) {
+        die("Invalid --agent-index value. Must be a non-negative integer.");
       }
-    } catch {
-      info(`  Status:         Not registered on-chain`);
+      // Derive agent address at the given index
+      const { deriveAgentAccount } = await import("./wallet.js");
+      const agent = await deriveAgentAccount(
+        client.getPrivateKey(),
+        agentIndex,
+      );
+
+      info(`  EOA Address:    ${client.address}`);
+      info(
+        `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
+      );
+      info(`  Agent ${agentIndex}'s Address:  ${agent.address}`);
+
+      // Check agent's on-chain registration status
+      try {
+        const resolved = await client.resolveAgentByAddress(agent.address);
+        const agentId = (resolved as any)[0] ?? (resolved as any).agentId;
+        if (agentId && agentId !== zeroAddress) {
+          info(`  Agent ID:       ${agentId}`);
+          info(`  Status:         Registered on-chain`);
+        } else {
+          info(`  Status:         Not registered on-chain`);
+        }
+
+        // Show stored vars for this agent
+        const storedId = getVar(`AGENT_${agentIndex}_ID`);
+        if (storedId) info(`  Stored ID (vars): ${storedId}`);
+
+        console.log("");
+      } catch (error: any) {
+        info(`  Status:         Not registered on-chain`);
+        die(error.message);
+      }
     }
-
-    // Show stored vars for this agent
-    const storedId = getVar(`AGENT_${agentIndex}_ID`);
-    if (storedId) info(`  Stored ID (vars): ${storedId}`);
-
-    console.log("");
   } catch (err: any) {
     die(err.message);
   }
@@ -431,7 +467,7 @@ function showHelp() {
     npx kite onboard --name "My Agent" --category defi
     npx kite call --agent-index 0
     npx kite call --agent-index 0 --decide rules
-    npx kite balance
+    npx kite balance --token "" --show-native
     npx kite whoami --agent-index 1
 
   Config files:
@@ -446,7 +482,7 @@ async function main() {
   const command = args[0] || "help";
 
   console.log("");
-  console.log("  Kite Agent Pay");
+  console.log("  KiteSettler");
 
   try {
     switch (command) {
@@ -465,14 +501,21 @@ async function main() {
       case "whoami":
         await cmdWhoami(args.slice(1));
         break;
+      
+      case "session": {
+        const { cmdSessions } = await import("./commands/sessions.js");
+        await cmdSessions(args.slice(1));
+        break;
+      }
 
       case "call":
       case "balance":
       case "usage":
       case "fund":
+      case "withdraw":
       case "simulate": {
         // Delegate to the app module (lazy import to keep vars/init fast)
-        const { runAppCommand } = await import("./app-commands");
+        const { runAppCommand } = await import("./commands/index.js");
         await runAppCommand(command, args.slice(1));
         break;
       }

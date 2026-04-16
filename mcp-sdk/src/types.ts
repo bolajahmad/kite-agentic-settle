@@ -89,7 +89,7 @@ export interface UsageLog {
 
 export interface PaymentResult {
   success: boolean;
-  method: "x402" | "channel" | "batch";
+  method: "perCall" | "channel" | "batch";
   txHash?: string;
   receipt?: Receipt;
   amount: bigint;
@@ -106,7 +106,7 @@ export interface PaymentRequest {
 }
 
 export interface InterceptorOptions {
-  paymentMode?: "x402" | "channel" | "batch" | "auto";
+  paymentMode?: "perCall" | "channel" | "batch" | "session" | "auto";
   channelId?: `0x${string}`;
   maxPaymentPerCall?: bigint;
   walletAddress?: string;

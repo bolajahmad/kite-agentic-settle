@@ -1,0 +1,62 @@
+type Agent @entity(immutable: false) {
+  id: ID!
+  agentId: Bytes!
+  address: Bytes!
+  wallet: Bytes!
+  index: BigInt!
+  metadata: Bytes
+
+  owner: User!
+
+  active: Boolean!
+  sessions: [Session!]! @derivedFrom(field: "agent")
+
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type Session @entity(immutable: false) {
+  id: ID!
+  sessionKey: Bytes!
+  user: User!
+  agent: Agent!
+
+  sessionIndex: BigInt!
+  validUntil: BigInt!
+  valueLimit: BigInt
+  dailyLimit: BigInt
+  metadataHash: Bytes
+
+  status: String! # "ACTIVE", "REVOKED", "EXPIRED"
+  blockedProviders: [Bytes!] # address[]
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type User @entity(immutable: false) {
+  id: ID!
+  address: Bytes!
+
+  agents: [Agent!]! @derivedFrom(field: "owner")
+  sessions: [Session!]! @derivedFrom(field: "user")
+
+  totalDeposited: BigInt!
+  totalWithdrawn: BigInt!
+
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type Payment @entity(immutable: false) {
+  id: ID!
+  session: Session!
+  agent: Agent!
+
+  recipient: Bytes!
+  token: Bytes!
+  amount: BigInt!
+
+  timestamp: BigInt!
+  txHash: Bytes!
+  type: String! # "PerCall" | "BatchCall" | "BatchTime"
+}

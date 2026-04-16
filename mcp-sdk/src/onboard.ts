@@ -247,10 +247,13 @@ export async function onboardAgent(
   // ── Step 9: Read balances ───────────────────────────────────────
   log("Reading balances...");
   const kiteBalance = await contracts.getNativeBalance(eoaAddress);
-  const kttBalance = await contracts.getTokenBalance(config.token, eoaAddress);
-  const walletKttBalance = await contracts.getUserBalance(
-    eoaAddress,
-    config.token,
+  const kttBalance = await contracts.getTokenBalance(
+    config.token as `0x${string}`,
+    eoaAddress as `0x${string}`,
+  );
+  const walletKttBalance = await contracts.getDepositedTokenBalance(
+    config.token as `0x${string}`,
+    eoaAddress as `0x${string}`,
   );
 
   // ── Step 10: Optional funding ────────────────────────────────────

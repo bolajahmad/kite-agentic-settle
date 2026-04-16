@@ -192,15 +192,6 @@ export class ContractService {
     })) as readonly `0x${string}`[];
   }
 
-  async getUserBalance(address: string, token: string): Promise<bigint> {
-    return (await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
-      abi: kiteAAWalletAbi,
-      functionName: "getUserBalance",
-      args: [address as `0x${string}`, token as `0x${string}`],
-    })) as bigint;
-  }
-
   async getNativeBalance(address: string): Promise<bigint> {
     return await this.client.getBalance({
       address: address as `0x${string}`,
@@ -230,6 +221,19 @@ export class ContractService {
     const result = await this.sendTx(
       this.config.contracts.kiteAAWallet,
       depositData,
+    );
+    return result.hash;
+  }
+
+  async withdrawFromWallet(token: string, amount: bigint): Promise<string> {
+    const withdrawData = encodeFunctionData({
+      abi: kiteAAWalletAbi,
+      functionName: "withdraw",
+      args: [token as `0x${string}`, amount],
+    });
+    const result = await this.sendTx(
+      this.config.contracts.kiteAAWallet,
+      withdrawData,
     );
     return result.hash;
   }
@@ -304,13 +308,28 @@ export class ContractService {
     });
   }
 
-  async getTokenBalance(token: string, address: string): Promise<bigint> {
-    return (await this.client.readContract({
-      address: token as `0x${string}`,
+  async getDepositedTokenBalance(
+    token: `0x${string}`,
+    address: `0x${string}`,
+  ): Promise<bigint> {
+    return await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "getUserBalance",
+      args: [address, token],
+    });
+  }
+
+  async getTokenBalance(
+    token: `0x${string}`,
+    address: `0x${string}`,
+  ): Promise<bigint> {
+    return await this.client.readContract({
+      address: token,
       abi: erc20Abi,
       functionName: "balanceOf",
-      args: [address as `0x${string}`],
-    })) as bigint;
+      args: [address],
+    });
   }
 
   // -- Payment Channel --
@@ -528,12 +547,12 @@ export class ContractService {
   }
 
   async isChannelExpired(channelId: `0x${string}`): Promise<boolean> {
-    return (await this.client.readContract({
+    return await this.client.readContract({
       address: this.config.contracts.paymentChannel as `0x${string}`,
       abi: paymentChannelAbi,
       functionName: "isChannelExpired",
       args: [channelId],
-    })) as boolean;
+    });
   }
 
   // -- Wallet Factory --

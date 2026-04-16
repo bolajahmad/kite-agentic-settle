@@ -6,7 +6,7 @@ schema:
 dataSources:
   - kind: ethereum
     name: KiteAAWallet
-    network: sepolia
+    network: kite-ai-testnet
     source:
       address: "0xDbe183022eCCA66cc074e66f571Eee5FFa728BeD"
       abi: KiteAAWallet
@@ -17,10 +17,8 @@ dataSources:
       language: wasm/assemblyscript
       entities:
         - AgentLinked
-        - AgentRegistryUpdated
         - FundsDeposited
         - FundsWithdrawn
-        - OwnershipTransferred
         - PaymentExecuted
         - ProviderBlocked
         - ProviderUnblocked
@@ -30,18 +28,14 @@ dataSources:
         - UserRegistered
       abis:
         - name: KiteAAWallet
-          file: ./abis/KiteAAWallet.json
+          file: ./abis/KiteAAWalletABI.json
       eventHandlers:
         - event: AgentLinked(indexed address,indexed bytes32)
           handler: handleAgentLinked
-        - event: AgentRegistryUpdated(indexed address)
-          handler: handleAgentRegistryUpdated
         - event: FundsDeposited(indexed address,indexed address,uint256)
           handler: handleFundsDeposited
         - event: FundsWithdrawn(indexed address,indexed address,uint256)
           handler: handleFundsWithdrawn
-        - event: OwnershipTransferred(indexed address,indexed address)
-          handler: handleOwnershipTransferred
         - event: PaymentExecuted(indexed address,indexed bytes32,indexed address,address,uint256)
           handler: handlePaymentExecuted
         - event: ProviderBlocked(indexed address,indexed address)
@@ -57,3 +51,27 @@ dataSources:
         - event: UserRegistered(indexed address)
           handler: handleUserRegistered
       file: ./src/kite-aa-wallet.ts
+
+  - kind: ethereum
+    name: AgentRegistry
+    network: kite-ai-testnet
+    source:
+      address: "0x2A904dF5979Fbc3B65F0F298C0a3B4e06FF0881d"
+      abi: AgentRegistry
+      startBlock: 20846120
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - AgentRegistered
+        - AgentDeactivated
+      abis:
+        - name: AgentRegistry
+          file: ./abis/AgentRegistryABI.json
+      eventHandlers:
+        - event: AgentRegistered(indexed bytes32,indexed address,indexed address,address,uint256,bytes)
+          handler: handleAgentRegistered
+        - event: AgentDeactivated(indexed bytes32)
+          handler: handleAgentDeactivated
+      file: ./src/agent-registry.ts

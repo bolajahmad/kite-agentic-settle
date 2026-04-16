@@ -8,31 +8,32 @@
 import http from "node:http";
 import readline from "node:readline";
 import {
+  createPublicClient,
   formatUnits,
   parseUnits,
-  createPublicClient,
-  createWalletClient,
   http as viemHttp,
-  encodeFunctionData,
+  zeroAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { KitePaymentClient, KITE_TESTNET, erc20Abi } from "./index.js";
-import { decide } from "./decide.js";
-import { resolveVar, getVar } from "./vars.js";
-import type { DecisionMode, SessionRules } from "./decide.js";
-import type { PaymentRequest, PaymentResult } from "./types.js";
+import { findFlag } from "../cli.js";
+import { TOKENS } from "../config.js";
+import type { DecisionMode } from "../decide.js";
+import { KITE_TESTNET, KitePaymentClient, createKiteWallet } from "../index.js";
+import type { PaymentRequest, PaymentResult } from "../types.js";
+import { getVar } from "../vars.js";
+import { callApi } from "./call.js";
 
 // ── Constants ──────────────────────────────────────────────────────
 
 const TOKEN = KITE_TESTNET.token;
 const MOCK_PORT = 4100;
-const SERVICE_PRICE = "100000000000000000"; // 0.1 KTT
+const SERVICE_PRICE = "100000000000000000"; // 0.1 KITE
 
 // ── Arg parsing ────────────────────────────────────────────────────
 
 interface CmdOpts {
   decide: DecisionMode;
-  agentId?: string;
+  agentIndex?: string;
   url?: string;
   fundAddress?: string;
   fundAmount?: string;
@@ -40,7 +41,7 @@ interface CmdOpts {
 
 function parseOpts(args: string[], command: string): CmdOpts {
   let decideMode: DecisionMode = "auto";
-  let agentId: string | undefined;
+  let agentIndex: string | undefined;
   let url: string | undefined;
   let fundAddress: string | undefined;
   let fundAmount: string | undefined;
@@ -56,13 +57,13 @@ function parseOpts(args: string[], command: string): CmdOpts {
     if (args[i] === "--decide" && args[i + 1]) {
       decideMode = args[++i] as DecisionMode;
     } else if (args[i] === "--agent" && args[i + 1]) {
-      agentId = args[++i];
+      agentIndex = args[++i];
     } else if (args[i] === "--url" && args[i + 1]) {
       url = args[++i];
     }
   }
 
-  return { decide: decideMode, agentId, url, fundAddress, fundAmount };
+  return { decide: decideMode, agentIndex, url, fundAddress, fundAmount };
 }
 
 // ── Formatting ─────────────────────────────────────────────────────
@@ -74,20 +75,20 @@ function fmt(wei: bigint): string {
 function formatReceipt(
   result: PaymentResult,
   url: string,
-  responseBody?: any
+  responseBody?: any,
 ): string {
   let lines = [
     "",
     "── Payment Receipt ───────────────────────────────────────",
     `  Status:      ${result.success ? "SUCCESS" : "FAILED"}`,
     `  Method:      ${result.method}`,
-    `  Amount:      ${fmt(result.amount)} KTT`,
+    `  Amount:      ${fmt(result.amount)} KITE`,
     `  Service:     ${url}`,
   ];
   if (result.txHash) {
     lines.push(
       `  Tx Hash:     ${result.txHash}`,
-      `  Explorer:    https://testnet.kitescan.ai/tx/${result.txHash}`
+      `  Explorer:    https://testnet.kitescan.ai/tx/${result.txHash}`,
     );
   }
   if (result.receipt?.sessionId) {
@@ -95,7 +96,7 @@ function formatReceipt(
       `  Session:     ${result.receipt.sessionId}`,
       `  Nonce:       ${result.receipt.nonce}`,
       `  Provider:    ${result.receipt.provider}`,
-      `  Consumer:    ${result.receipt.consumer}`
+      `  Consumer:    ${result.receipt.consumer}`,
     );
   }
   lines.push(`  Timestamp:   ${new Date().toISOString()}`);
@@ -104,20 +105,17 @@ function formatReceipt(
       "",
       "  Provider Receipt (EIP-712 signed):",
       `  Signer:      ${responseBody.receipt?.provider || "unknown"}`,
-      `  Signature:   ${responseBody.providerSignature}`
+      `  Signature:   ${responseBody.providerSignature}`,
     );
     if (responseBody.receipt) {
       lines.push(
         `  Service:     ${responseBody.receipt.service}`,
         `  Nonce:       ${responseBody.receipt.nonce}`,
-        `  Timestamp:   ${responseBody.receipt.timestamp}`
+        `  Timestamp:   ${responseBody.receipt.timestamp}`,
       );
     }
   }
-  lines.push(
-    "──────────────────────────────────────────────────────────",
-    ""
-  );
+  lines.push("──────────────────────────────────────────────────────────", "");
   return lines.join("\n");
 }
 
@@ -140,7 +138,7 @@ async function promptForPayment(req: PaymentRequest): Promise<boolean> {
   console.log("");
   console.log("── Payment Required ──────────────────────────────────────");
   console.log(`  Service:     ${req.url}`);
-  console.log(`  Amount:      ${fmt(req.price)} KTT`);
+  console.log(`  Amount:      ${fmt(req.price)} KITE`);
   console.log(`  Pay To:      ${req.payTo}`);
   console.log(`  Asset:       ${req.asset}`);
   console.log(`  Scheme:      ${req.scheme}`);
@@ -200,7 +198,7 @@ function startMockAPI(providerKey: `0x${string}`): Promise<http.Server> {
               },
             ],
             x402Version: 1,
-          })
+          }),
         );
         return;
       }
@@ -244,7 +242,7 @@ function startMockAPI(providerKey: `0x${string}`): Promise<http.Server> {
               nonce: nonce.toString(),
             },
             providerSignature,
-          })
+          }),
         );
       } catch (err: any) {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -256,125 +254,67 @@ function startMockAPI(providerKey: `0x${string}`): Promise<http.Server> {
   });
 }
 
-// ── Commands ───────────────────────────────────────────────────────
-
-async function callApi(opts: CmdOpts) {
-  const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
+async function showBalance(args: string[]) {
+  const credential = getVar("PRIVATE_KEY");
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
-  console.log(`  Decide:   ${opts.decide}`);
-
-  let server: http.Server | null = null;
-  let apiUrl: string;
-
-  if (opts.url) {
-    apiUrl = opts.url;
-    console.log(`  Target:   ${apiUrl} (live)`);
-  } else {
-    // Mock API needs a provider key — try vars store, then env, then fallback
-    let providerKey: `0x${string}`;
-    try {
-      const raw = resolveVar("$PROVIDER_KEY");
-      providerKey = (raw.startsWith("0x") ? raw : `0x${raw}`) as `0x${string}`;
-    } catch {
-      // Fallback for local dev / demos
-      providerKey =
-        "0xbd88d7931ce6ffc84d45264da93b7b63bf945b339ff14742b9cfcff2ce0c0b72" as `0x${string}`;
+  let tokens: string[] = [];
+  const tokenFlag = findFlag(args, "--token");
+  if (tokenFlag) {
+    const isMultiple =
+      tokenFlag.includes(",") && tokenFlag.split(",").length > 1;
+    if (isMultiple) {
+      tokens = tokenFlag
+        .trim()
+        .split(",")
+        .map((t) => t.trim());
+    } else {
+      tokens = [tokenFlag.trim()];
     }
-
-    server = await startMockAPI(providerKey);
-    apiUrl = `http://localhost:${MOCK_PORT}/weather/kite-city`;
-    console.log(`  Target:   ${apiUrl} (mock)`);
   }
 
-  console.log("");
+  tokens.unshift(zeroAddress); // Ensure default token is included
 
   const client = await KitePaymentClient.create({
     seedPhrase: credential,
-    defaultPaymentMode: "x402" as const,
   });
 
-  console.log(`  Address:  ${client.address}`);
-
-  const balance = await client.getTokenBalance();
-  console.log(`  Balance:  ${fmt(balance)} KTT`);
-  console.log("");
-
-  let lastPaymentResult: PaymentResult | undefined;
-
-  const fetchOpts: any = {
-    onPayment: (result: PaymentResult) => {
-      lastPaymentResult = result;
-    },
-  };
-
-  // Default rules sourced from vars/on-chain
-  const defaultRules: SessionRules = {
-    maxPerCall: parseUnits("1", 18).toString(),
-    maxPerSession: parseUnits("10", 18).toString(),
-    blockedProviders: [],
-    requireApprovalAbove: parseUnits("0.5", 18).toString(),
-  };
-
-  if (opts.decide === "cli") {
-    fetchOpts.onPaymentRequired = promptForPayment;
-  } else {
-    fetchOpts.onPaymentRequired = async (
-      req: PaymentRequest
-    ): Promise<boolean> => {
-      const ctx = {
-        request: req,
-        rules: defaultRules,
-        balance: await client.getTokenBalance(),
-        totalSpentThisSession: client.getTotalSpent(),
-        callCount: client.getUsageLogs().length,
-        openaiApiKey: process.env.OPENAI_API_KEY,
-      };
-
-      const result = await decide(ctx, opts.decide);
-      console.log(
-        `  Decision: ${result.decision} [${result.tier}] — ${result.reason}`
+  const agentBalance = await Promise.all(
+    tokens.map(async (t) => {
+      const token = TOKENS.find(
+        ({ address, symbol }) =>
+          address.toLowerCase() === t.toLowerCase() ||
+          symbol.toLowerCase() == t.toLowerCase(),
       );
-      return result.decision !== "reject";
-    };
+
+      const depBalance = await client.getDepositedTokenBalance(token?.address);
+      const balance =
+        token?.address == zeroAddress
+          ? undefined
+          : await client.getTokenBalance(token?.address);
+      return {
+        ...token,
+        balance: formatUnits(depBalance, token?.decimals || 18),
+        nativeBalance: balance
+          ? formatUnits(balance, token?.decimals || 18)
+          : undefined,
+      };
+    }),
+  );
+
+  const showNativeBalance = findFlag(args, "--show-native");
+
+  function displayBalance(tkn: (typeof agentBalance)[0], symbol: string) {
+    console.log(`  Token:    ${symbol}`);
+    console.log(`  Deposited Balance:  ${tkn.balance} ${symbol} (deposited)`);
+    if (showNativeBalance && tkn.address !== zeroAddress)
+      console.log(
+        `     Balance:       ${tkn.nativeBalance} ${symbol} (wallet)`,
+      );
+    console.log("");
   }
 
-  console.log(`  Calling ${apiUrl}...`);
-  console.log("");
-
-  const t0 = Date.now();
-  const response = await client.fetch(apiUrl, undefined, fetchOpts);
-  const elapsed = Date.now() - t0;
-
-  if (response.status === 402) {
-    console.log(`  Status: ${response.status} Payment Required`);
-    console.log(`  The agent was not charged.`);
-    console.log(`  Reason: payment was declined`);
-  } else {
-    const body = await response.json();
-    console.log(`  Status:  ${response.status} OK`);
-    console.log(`  Data:    ${JSON.stringify(body, null, 2)}`);
-    console.log(`  Time:    ${elapsed}ms`);
-
-    if (lastPaymentResult) {
-      console.log(formatReceipt(lastPaymentResult, apiUrl, body));
-    }
-  }
-
-  if (server) server.close();
-}
-
-async function showBalance(opts: CmdOpts) {
-  const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
-
-  const client = await KitePaymentClient.create({
-    seedPhrase: credential,
-  });
-
-  const agentBalance = await client.getTokenBalance();
-  console.log(`  Address:  ${client.address}`);
-  console.log(`  Balance:  ${fmt(agentBalance)} KTT`);
+  agentBalance.forEach((tkn) => displayBalance(tkn, tkn.symbol || "KITE"));
 }
 
 async function showUsage(opts: CmdOpts) {
@@ -389,83 +329,116 @@ async function showUsage(opts: CmdOpts) {
   const total = client.getTotalSpent();
 
   console.log(`  Address:     ${client.address}`);
-  console.log(`  Total spent: ${fmt(total)} KTT`);
+  console.log(`  Total spent: ${fmt(total)} KITE`);
   console.log(`  Calls:       ${logs.length}`);
 
   if (logs.length > 0) {
     console.log("");
     for (const log of logs) {
       console.log(
-        `    ${new Date(log.timestamp).toISOString()} | ${log.serviceUrl} | ${fmt(log.amount)} KTT | ${log.txHash || "channel"}`
+        `    ${new Date(log.timestamp).toISOString()} | ${log.serviceUrl} | ${fmt(log.amount)} KITE | ${log.txHash || "channel"}`,
       );
     }
   }
 }
 
-async function fundWallet(opts: CmdOpts) {
-  // DEPLOYER_KEY from vars store → env → error
-  let deployerKey: string;
-  try {
-    deployerKey = resolveVar("$DEPLOYER_KEY");
-  } catch {
+async function fundWallet(args: string[]) {
+  const credential = getVar("PRIVATE_KEY");
+  if (!credential) throw new Error("No credential found. Run: npx kite init");
+
+  const tokenFlag = findFlag(args, "--token");
+  const amountFlag = findFlag(args, "--amount");
+  if (!amountFlag) {
     throw new Error(
-      "Deployer key not found.\n" +
-        "  Run:  npx kite vars set DEPLOYER_KEY"
+      "Amount is required. Usage: npx kite fund --amount <amount> --token <token>",
     );
   }
 
-  if (!opts.fundAddress) {
-    throw new Error("Usage: kite fund <address> [amount]");
-  }
-
-  const amount = parseUnits(opts.fundAmount || "10", 18);
-  const account = privateKeyToAccount(
-    `0x${deployerKey.replace("0x", "")}` as `0x${string}`
+  let token = TOKENS.find(
+    ({ address, symbol }) =>
+      address.toLowerCase() === tokenFlag?.toLowerCase() ||
+      symbol.toLowerCase() === tokenFlag?.toLowerCase(),
   );
+
+  if (!token) {
+    token = TOKENS.find(({ address }) => address === zeroAddress);
+    console.warn(
+      `Token "${tokenFlag}" not found. Defaulting to ${token?.symbol || "KITE"}.`,
+    );
+  }
+  const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
+  const { address } = await createKiteWallet(credential, KITE_TESTNET.rpcUrl);
   const transport = viemHttp(KITE_TESTNET.rpcUrl);
   const publicClient = createPublicClient({ transport });
-  const walletClient = createWalletClient({ account, transport });
+  const client = await KitePaymentClient.create({
+    seedPhrase: credential,
+  });
 
-  console.log(`  From:     ${account.address}`);
-  console.log(`  To:       ${opts.fundAddress}`);
-  console.log(`  Amount:   ${opts.fundAmount || "10"} tokens`);
+  console.log(`  From:     ${address}`);
+  console.log(
+    `  To:       KiteAAWallet (${KITE_TESTNET.contracts.kiteAAWallet})`,
+  );
+  console.log(`  Amount:   ${amountFlag.trim()} ${token?.symbol || "KITE"}`);
 
-  const balance = (await publicClient.readContract({
-    address: TOKEN as `0x${string}`,
-    abi: erc20Abi,
-    functionName: "balanceOf",
-    args: [account.address],
-  })) as bigint;
+  const balance =
+    token?.address === zeroAddress
+      ? await publicClient.getBalance({
+          address: address as `0x${string}`,
+        })
+      : await client.getTokenBalance(token?.address);
 
   if (balance < amount) {
-    throw new Error(`Deployer has insufficient tokens (${fmt(balance)} KTT)`);
+    throw new Error(
+      `Deployer has insufficient tokens (${fmt(balance)} ${token?.symbol ?? "KITE"})`,
+    );
   }
 
-  const chain = {
-    id: KITE_TESTNET.chainId,
-    name: "Kite Ozone Testnet",
-    nativeCurrency: { name: "KITE", symbol: "KITE", decimals: 18 },
-    rpcUrls: { default: { http: [KITE_TESTNET.rpcUrl] } },
-  };
+  const data = await client.depositToWallet(amount, token?.address);
 
-  const data = encodeFunctionData({
-    abi: erc20Abi,
-    functionName: "transfer",
-    args: [opts.fundAddress as `0x${string}`, amount],
+  console.log(`  Tx:       ${data}`);
+}
+
+async function withdrawFunds(args: string[]) {
+  const credential = getVar("PRIVATE_KEY");
+  if (!credential) throw new Error("No credential found. Run: npx kite init");
+
+  const tokenFlag = findFlag(args, "--token");
+  const amountFlag = findFlag(args, "--amount");
+  if (!amountFlag) {
+    throw new Error(
+      "Amount is required. Usage: npx kite withdraw --amount <amount> --token <token>",
+    );
+  }
+
+  let token = TOKENS.find(
+    ({ address, symbol }) =>
+      address.toLowerCase() === tokenFlag?.toLowerCase() ||
+      symbol.toLowerCase() === tokenFlag?.toLowerCase(),
+  );
+  if (!token) {
+    token = TOKENS.find(({ address }) => address === zeroAddress);
+    console.warn(
+      `Token "${tokenFlag}" not found. Defaulting to ${token?.symbol || "KITE"}.`,
+    );
+  }
+
+  const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
+
+  const client = await KitePaymentClient.create({
+    seedPhrase: credential,
   });
 
-  const hash = await walletClient.sendTransaction({
-    to: TOKEN as `0x${string}`,
-    data,
-    chain,
-  });
+  console.log(
+    `  Withdrawing ${amountFlag.trim()} ${token?.symbol || "KITE"} to owner`,
+  );
+  console.log(`   Owner Address: ${client.address}`);
+  console.log(
+    "  Note: This will transfer tokens from the AA wallet to your EOA",
+  );
 
-  console.log(`  Tx:       ${hash}`);
-  console.log("  Waiting for confirmation...");
+  const data = await client.withdrawFromWallet(amount, token?.address);
 
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`  Block:    ${receipt.blockNumber}`);
-  console.log("  Done.");
+  console.log(`  Tx:       ${data}`);
 }
 
 // ── Entry point (called from cli.ts) ───────────────────────────────
@@ -477,23 +450,32 @@ export async function runAppCommand(command: string, args: string[]) {
 
   switch (command) {
     case "call":
-      await callApi(opts);
+      await callApi(args);
       break;
     case "balance":
-      await showBalance(opts);
+      await showBalance(args);
       break;
     case "usage":
       await showUsage(opts);
       break;
     case "fund":
-      await fundWallet(opts);
+      await fundWallet(args);
+      break;
+    case "withdraw":
+      await withdrawFunds(args);
       break;
     case "simulate": {
       // Run simulate as a subprocess (it lives outside src/)
       const { execFileSync } = await import("node:child_process");
       const { resolve: pathResolve } = await import("node:path");
-      const script = pathResolve(import.meta.dirname || ".", "../examples/simulate.ts");
-      execFileSync("npx", ["tsx", script], { stdio: "inherit", env: process.env });
+      const script = pathResolve(
+        import.meta.dirname || ".",
+        "../examples/simulate.ts",
+      );
+      execFileSync("npx", ["tsx", script], {
+        stdio: "inherit",
+        env: process.env,
+      });
       break;
     }
   }

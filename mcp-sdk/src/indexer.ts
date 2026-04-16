@@ -6,7 +6,7 @@
  */
 
 const INDEXER_URL =
-  "https://api.goldsky.com/api/public/project_cmnn27cgufwam01x895lwbit9/subgraphs/kite-aspl-kite-ai-testnet/1.0/gn";
+  "https://api.goldsky.com/api/public/project_cmnn27cgufwam01x895lwbit9/subgraphs/kitesettle/0.1.0/gn";
 
 // ── GraphQL Helper ─────────────────────────────────────────────────
 
@@ -50,6 +50,11 @@ export interface IndexedSession {
   validUntil: string;
   blockTimestamp: string;
   transactionHash: string;
+  blockedProviders: string[];
+  dailyLimit: string;
+  metadataHash: string;
+  sessionIndex: string;
+  valueLimit: string;
 }
 
 export interface IndexedPayment {
@@ -72,9 +77,7 @@ export interface IndexedUserRegistered {
 
 // ── Queries ────────────────────────────────────────────────────────
 
-export async function getAgentsByOwner(
-  owner: string,
-): Promise<IndexedAgent[]> {
+export async function getAgentsByOwner(owner: string): Promise<IndexedAgent[]> {
   const data = await query(
     `
     query($owner: String!) {
@@ -129,24 +132,26 @@ export async function getSessionsByAgent(
 ): Promise<IndexedSession[]> {
   const data = await query(
     `
-    query($agentId: Bytes!) {
-      sessionRegistereds(
-        where: { agentId: $agentId }
-        orderBy: blockTimestamp
+    query($agentId: String!) {
+      sessions(
+        where: { agent: $agentId }
+        orderBy: sessionIndex
         orderDirection: desc
       ) {
         id
-        agentId
+        blockedProviders
+        dailyLimit
+        metadataHash
+        sessionIndex
         sessionKey
+        valueLimit
         validUntil
-        blockTimestamp
-        transactionHash
       }
     }
   `,
-    { agentId },
+    { agentId: agentId.toLowerCase() },
   );
-  return data.sessionRegistereds || [];
+  return data.sessions || [];
 }
 
 export async function getPaymentsByAgent(

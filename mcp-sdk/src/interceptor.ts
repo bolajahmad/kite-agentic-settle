@@ -1,8 +1,12 @@
+import { BatchManager } from "./batch";
 import { ChannelManager } from "./channel.js";
 import { ContractService } from "./contracts.js";
+import type {
+  InterceptorOptions,
+  PaymentRequest,
+  PaymentResult,
+} from "./types.js";
 import { UsageTracker } from "./usage.js";
-import type { InterceptorOptions, PaymentResult, PaymentRequest } from "./types.js";
-import { BatchManager } from "./batch";
 
 interface X402Offer {
   scheme: string;
@@ -51,7 +55,7 @@ export class PaymentInterceptor {
     agentId: string,
     privateKey: Uint8Array,
     signerAddress: string,
-    defaultOptions: InterceptorOptions = {}
+    defaultOptions: InterceptorOptions = {},
   ) {
     this.channelManager = channelManager;
     this.contractService = contractService;
@@ -81,7 +85,7 @@ export class PaymentInterceptor {
   async fetch(
     url: string,
     init?: RequestInit,
-    options?: InterceptorOptions
+    options?: InterceptorOptions,
   ): Promise<Response> {
     const opts = { ...this.defaultOptions, ...options };
     const mode = opts.paymentMode || "auto";
@@ -132,11 +136,12 @@ export class PaymentInterceptor {
 
     // Decide: batch, channel (if one exists for this provider), or x402 direct
     const hasChannel = this.providerChannels.has(offer.payTo.toLowerCase());
-    const hasBatch = this.batchManager?.hasActiveSession(offer.payTo.toLowerCase()) ?? false;
-    const shouldUseBatch =
-      mode === "batch" || (mode === "auto" && hasBatch);
+    const hasBatch =
+      this.batchManager?.hasActiveSession(offer.payTo.toLowerCase()) ?? false;
+    const shouldUseBatch = mode === "batch" || (mode === "auto" && hasBatch);
     const shouldUseChannel =
-      !shouldUseBatch && (mode === "channel" || (mode === "auto" && hasChannel));
+      !shouldUseBatch &&
+      (mode === "channel" || (mode === "auto" && hasChannel));
 
     let result: PaymentResult;
 
@@ -163,9 +168,27 @@ export class PaymentInterceptor {
 
     // Retry with payment proof
     const retryHeaders = new Headers(init?.headers);
-    if (result.method === "x402") {
+    if (result.method === "perCall") {
       retryHeaders.set("X-PAYMENT", result.txHash || "");
-    } else if (result.receipt) {
+    } else if (result.method === "channel") {
+      // For channel mode the deposit IS the payment commitment; include the
+      // channel ID so the provider knows which channel to debit.  Also
+      // forward the last receipt (if any) so the provider can validate
+      // continuity of the cumulative cost.
+      const channelId =
+        result.receipt?.sessionId ||
+        opts.channelId ||
+        this.providerChannels.get(offer.payTo.toLowerCase()) ||
+        "";
+      retryHeaders.set("X-Payment-Mode", "channel");
+      retryHeaders.set("X-Channel-Id", channelId);
+      if (result.receipt?.nonce) {
+        retryHeaders.set("X-Last-Receipt-Seq", String(result.receipt.nonce));
+        retryHeaders.set("X-Last-Receipt-Cost", String(result.receipt.cumulativeCost));
+        retryHeaders.set("X-Last-Receipt-Sig", result.receipt.signature || "");
+        retryHeaders.set("X-Last-Receipt-Timestamp", String(result.receipt.timestamp));
+      }
+    } else if (result.method === "batch" && result.receipt) {
       retryHeaders.set("X-SESSION-ID", result.receipt.sessionId || "");
       retryHeaders.set("X-RECEIPT-NONCE", String(result.receipt.nonce));
       retryHeaders.set("X-RECEIPT-COST", String(result.receipt.cumulativeCost));
@@ -175,9 +198,13 @@ export class PaymentInterceptor {
     return await globalThis.fetch(url, { ...init, headers: retryHeaders });
   }
 
-  private async payViaX402(offer: X402Offer, opts?: InterceptorOptions): Promise<PaymentResult> {
+  private async payViaX402(
+    offer: X402Offer,
+    opts?: InterceptorOptions,
+  ): Promise<PaymentResult> {
     const amount = BigInt(offer.maxAmountRequired);
-    const walletAddress = opts?.walletAddress || this.defaultOptions.walletAddress;
+    const walletAddress =
+      opts?.walletAddress || this.defaultOptions.walletAddress;
     const sessionKey = opts?.sessionKey || this.defaultOptions.sessionKey;
 
     let txHash: string;
@@ -189,20 +216,20 @@ export class PaymentInterceptor {
         sessionKey,
         offer.payTo,
         offer.asset,
-        amount
+        amount,
       );
     } else {
       // Pay via direct ERC20 transfer from agent EOA
       txHash = await this.contractService.transferToken(
         offer.asset,
         offer.payTo,
-        amount
+        amount,
       );
     }
 
     return {
       success: true,
-      method: "x402",
+      method: "perCall",
       txHash,
       amount,
     };
@@ -210,35 +237,45 @@ export class PaymentInterceptor {
 
   private async payViaChannel(
     offer: X402Offer,
-    opts: InterceptorOptions
+    opts: InterceptorOptions,
   ): Promise<PaymentResult> {
     const channelId =
-      opts.channelId ||
-      this.providerChannels.get(offer.payTo.toLowerCase());
+      opts.channelId || this.providerChannels.get(offer.payTo.toLowerCase());
 
     if (!channelId) {
       throw new Error(`No active channel for provider ${offer.payTo}`);
     }
 
+    // Verify on-chain that the channel's registered provider matches the
+    // address in the 402 offer.  A mismatch means the 402 is directing
+    // payment to a different party than the channel was opened against.
+    const ch = await this.channelManager.getChannel(channelId);
+    if (ch.provider.toLowerCase() !== offer.payTo.toLowerCase()) {
+      throw new Error(
+        `payTo mismatch: channel provider is ${ch.provider} but 402 offer says ${offer.payTo}`,
+      );
+    }
+
     const price = BigInt(offer.maxAmountRequired);
 
-    const receipt = await this.channelManager.signReceiptAsProvider(
-      channelId,
-      price,
-      offer.payTo
-    );
+    // The consumer does NOT sign receipts — that is exclusively the
+    // provider's responsibility (the contract verifies signer == provider).
+    // The locked deposit IS the payment commitment for this channel.
+    // Forward the last known receipt so the provider can validate
+    // cumulative-cost continuity and so the retry carries proof of state.
+    const lastReceipt = this.channelManager.getLastReceipt(channelId);
 
     return {
       success: true,
       method: "channel",
-      receipt,
+      receipt: lastReceipt ?? undefined,
       amount: price,
     };
   }
 
   private async payViaBatch(
     offer: X402Offer,
-    _opts: InterceptorOptions
+    _opts: InterceptorOptions,
   ): Promise<PaymentResult> {
     if (!this.batchManager) {
       throw new Error("Batch manager not configured");
@@ -256,7 +293,7 @@ export class PaymentInterceptor {
     const canPay = this.batchManager.canAfford(session.sessionId, price);
     if (!canPay) {
       throw new Error(
-        `Batch deposit exhausted. Deposit: ${session.deposit}, spent: ${session.cumulativeCost}, needed: ${price}`
+        `Batch deposit exhausted. Deposit: ${session.deposit}, spent: ${session.cumulativeCost}, needed: ${price}`,
       );
     }
 
@@ -266,7 +303,7 @@ export class PaymentInterceptor {
       price,
       this.privateKey,
       this.signerAddress,
-      provider
+      provider,
     );
 
     return {

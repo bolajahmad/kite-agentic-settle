@@ -1,28 +1,28 @@
-import { createKiteWallet, generateSeedPhrase } from "./wallet.js";
-import { ContractService } from "./contracts.js";
-import { ChannelManager } from "./channel.js";
+import type { BatchEndReason, BatchLimits } from "./batch.js";
 import { BatchManager } from "./batch.js";
-import type { BatchLimits, BatchEndReason } from "./batch.js";
-import { PaymentInterceptor } from "./interceptor.js";
-import { UsageTracker } from "./usage.js";
+import { ChannelManager } from "./channel.js";
 import { KITE_TESTNET } from "./config.js";
-import { onboardAgent } from "./onboard.js";
+import { ContractService } from "./contracts.js";
+import { PaymentInterceptor } from "./interceptor.js";
 import type { OnboardOptions, OnboardResult } from "./onboard.js";
+import { onboardAgent } from "./onboard.js";
 import type {
-  KiteConfig,
+  BatchSession,
   ChannelConfig,
   ChannelState,
-  Receipt,
-  BatchSession,
-  UsageLog,
   InterceptorOptions,
+  KiteConfig,
+  Receipt,
+  UsageLog,
 } from "./types.js";
+import { UsageTracker } from "./usage.js";
+import { createKiteWallet, generateSeedPhrase } from "./wallet.js";
 
 export interface KiteClientOptions {
   seedPhrase: string;
   config?: Partial<KiteConfig>;
   agentId?: string;
-  defaultPaymentMode?: "x402" | "channel" | "batch" | "auto";
+  defaultPaymentMode?: "perCall" | "channel" | "batch" | "auto" | "session";
   walletAddress?: string;
   sessionKey?: string;
 }
@@ -79,14 +79,20 @@ export class KitePaymentClient {
 
     const { wdk, account, address } = await createKiteWallet(
       options.seedPhrase,
-      config.rpcUrl
+      config.rpcUrl,
     );
 
     const contractService = new ContractService(config, account);
     const keyPair = account.keyPair;
-    if (!keyPair?.privateKey) throw new Error("Could not extract private key from WDK account");
+    if (!keyPair?.privateKey)
+      throw new Error("Could not extract private key from WDK account");
     const privateKey: Uint8Array = keyPair.privateKey;
-    const channelManager = new ChannelManager(contractService, config.token, privateKey, address);
+    const channelManager = new ChannelManager(
+      contractService,
+      config.token,
+      privateKey,
+      address,
+    );
     const batchManager = new BatchManager();
     const usage = new UsageTracker();
     const agentId = options.agentId || address;
@@ -102,7 +108,7 @@ export class KitePaymentClient {
         paymentMode: options.defaultPaymentMode || "auto",
         walletAddress: options.walletAddress,
         sessionKey: options.sessionKey || address,
-      }
+      },
     );
     interceptor.setBatchManager(batchManager);
 
@@ -161,7 +167,7 @@ export class KitePaymentClient {
       agentId,
       sessionKey,
       sessionIndex,
-      validUntil
+      validUntil,
     );
   }
 
@@ -170,26 +176,40 @@ export class KitePaymentClient {
   async depositToWallet(amount: bigint, token?: string): Promise<string> {
     return await this.contractService.depositToWallet(
       token || this.config.token,
-      amount
+      amount,
     );
   }
 
-  async getTokenBalance(token?: string): Promise<bigint> {
-    return await this.contractService.getTokenBalance(
+  async withdrawFromWallet(amount: bigint, token?: string): Promise<string> {
+    return await this.contractService.withdrawFromWallet(
       token || this.config.token,
-      this.address
+      amount,
+    );
+  }
+
+  async getTokenBalance(token = this.config.token): Promise<bigint> {
+    return await this.contractService.getTokenBalance(
+      token as `0x${string}`,
+      this.address as `0x${string}`,
+    );
+  }
+
+  async getDepositedTokenBalance(token = this.config.token): Promise<bigint> {
+    return await this.contractService.getDepositedTokenBalance(
+      token as `0x${string}`,
+      this.address as `0x${string}`,
     );
   }
 
   // -- Payment Channels --
 
   async openChannel(
-    channelConfig: ChannelConfig
+    channelConfig: ChannelConfig,
   ): Promise<{ txHash: string; channelId: `0x${string}` }> {
     const result = await this.channelManager.openChannel(channelConfig);
     this.interceptor.setChannelForProvider(
       channelConfig.provider,
-      result.channelId
+      result.channelId,
     );
     return result;
   }
@@ -200,21 +220,21 @@ export class KitePaymentClient {
 
   async initiateSettlement(
     channelId: `0x${string}`,
-    merkleRoot?: `0x${string}`
+    merkleRoot?: `0x${string}`,
   ): Promise<string> {
     return await this.channelManager.initiateSettlement(channelId, merkleRoot);
   }
 
   async submitReceipt(
     channelId: `0x${string}`,
-    receipt: Receipt
+    receipt: Receipt,
   ): Promise<string> {
     return await this.channelManager.submitReceipt(channelId, receipt);
   }
 
   async finalize(
     channelId: `0x${string}`,
-    merkleRoot?: `0x${string}`
+    merkleRoot?: `0x${string}`,
   ): Promise<string> {
     const channel = await this.channelManager.getChannel(channelId);
     this.interceptor.removeChannelForProvider(channel.provider);
@@ -240,14 +260,14 @@ export class KitePaymentClient {
     callCost: bigint,
     consumerAddress: string,
     requestHash?: string,
-    responseHash?: string
+    responseHash?: string,
   ): Promise<Receipt> {
     return await this.channelManager.signReceiptAsProvider(
       channelId,
       callCost,
       consumerAddress,
       requestHash,
-      responseHash
+      responseHash,
     );
   }
 
@@ -255,13 +275,13 @@ export class KitePaymentClient {
     channelId: `0x${string}`,
     receipt: Receipt,
     providerAddress: string,
-    ratePerCall: bigint
+    ratePerCall: bigint,
   ): Promise<{ valid: boolean; reason?: string }> {
     return await this.channelManager.verifyAndStoreReceipt(
       channelId,
       receipt,
       providerAddress,
-      ratePerCall
+      ratePerCall,
     );
   }
 
@@ -271,11 +291,23 @@ export class KitePaymentClient {
 
   // -- Batch Sessions (A2) --
 
-  startBatchSession(provider: string, deposit: bigint, limits?: BatchLimits): BatchSession {
-    return this.batchManager.startSession(this.address, provider, deposit, limits);
+  startBatchSession(
+    provider: string,
+    deposit: bigint,
+    limits?: BatchLimits,
+  ): BatchSession {
+    return this.batchManager.startSession(
+      this.address,
+      provider,
+      deposit,
+      limits,
+    );
   }
 
-  endBatchSession(sessionId: string, reason?: BatchEndReason): {
+  endBatchSession(
+    sessionId: string,
+    reason?: BatchEndReason,
+  ): {
     session: BatchSession;
     finalReceipt: Receipt | null;
     refund: bigint;
@@ -305,15 +337,12 @@ export class KitePaymentClient {
   async fetch(
     url: string,
     init?: RequestInit,
-    options?: InterceptorOptions
+    options?: InterceptorOptions,
   ): Promise<Response> {
     return await this.interceptor.fetch(url, init, options);
   }
 
-  setChannelForProvider(
-    provider: string,
-    channelId: `0x${string}`
-  ): void {
+  setChannelForProvider(provider: string, channelId: `0x${string}`): void {
     this.interceptor.setChannelForProvider(provider, channelId);
   }
 
