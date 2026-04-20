@@ -2,11 +2,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { formatUnits, parseUnits } from "viem";
 import { findFlag, prompt } from "../cli.js";
-import { KitePaymentClient } from "../client.js";
+import { KiteSettleClient } from "../kite-settle-client.js";
 import { ChannelStatus } from "../types.js";
 import { parseToken } from "../utils/index.js";
 import { getKiteDir, getVar } from "../vars.js";
-import { deriveAgentAccount } from "../wallet.js";
 
 // ── Channel store (~/.kite-agent-pay/channels.json) ──────────────────────────
 
@@ -71,27 +70,26 @@ function channelStatusLabel(status: number): string {
   }
 }
 
-/** Build an agent-derived KitePaymentClient from the EOA PRIVATE_KEY. */
+/** Build an agent-derived KiteSettleClient from the EOA PRIVATE_KEY. */
 async function buildAgentClient(
   credential: string,
   agentIndex: number,
   mode: "perCall" | "channel" | "batch" | "auto" | "session" = "channel",
 ): Promise<{
-  client: KitePaymentClient;
+  client: KiteSettleClient;
   agentAddress: string;
   eoaAddress: string;
 }> {
-  const eoaClient = await KitePaymentClient.create({
-    seedPhrase: credential,
-    defaultPaymentMode: "perCall",
-  });
-  const { privateKey: agentPrivateKey, address: agentAddress } =
-    await deriveAgentAccount(eoaClient.getPrivateKey(), agentIndex);
-  const client = await KitePaymentClient.create({
-    seedPhrase: agentPrivateKey,
+  const settle = await KiteSettleClient.create({
+    credential,
     defaultPaymentMode: mode as any,
+    agentIndex,
   });
-  return { client, agentAddress, eoaAddress: eoaClient.address };
+  return {
+    client: settle,
+    agentAddress: settle.agentAddress ?? settle.eoaAddress,
+    eoaAddress: settle.eoaAddress,
+  };
 }
 
 // ── channel open ─────────────────────────────────────────────────────────────
@@ -428,7 +426,7 @@ async function cmdChannelClose(args: string[]): Promise<void> {
       // Check if channel has expired — use forceCloseExpired if so
       const now = Math.floor(Date.now() / 1000);
       if (ch.expiresAt > 0 && now > ch.expiresAt) {
-        settleTxHash = await client.forceCloseExpired(channelId);
+        settleTxHash = await client.forceCloseChannel(channelId);
         console.log(`  Force-closed expired channel.`);
       } else {
         settleTxHash = await client.initiateSettlement(channelId);
@@ -456,7 +454,7 @@ async function cmdChannelClose(args: string[]): Promise<void> {
 
     if (state.deadline > 0 && now >= state.deadline) {
       console.log("  Challenge window closed. Finalizing...");
-      const finalizeTx = await client.finalize(channelId);
+      const finalizeTx = await client.finalizeChannel(channelId);
       console.log(`  Finalize tx:    ${finalizeTx}`);
       console.log(
         `  Explorer:       https://testnet.kitescan.ai/tx/${finalizeTx}`,
@@ -493,7 +491,7 @@ async function cmdChannelClose(args: string[]): Promise<void> {
     );
   } else {
     // Build a fresh client with the agent key to query balance post-finalize
-    const postBalance = await client.getDepositedTokenBalance();
+    const postBalance = await client.getDepositedBalance();
     if (postBalance === 0n) {
       console.log(
         "  Deposited balance is 0 — nothing to withdraw (refund may have gone directly to EOA).",
@@ -502,7 +500,7 @@ async function cmdChannelClose(args: string[]): Promise<void> {
       console.log(
         `  Withdrawing refund of ${formatUnits(postBalance, 18)} from AA wallet to EOA...`,
       );
-      const withdrawTx = await client.withdrawFromWallet(postBalance);
+      const withdrawTx = await client.withdraw(postBalance);
       console.log(`  Withdraw tx:    ${withdrawTx}`);
       console.log(
         `  Explorer:       https://testnet.kitescan.ai/tx/${withdrawTx}`,

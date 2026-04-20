@@ -27,6 +27,14 @@ export class ContractService {
     });
   }
 
+  getChainId(): number {
+    return this.config.chainId;
+  }
+
+  getKiteAAWalletAddress(): string {
+    return this.config.contracts.kiteAAWallet;
+  }
+
   // -- Helpers --
 
   private async sendTx(
@@ -334,6 +342,15 @@ export class ContractService {
       address: this.config.contracts.kiteAAWallet as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "isSessionValid",
+      args: [sessionKey as `0x${string}`],
+    });
+  }
+
+  async getPaymentNonce(sessionKey: string): Promise<bigint> {
+    return await this.client.readContract({
+      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      abi: kiteAAWalletAbi,
+      functionName: "paymentNonces",
       args: [sessionKey as `0x${string}`],
     });
   }

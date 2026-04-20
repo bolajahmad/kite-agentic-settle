@@ -1,3 +1,9 @@
+// ── Primary entry point ────────────────────────────────────────────
+// Import KiteSettleClient for all new consumer and provider code.
+export { KiteSettleClient } from "./kite-settle-client.js";
+export type { KiteSettleClientOptions } from "./kite-settle-client.js";
+
+// ── Lower-level building blocks (advanced use) ─────────────────────
 export { KitePaymentClient } from "./client.js";
 export type { KiteClientOptions } from "./client.js";
 

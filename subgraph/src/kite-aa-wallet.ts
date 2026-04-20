@@ -4,6 +4,7 @@ import {
   FundsDeposited as FundsDepositedEvent,
   FundsWithdrawn as FundsWithdrawnEvent,
   PaymentExecuted as PaymentExecutedEvent,
+  PaymentExecutedBySig as PaymentExecutedBySigEvent,
   ProviderBlocked as ProviderBlockedEvent,
   ProviderUnblocked as ProviderUnblockedEvent,
   SessionBlockedProvidersUpdated as SessionBlockedProvidersUpdatedEvent,
@@ -42,6 +43,24 @@ export function handlePaymentExecuted(event: PaymentExecutedEvent): void {
 
   payment.timestamp = event.block.timestamp;
   payment.txHash = event.transaction.hash;
+  payment.type = "PerCall"; // TODO: determine type based on session rules
+
+  payment.save();
+}
+
+export function handlePaymentExecutedBySig(event: PaymentExecutedBySigEvent): void {
+  let id = event.transaction.hash.toHex() + "-" + event.logIndex.toString();
+  let payment = new Payment(id);
+  payment.session = event.params.sessionKey.toHex();
+  payment.agent = event.params.agentId.toHex();
+
+  payment.recipient = event.params.recipient;
+  payment.token = event.params.token;
+  payment.amount = event.params.amount;
+
+  payment.timestamp = event.block.timestamp;
+  payment.txHash = event.transaction.hash;
+  payment.nonce = event.params.nonce;
   payment.type = "PerCall"; // TODO: determine type based on session rules
 
   payment.save();

@@ -1,3 +1,5 @@
+import { formatUnits, toHex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { BatchManager } from "./batch";
 import { ChannelManager } from "./channel.js";
 import { ContractService } from "./contracts.js";
@@ -109,7 +111,7 @@ export class PaymentInterceptor {
     }
 
     const offer = requirements.offers[0];
-    const price = BigInt(offer.maxAmountRequired);
+    const price = Number(formatUnits(BigInt(offer.maxAmountRequired), 18));
 
     if (opts.maxPaymentPerCall && price > opts.maxPaymentPerCall) {
       throw new Error(`Price ${price} exceeds max ${opts.maxPaymentPerCall}`);
@@ -169,7 +171,9 @@ export class PaymentInterceptor {
     // Retry with payment proof
     const retryHeaders = new Headers(init?.headers);
     if (result.method === "perCall") {
-      retryHeaders.set("X-PAYMENT", result.txHash || "");
+      // x402 programmable settlement: base64-encoded signed authorization payload
+      retryHeaders.set("X-PAYMENT", result.x402Payload || "");
+      console.log(`  [interceptor] Retrying with X-PAYMENT header (${result.x402Payload?.length} chars)`);
     } else if (result.method === "channel") {
       // For channel mode the deposit IS the payment commitment; include the
       // channel ID so the provider knows which channel to debit.  Also
@@ -184,9 +188,15 @@ export class PaymentInterceptor {
       retryHeaders.set("X-Channel-Id", channelId);
       if (result.receipt?.nonce) {
         retryHeaders.set("X-Last-Receipt-Seq", String(result.receipt.nonce));
-        retryHeaders.set("X-Last-Receipt-Cost", String(result.receipt.cumulativeCost));
+        retryHeaders.set(
+          "X-Last-Receipt-Cost",
+          String(result.receipt.cumulativeCost),
+        );
         retryHeaders.set("X-Last-Receipt-Sig", result.receipt.signature || "");
-        retryHeaders.set("X-Last-Receipt-Timestamp", String(result.receipt.timestamp));
+        retryHeaders.set(
+          "X-Last-Receipt-Timestamp",
+          String(result.receipt.timestamp),
+        );
       }
     } else if (result.method === "batch" && result.receipt) {
       retryHeaders.set("X-SESSION-ID", result.receipt.sessionId || "");
@@ -203,34 +213,92 @@ export class PaymentInterceptor {
     opts?: InterceptorOptions,
   ): Promise<PaymentResult> {
     const amount = BigInt(offer.maxAmountRequired);
-    const walletAddress =
-      opts?.walletAddress || this.defaultOptions.walletAddress;
     const sessionKey = opts?.sessionKey || this.defaultOptions.sessionKey;
 
-    let txHash: string;
-
-    if (walletAddress && sessionKey) {
-      // Pay via KiteAAWallet (shared treasury)
-      txHash = await this.contractService.executePayment(
-        walletAddress,
-        sessionKey,
-        offer.payTo,
-        offer.asset,
-        amount,
-      );
-    } else {
-      // Pay via direct ERC20 transfer from agent EOA
-      txHash = await this.contractService.transferToken(
-        offer.asset,
-        offer.payTo,
-        amount,
+    // x402 programmable settlement requires a KiteAAWallet session key.
+    // The interceptor must be initialised with the session key's private key;
+    // this.signerAddress is the session key address.
+    if (!sessionKey) {
+      throw new Error(
+        "x402 perCall payment requires a KiteAAWallet session key. " +
+          "Initialise PaymentInterceptor with the session key's private key and " +
+          "pass sessionKey in InterceptorOptions.",
       );
     }
+    if (sessionKey.toLowerCase() !== this.signerAddress.toLowerCase()) {
+      throw new Error(
+        `Session key mismatch: opts.sessionKey=${sessionKey} but interceptor ` +
+          `signerAddress=${this.signerAddress}. The interceptor must be initialised ` +
+          "with the session key's private key for programmable settlement.",
+      );
+    }
+
+    // Fetch the current nonce for this session key (replay protection)
+    const nonce = await this.contractService.getPaymentNonce(sessionKey);
+    // 5-minute deadline
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+
+    const chainId = this.contractService.getChainId();
+    const kiteAAWallet =
+      this.contractService.getKiteAAWalletAddress() as `0x${string}`;
+
+    // Build EIP-712 typed data and sign with the session key's private key
+    const account = privateKeyToAccount(toHex(this.privateKey, { size: 32 }));
+    const signature = await account.signTypedData({
+      domain: {
+        name: "KiteAAWallet",
+        version: "1",
+        chainId: BigInt(chainId),
+        verifyingContract: kiteAAWallet,
+      },
+      types: {
+        PaymentAuthorization: [
+          { name: "sessionKey", type: "address" },
+          { name: "recipient", type: "address" },
+          { name: "token", type: "address" },
+          { name: "amount", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      primaryType: "PaymentAuthorization",
+      message: {
+        sessionKey: sessionKey as `0x${string}`,
+        recipient: offer.payTo as `0x${string}`,
+        token: offer.asset as `0x${string}`,
+        amount,
+        nonce,
+        deadline,
+      },
+    });
+
+    // Encode as base64 JSON — the facilitator decodes this and calls
+    // KiteAAWallet.executePaymentBySig(sessionKey, recipient, token, amount, nonce, deadline, v, r, s)
+    //
+    // Flat top-level fields match the facilitator's X402PaymentPayload interface.
+    const payload = {
+      scheme: "kite-programmable",
+      version: "1",
+      chainId,
+      settlementContract: kiteAAWallet,
+      sessionKey,
+      recipient: offer.payTo,
+      token: offer.asset,
+      amount,
+      nonce,
+      deadline,
+      signature,
+    };
+    const x402Payload = Buffer.from(
+      JSON.stringify(payload, (key, value) =>
+        typeof value === "bigint" ? value.toString() : value,
+      ),
+    ).toString("base64");
 
     return {
       success: true,
       method: "perCall",
-      txHash,
+      x402Payload,
       amount,
     };
   }

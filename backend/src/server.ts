@@ -8,6 +8,7 @@ import paymentRoutes from "./routes/payment";
 import walletRoutes from "./routes/wallet";
 import registryRoutes from "./routes/registry";
 import channelRoutes from "./routes/channel";
+import dataRoutes from "./routes/data";
 import { errorHandler } from "./middlewares/error-handler";
 import { isContractsConfigured } from "./services/contract-service";
 
@@ -39,6 +40,11 @@ app.use("/api/payment", paymentRoutes);
 app.use("/api/wallet", walletRoutes);
 app.use("/api/registry", registryRoutes);
 app.use("/api/channel", channelRoutes);
+
+// ─── x402 pay-per-use data API ────────────────────────────────────────
+// Routes under /api/data require a valid X-PAYMENT header (kite-programmable
+// scheme). The facilitator settles on-chain before the data is returned.
+app.use("/api/data", dataRoutes);
 
 app.use(errorHandler);
 

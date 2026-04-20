@@ -55,6 +55,7 @@ type Payment @entity(immutable: false) {
   recipient: Bytes!
   token: Bytes!
   amount: BigInt!
+  nonce: BigInt
 
   timestamp: BigInt!
   txHash: Bytes!

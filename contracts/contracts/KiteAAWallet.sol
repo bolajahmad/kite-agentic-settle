@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 interface IAgentRegistry {
     function registerSession(bytes32 agentId, address sessionKey, uint256 sessionIndex, uint256 validUntil) external;
@@ -27,8 +29,13 @@ interface IAgentRegistry {
  *         except those explicitly blocked. The blocklist can be updated at
  *         any time by the session owner without creating a new session.
  */
-contract KiteAAWallet is Ownable, ReentrancyGuard {
+contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
+    using ECDSA for bytes32;
+
+    bytes32 private constant PAYMENT_TYPEHASH = keccak256(
+        "PaymentAuthorization(address sessionKey,address recipient,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+    );
 
     struct UserAccount {
         bool registered;
@@ -62,6 +69,8 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
     mapping(address => DailySpend) public dailySpends;
     // agent id => list of session key addresses
     mapping(bytes32 => address[]) public agentSessions;
+    // session key => nonce for replay protection in executePaymentBySig
+    mapping(address => uint256) public paymentNonces;
 
     address public agentRegistry;
 
@@ -89,6 +98,14 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         address token,
         uint256 amount
     );
+    event PaymentExecutedBySig(
+        address indexed sessionKey,
+        bytes32 indexed agentId,
+        address indexed recipient,
+        address token,
+        uint256 amount,
+        uint256 nonce
+    );
     event FundsDeposited(address indexed user, address indexed token, uint256 amount);
     event FundsWithdrawn(address indexed user, address indexed token, uint256 amount);
     event AgentRegistryUpdated(address indexed registry);
@@ -105,7 +122,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         _;
     }
 
-    constructor() Ownable(msg.sender) {}
+    constructor() Ownable(msg.sender) EIP712("KiteAAWallet", "1") {}
 
     // ─── User Registration ─────────────────────────────────────────────
 
@@ -343,7 +360,79 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
         emit PaymentExecuted(sessionKey, rule.agentId, recipient, token, amount);
     }
 
-    // ─── View Functions ────────────────────────────────────────────────
+    /**
+     * @notice Execute a payment authorised by the session key holder via EIP-712 signature.
+     *         Called by a facilitator (e.g. the provider's backend). The facilitator pays
+     *         gas; the session key owner's balance in this contract is debited.
+     * @param sessionKey The session key that signed the authorisation
+     * @param recipient  The service provider receiving payment
+     * @param token      The ERC20 stablecoin address
+     * @param amount     The payment amount
+     * @param nonce      Must equal paymentNonces[sessionKey] (replay protection)
+     * @param deadline   Unix timestamp after which the signature is invalid
+     * @param v          ECDSA recovery id
+     * @param r          ECDSA signature component
+     * @param s          ECDSA signature component
+     */
+    function executePaymentBySig(
+        address sessionKey,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 nonce,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant onlyActiveSession(sessionKey) {
+        require(block.timestamp <= deadline, "Signature expired");
+        require(nonce == paymentNonces[sessionKey], "Invalid nonce");
+
+        // Recover signer from EIP-712 digest
+        bytes32 structHash = keccak256(abi.encode(
+            PAYMENT_TYPEHASH,
+            sessionKey,
+            recipient,
+            token,
+            amount,
+            nonce,
+            deadline
+        ));
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, v, r, s);
+        require(signer == sessionKey, "Invalid signature");
+
+        SessionKeyRule storage rule = sessionKeys[sessionKey];
+
+        // Per-transaction limit
+        require(amount <= rule.valueLimit, "Exceeds per-tx limit");
+
+        // Recipient blocklist check
+        for (uint256 i = 0; i < rule.blockedProviders.length; i++) {
+            require(rule.blockedProviders[i] != recipient, "Recipient is blocked");
+        }
+
+        // Rolling 24h daily limit
+        DailySpend storage ds = dailySpends[sessionKey];
+        if (block.timestamp >= ds.windowStart + 1 days) {
+            ds.amount = 0;
+            ds.windowStart = block.timestamp;
+        }
+        require(ds.amount + amount <= rule.dailyLimit, "Exceeds daily limit");
+        ds.amount += amount;
+
+        // Deduct from the user's balance
+        require(userBalances[rule.user][token] >= amount, "Insufficient user balance");
+        userBalances[rule.user][token] -= amount;
+
+        // Increment nonce to prevent replay
+        paymentNonces[sessionKey] += 1;
+
+        // Execute transfer
+        IERC20(token).safeTransfer(recipient, amount);
+
+        emit PaymentExecutedBySig(sessionKey, rule.agentId, recipient, token, amount, nonce);
+    }
 
     function getSessionRule(address sessionKey) external view returns (
         address user,
@@ -388,5 +477,9 @@ contract KiteAAWallet is Ownable, ReentrancyGuard {
 
     function getUserBalance(address user, address token) external view returns (uint256) {
         return userBalances[user][token];
+    }
+
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
     }
 }

@@ -29,6 +29,7 @@ import {
   listVars,
   setVar,
 } from "./vars.js";
+import { KiteSettleClient } from "./kite-settle-client.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -295,9 +296,9 @@ async function cmdOnboard(args: string[]) {
 
   if (!valueLimitStr)
     valueLimitStr =
-      (await prompt("  Value limit per tx in KTT [1.0]: ")) || "1.0";
+      (await prompt("  Value limit per tx in USDT [1.0]: ")) || "1.0";
   if (!dailyLimitStr)
-    dailyLimitStr = (await prompt("  Daily limit in KTT [10.0]: ")) || "10.0";
+    dailyLimitStr = (await prompt("  Daily limit in USDT [10.0]: ")) || "10.0";
   if (!validDaysStr)
     validDaysStr = (await prompt("  Session validity in days [30]: ")) || "30";
 
@@ -305,7 +306,7 @@ async function cmdOnboard(args: string[]) {
   if (wantFund.toLowerCase() === "y") {
     if (!fundAmountStr)
       fundAmountStr =
-        (await prompt("  KTT amount to deposit [1.0]: ")) || "1.0";
+        (await prompt("  USDT amount to deposit [1.0]: ")) || "1.0";
     if (!gasAmountStr)
       gasAmountStr =
         (await prompt("  Native gas to send in ETH [0.001]: ")) || "0.001";
@@ -316,11 +317,7 @@ async function cmdOnboard(args: string[]) {
   info("Starting onboarding...");
 
   try {
-    const { KitePaymentClient } = await import("./client.js");
-
-    const client = await KitePaymentClient.create({
-      seedPhrase: credential,
-    });
+    const client = await KiteSettleClient.create({ credential });
 
     const result = await client.onboard(
       {
@@ -352,8 +349,8 @@ async function cmdOnboard(args: string[]) {
     }
     info("");
     info(`  Balances:`);
-    info(`    KTT (wallet):  ${result.walletKttBalance}`);
-    info(`    KTT (EOA):     ${result.kttBalance}`);
+    info(`    USDT (wallet):  ${result.walletKttBalance}`);
+    info(`    USDT (EOA):     ${result.kttBalance}`);
     info(`    Native (EOA):  ${result.kiteBalance}`);
     console.log("");
   } catch (err: any) {
@@ -371,18 +368,12 @@ async function cmdWhoami(args: string[]) {
     const credential = getVar("PRIVATE_KEY");
     if (!credential) die("No credential found. Run: npx kite init");
 
-    const { KitePaymentClient } = await import("./client.js");
+    const client = await KiteSettleClient.create({ credential });
 
-    const client = await KitePaymentClient.create({
-      seedPhrase: credential,
-    });
-
-    const isRegistered = await client
-      .getContractService()
-      .isUserRegistered(client.address);
+    const isRegistered = await client.isRegistered();
 
     if (agentIndexStr == undefined) {
-      info(`  EOA Address:    ${client.address}`);
+      info(`  EOA Address:    ${client.eoaAddress}`);
       info(
         `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
       );
@@ -392,13 +383,9 @@ async function cmdWhoami(args: string[]) {
         die("Invalid --agent-index value. Must be a non-negative integer.");
       }
       // Derive agent address at the given index
-      const { deriveAgentAccount } = await import("./wallet.js");
-      const agent = await deriveAgentAccount(
-        client.getPrivateKey(),
-        agentIndex,
-      );
+      const agent = await client.deriveAgent(agentIndex);
 
-      info(`  EOA Address:    ${client.address}`);
+      info(`  EOA Address:    ${client.eoaAddress}`);
       info(
         `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
       );
@@ -406,7 +393,7 @@ async function cmdWhoami(args: string[]) {
 
       // Check agent's on-chain registration status
       try {
-        const resolved = await client.resolveAgentByAddress(agent.address);
+        const resolved = await client.resolveAgent(agent.address);
         const agentId = (resolved as any)[0] ?? (resolved as any).agentId;
         if (agentId && agentId !== zeroAddress) {
           info(`  Agent ID:       ${agentId}`);
@@ -416,7 +403,7 @@ async function cmdWhoami(args: string[]) {
         }
 
         // Show stored vars for this agent
-        const storedId = getVar(`AGENT_${agentIndex}_ID`);
+        const storedId = KiteSettleClient.getVar(`AGENT_${agentIndex}_ID`);
         if (storedId) info(`  Stored ID (vars): ${storedId}`);
 
         console.log("");

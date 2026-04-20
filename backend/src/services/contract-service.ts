@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
-import { AgentRegistryABI } from "../contracts/AgentRegistryABI.js";
-import { KiteAAWalletABI } from "../contracts/KiteAAWalletABI.js";
-import { AnchorMerkleABI } from "../contracts/AnchorMerkleABI.js";
+import { AgentRegistryABI } from "../contracts/abi/AgentRegistryABI.js";
+import { KiteAAWalletABI } from "../contracts/abi/KiteAAWalletABI.js";
+import { AnchorMerkleABI } from "../contracts/abi/AnchorMerkleABI.js";
 import { PaymentChannelABI } from "../contracts/abi/PaymentChannelABI.js";
 
 // ─── Provider & Signer ────────────────────────────────────────────────
@@ -159,6 +159,43 @@ export async function executePaymentOnChain(
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
+}
+
+/**
+ * Facilitator path: settle an x402 programmable-settlement payment by submitting
+ * the session-key-signed EIP-712 authorisation to the contract.
+ * The facilitator (backend signer) pays gas; the session key's user balance is debited.
+ */
+export async function executePaymentBySigOnChain(
+  sessionKey: string,
+  recipient: string,
+  token: string,
+  amount: bigint,
+  nonce: bigint,
+  deadline: bigint,
+  v: number,
+  r: string,
+  s: string
+) {
+  const wallet = getKiteAAWallet();
+  const tx = await wallet.executePaymentBySig(
+    sessionKey,
+    recipient,
+    token,
+    amount,
+    nonce,
+    deadline,
+    v,
+    r as `0x${string}`,
+    s as `0x${string}`
+  );
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
+}
+
+export async function getPaymentNonceFromChain(sessionKey: string): Promise<bigint> {
+  const wallet = getKiteAAWallet(getProvider());
+  return BigInt(await wallet.paymentNonces(sessionKey));
 }
 
 export async function getSessionRuleFromChain(sessionKeyAddress: string) {

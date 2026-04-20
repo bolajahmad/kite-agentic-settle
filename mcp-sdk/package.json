@@ -1,9 +1,19 @@
 {
-  "name": "@kite-agent-pay/mcp-sdk",
+  "name": "@kite-agent-pay/sdk",
   "version": "0.1.0",
-  "description": "Agent MCP SDK for Kite agentic payments",
+  "description": "Kite Agent Pay SDK and CLI — programmable payments for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./client": {
+      "import": "./dist/kite-settle-client.js",
+      "types": "./dist/kite-settle-client.d.ts"
+    }
+  },
   "bin": {
     "kite": "./dist/cli.js"
   },
@@ -22,7 +32,7 @@
     "fund": "tsx examples/app.ts fund",
     "simulate": "tsx examples/simulate.ts"
   },
-  "keywords": [],
+  "keywords": ["payments", "ai-agents", "x402", "blockchain", "kite", "web3"],
   "author": "",
   "license": "ISC",
   "type": "module",

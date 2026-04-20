@@ -5,14 +5,14 @@ import {
   parseUnits,
   recoverMessageAddress,
 } from "viem";
-import { findFlag, prompt } from "../cli";
-import { KitePaymentClient } from "../client";
-import { DecisionMode, SessionRules, decide as decideCall } from "../decide";
-import { getSessionsByAgent } from "../indexer";
-import { ChannelStatus, PaymentRequest, PaymentResult } from "../types";
-import { parseToken } from "../utils";
-import { getVar } from "../vars";
-import { deriveAgentAccount } from "../wallet";
+import { findFlag, prompt } from "../cli.js";
+import { KitePaymentClient } from "../client.js";
+import { KiteSettleClient } from "../kite-settle-client.js";
+import { DecisionMode, SessionRules, decide as decideCall } from "../decide.js";
+import { getSessionsByAgent } from "../indexer.js";
+import { ChannelStatus, PaymentRequest, PaymentResult } from "../types.js";
+import { parseToken } from "../utils/index.js";
+import { getVar } from "../vars.js";
 
 /** First offer extracted from a 402 response's `accepts[]` array. */
 interface PayOffer {
@@ -43,7 +43,7 @@ async function promptForPayment(req: PaymentRequest): Promise<boolean> {
   console.log("");
   console.log("── Payment Required ──────────────────────────────────────");
   console.log(`  Service:     ${req.url}`);
-  console.log(`  Amount:      ${formatUnits(req.price, 18)} KITE`);
+  console.log(`  Amount:      ${req.price.toString()} USDT`);
   console.log(`  Pay To:      ${req.payTo}`);
   console.log(`  Asset:       ${req.asset}`);
   console.log(`  Scheme:      ${req.scheme}`);
@@ -66,7 +66,7 @@ function formatReceipt(
     "── Payment Receipt ───────────────────────────────────────",
     `  Status:      ${result.success ? "SUCCESS" : "FAILED"}`,
     `  Method:      ${result.method}`,
-    `  Amount:      ${formatUnits(result.amount, 18)} KITE`,
+    `  Amount:      ${formatUnits(result.amount, 18)} USDT`,
     `  Service:     ${url}`,
   ];
   if (result.txHash) {
@@ -407,7 +407,6 @@ async function probeApi402Offer(
   url: string,
 ): Promise<null | { offer: PayOffer; raw: any }> {
   const probe = await globalThis.fetch(url);
-  console.log({ probeAPIResponse: probe });
   if (probe.status !== 402) return null;
 
   const text = await probe.text();
@@ -634,28 +633,36 @@ export async function callApi(args: string[]) {
   const token = parseToken(tokenFlag || "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
 
-  // The PRIVATE_KEY env var belongs to the EOA (owner wallet).
-  // All on-chain calls must originate from the agent's derived key.
-  const eoaClient = await KitePaymentClient.create({
-    seedPhrase: credential,
-    defaultPaymentMode: "perCall",
+  // Build a KiteSettleClient — it derives EOA, agent, and session keys
+  // deterministically from the stored credential.
+  const sessionIndex = Number(findFlag(args, "--session") || "0");
+  const settle = await KiteSettleClient.create({
+    credential,
+    defaultPaymentMode: mode === "perCall" ? "perCall" : mode,
+    agentIndex: Number(agentIndex),
+    sessionIndex: mode === "perCall" ? sessionIndex : 0,
   });
-  const { privateKey: agentPrivateKey, address: agentAddress } =
-    await deriveAgentAccount(eoaClient.getPrivateKey(), Number(agentIndex));
 
-  const client = await KitePaymentClient.create({
-    seedPhrase: agentPrivateKey,
-    defaultPaymentMode: mode,
-  });
-  const balance = await client.getTokenBalance(token?.address);
+  const agentAddress = settle.agentAddress ?? settle.eoaAddress;
+  const sessionKeyAddress = settle.sessionKeyAddress;
+  // The underlying payment client (session-key scoped for perCall mode).
+  const client = settle.getPaymentClient();
 
-  console.log(`  EOA:      ${eoaClient.address}`);
+  // For x402, show the KiteAAWallet deposited balance (the session key
+  // itself has no ERC20 balance — funds live in the wallet contract).
+  const balance =
+    mode === "perCall"
+      ? await settle.getDepositedBalance(token?.address)
+      : await client.getTokenBalance(token?.address);
+
+  console.log(`  EOA:      ${settle.eoaAddress}`);
   console.log(`  Agent:    ${agentAddress} (index ${agentIndex})`);
+  if (sessionKeyAddress) console.log(`  Session:  ${sessionKeyAddress}`);
   console.log(`  Target:   ${url}`);
   console.log(`  Mode:     ${mode}`);
   console.log(`  Decide:   ${decide ?? "auto"}`);
   console.log(
-    `  Balance:  ${formatUnits(balance, tokenDecimals)} ${token?.symbol}`,
+    `  Balance:  ${formatUnits(balance, tokenDecimals)} ${token?.symbol}${mode === "perCall" ? " (KiteAAWallet)" : ""}`,
   );
   if (ratePerCallFlag)
     console.log(`  Rate/call override: ${ratePerCallFlag} ${token?.symbol}`);
@@ -672,7 +679,7 @@ export async function callApi(args: string[]) {
     : undefined;
 
   // Resolve on-chain session rules to power the decision engine.
-  const [agentId] = await client.resolveAgentByAddress(agentAddress);
+  const [agentId] = await settle.resolveAgent(agentAddress);
   const sessions = await getSessionsByAgent(agentId);
 
   const defaultRule: SessionRules = {
@@ -726,8 +733,10 @@ export async function callApi(args: string[]) {
   } else {
     console.log(`  Per-call mode: making a single call with each request.`);
     const fetchOpts: any = {
-      paymentMode: "x402" as const,
+      paymentMode: "perCall" as const,
       onPayment,
+      sessionKey: sessionKeyAddress,
+      walletAddress: agentAddress,
     };
 
     if (decide === "cli") {
@@ -739,8 +748,13 @@ export async function callApi(args: string[]) {
         const ctx = {
           request: req,
           rules: defaultRule,
-          balance: await client.getTokenBalance(token?.address),
-          totalSpentThisSession: client.getTotalSpent(),
+          balance: Number(
+            formatUnits(
+              await client.getTokenBalance(token?.address),
+              tokenDecimals,
+            ),
+          ),
+          totalSpentThisSession: Number(client.getTotalSpent()),
           callCount: client.getUsageLogs().length,
           openaiApiKey: process.env.OPENAI_API_KEY,
         };
@@ -761,9 +775,14 @@ export async function callApi(args: string[]) {
     const elapsed = Date.now() - t0;
 
     if (response.status === 402) {
+      const errBody: any = await response.json().catch(() => null);
       console.log(`  Status: ${response.status} Payment Required`);
       console.log(`  The agent was not charged.`);
-      console.log(`  Reason: payment was declined`);
+      if (errBody?.error) {
+        console.log(`  Reason: ${errBody.error}`);
+      } else {
+        console.log(`  Reason: payment was declined`);
+      }
     } else {
       const body = await response.json();
       console.log(`  Status:  ${response.status} OK`);

@@ -8,18 +8,16 @@
 import http from "node:http";
 import readline from "node:readline";
 import {
-  createPublicClient,
   formatUnits,
   parseUnits,
-  http as viemHttp,
   zeroAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { findFlag } from "../cli.js";
 import { TOKENS } from "../config.js";
 import type { DecisionMode } from "../decide.js";
-import { KITE_TESTNET, KitePaymentClient, createKiteWallet } from "../index.js";
-import type { PaymentRequest, PaymentResult } from "../types.js";
+import { KITE_TESTNET, KiteSettleClient } from "../index.js";
+import type { PaymentResult } from "../types.js";
 import { getVar } from "../vars.js";
 import { callApi } from "./call.js";
 
@@ -132,23 +130,6 @@ function askUser(question: string): Promise<string> {
       resolve(answer.trim().toLowerCase());
     });
   });
-}
-
-async function promptForPayment(req: PaymentRequest): Promise<boolean> {
-  console.log("");
-  console.log("── Payment Required ──────────────────────────────────────");
-  console.log(`  Service:     ${req.url}`);
-  console.log(`  Amount:      ${fmt(req.price)} KITE`);
-  console.log(`  Pay To:      ${req.payTo}`);
-  console.log(`  Asset:       ${req.asset}`);
-  console.log(`  Scheme:      ${req.scheme}`);
-  if (req.description) console.log(`  Description: ${req.description}`);
-  if (req.merchantName) console.log(`  Merchant:    ${req.merchantName}`);
-  console.log("──────────────────────────────────────────────────────────");
-  console.log("");
-
-  const answer = await askUser("  Approve payment? (yes/no): ");
-  return answer === "yes" || answer === "y";
 }
 
 // ── Mock weather API ───────────────────────────────────────────────
@@ -275,9 +256,7 @@ async function showBalance(args: string[]) {
 
   tokens.unshift(zeroAddress); // Ensure default token is included
 
-  const client = await KitePaymentClient.create({
-    seedPhrase: credential,
-  });
+  const client = await KiteSettleClient.create({ credential });
 
   const agentBalance = await Promise.all(
     tokens.map(async (t) => {
@@ -287,11 +266,11 @@ async function showBalance(args: string[]) {
           symbol.toLowerCase() == t.toLowerCase(),
       );
 
-      const depBalance = await client.getDepositedTokenBalance(token?.address);
+      const depBalance = await client.getDepositedBalance(token?.address);
       const balance =
         token?.address == zeroAddress
           ? undefined
-          : await client.getTokenBalance(token?.address);
+          : await client.getWalletBalance(token?.address);
       return {
         ...token,
         balance: formatUnits(depBalance, token?.decimals || 18),
@@ -321,14 +300,12 @@ async function showUsage(opts: CmdOpts) {
   const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
-  const client = await KitePaymentClient.create({
-    seedPhrase: credential,
-  });
+  const client = await KiteSettleClient.create({ credential });
 
   const logs = client.getUsageLogs();
   const total = client.getTotalSpent();
 
-  console.log(`  Address:     ${client.address}`);
+  console.log(`  Address:     ${client.eoaAddress}`);
   console.log(`  Total spent: ${fmt(total)} KITE`);
   console.log(`  Calls:       ${logs.length}`);
 
@@ -367,14 +344,9 @@ async function fundWallet(args: string[]) {
     );
   }
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
-  const { address } = await createKiteWallet(credential, KITE_TESTNET.rpcUrl);
-  const transport = viemHttp(KITE_TESTNET.rpcUrl);
-  const publicClient = createPublicClient({ transport });
-  const client = await KitePaymentClient.create({
-    seedPhrase: credential,
-  });
+  const client = await KiteSettleClient.create({ credential });
 
-  console.log(`  From:     ${address}`);
+  console.log(`  From:     ${client.eoaAddress}`);
   console.log(
     `  To:       KiteAAWallet (${KITE_TESTNET.contracts.kiteAAWallet})`,
   );
@@ -382,10 +354,8 @@ async function fundWallet(args: string[]) {
 
   const balance =
     token?.address === zeroAddress
-      ? await publicClient.getBalance({
-          address: address as `0x${string}`,
-        })
-      : await client.getTokenBalance(token?.address);
+      ? await client.getEoaClient().getContractService().getNativeBalance(client.eoaAddress as `0x${string}`).catch(() => 0n)
+      : await client.getWalletBalance(token?.address);
 
   if (balance < amount) {
     throw new Error(
@@ -393,7 +363,7 @@ async function fundWallet(args: string[]) {
     );
   }
 
-  const data = await client.depositToWallet(amount, token?.address);
+  const data = await client.deposit(amount, token?.address);
 
   console.log(`  Tx:       ${data}`);
 }
@@ -424,19 +394,17 @@ async function withdrawFunds(args: string[]) {
 
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
 
-  const client = await KitePaymentClient.create({
-    seedPhrase: credential,
-  });
+  const client = await KiteSettleClient.create({ credential });
 
   console.log(
     `  Withdrawing ${amountFlag.trim()} ${token?.symbol || "KITE"} to owner`,
   );
-  console.log(`   Owner Address: ${client.address}`);
+  console.log(`   Owner Address: ${client.eoaAddress}`);
   console.log(
     "  Note: This will transfer tokens from the AA wallet to your EOA",
   );
 
-  const data = await client.withdrawFromWallet(amount, token?.address);
+  const data = await client.withdraw(amount, token?.address);
 
   console.log(`  Tx:       ${data}`);
 }

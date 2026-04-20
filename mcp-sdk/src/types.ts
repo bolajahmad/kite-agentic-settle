@@ -90,14 +90,22 @@ export interface UsageLog {
 export interface PaymentResult {
   success: boolean;
   method: "perCall" | "channel" | "batch";
+  /** tx hash — only present when the agent self-executed (legacy path) */
   txHash?: string;
+  /**
+   * Base64-encoded x402 programmable-settlement payload.
+   * Present for perCall payments made via KiteAAWallet session key.
+   * The facilitator (provider backend) decodes this and calls
+   * KiteAAWallet.executePaymentBySig(...) to settle on-chain.
+   */
+  x402Payload?: string;
   receipt?: Receipt;
   amount: bigint;
 }
 
 export interface PaymentRequest {
   url: string;
-  price: bigint;
+  price: number;
   asset: string;
   payTo: string;
   scheme: string;

@@ -1,14 +1,13 @@
 import { formatUnits, parseUnits, stringToHex } from "viem";
 import { findFlag, prompt } from "../cli.js";
-import { KitePaymentClient } from "../client.js";
+import { KiteSettleClient } from "../kite-settle-client.js";
 import { getVar } from "../vars.js";
-import { deriveAgentAccount, deriveSessionAccount } from "../wallet.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Build an EOA-level KitePaymentClient (not agent-derived). */
-async function buildEoaClient(credential: string): Promise<KitePaymentClient> {
-  return KitePaymentClient.create({ seedPhrase: credential });
+/** Build an EOA-level KiteSettleClient. */
+async function buildEoaClient(credential: string): Promise<KiteSettleClient> {
+  return KiteSettleClient.create({ credential });
 }
 
 // ── session start ─────────────────────────────────────────────────────────────
@@ -32,17 +31,16 @@ async function cmdSessionStart(args: string[]): Promise<void> {
   const blockedProvidersStr = findFlag(args, "--block");
 
   const client = await buildEoaClient(credential);
-  const cs = client.getContractService();
+  const cs = client.getEoaClient().getContractService();
 
   // Derive agent key for agentId lookup
-  const agentPrivateKeyBytes = client.getPrivateKey();
-  const agent = await deriveAgentAccount(agentPrivateKeyBytes, agentIndex);
-  const session = await deriveSessionAccount(agentPrivateKeyBytes, agentIndex, sessionIndex);
+  const agent = await client.deriveAgent(agentIndex);
+  const session = await client.deriveSession(agentIndex, sessionIndex);
 
   // Resolve agentId on-chain
   let agentId: `0x${string}`;
   try {
-    const resolved = await client.resolveAgentByAddress(agent.address);
+    const resolved = await client.resolveAgent(agent.address);
     agentId = ((resolved as any)[0] ?? (resolved as any).agentId) as `0x${string}`;
     if (!agentId || agentId === "0x0000000000000000000000000000000000000000000000000000000000000000") {
       throw new Error("Agent not registered on-chain.");
@@ -73,7 +71,7 @@ async function cmdSessionStart(args: string[]): Promise<void> {
 
   console.log("");
   console.log("── Creating Session Key ───────────────────────────────────");
-  console.log(`  EOA:             ${client.address}`);
+  console.log(`  EOA:             ${client.eoaAddress}`);
   console.log(`  Agent index:     ${agentIndex}  (${agent.address})`);
   console.log(`  Agent ID:        ${agentId}`);
   console.log(`  Session index:   ${sessionIndex}  (${session.address})`);
@@ -124,15 +122,14 @@ async function cmdSessionList(args: string[]): Promise<void> {
   );
 
   const client = await buildEoaClient(credential);
-  const cs = client.getContractService();
+  const cs = client.getEoaClient().getContractService();
 
-  const agentPrivateKeyBytes = client.getPrivateKey();
-  const agent = await deriveAgentAccount(agentPrivateKeyBytes, agentIndex);
+  const agent = await client.deriveAgent(agentIndex);
 
   // Resolve agentId
   let agentId: `0x${string}`;
   try {
-    const resolved = await client.resolveAgentByAddress(agent.address);
+    const resolved = await client.resolveAgent(agent.address);
     agentId = ((resolved as any)[0] ?? (resolved as any).agentId) as `0x${string}`;
   } catch {
     throw new Error(
@@ -202,7 +199,7 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
   );
 
   const client = await buildEoaClient(credential);
-  const cs = client.getContractService();
+  const cs = client.getEoaClient().getContractService();
 
   // If no explicit session key, derive the one at --session-index
   let sessionKey: string;
@@ -210,8 +207,7 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
     sessionKey = sessionKeyRaw;
   } else {
     const sessionIndex = Number(findFlag(args, "--session-index") ?? "0");
-    const agentPrivateKeyBytes = client.getPrivateKey();
-    const session = await deriveSessionAccount(agentPrivateKeyBytes, agentIndex, sessionIndex);
+    const session = await client.deriveSession(agentIndex, sessionIndex);
     sessionKey = session.address;
   }
 
@@ -282,15 +278,14 @@ async function cmdSessionRevoke(args: string[]): Promise<void> {
   );
 
   const client = await buildEoaClient(credential);
-  const cs = client.getContractService();
+  const cs = client.getEoaClient().getContractService();
 
   let sessionKey: string;
   if (sessionKeyRaw) {
     sessionKey = sessionKeyRaw;
   } else {
     const sessionIndex = Number(findFlag(args, "--session-index") ?? "0");
-    const agentPrivateKeyBytes = client.getPrivateKey();
-    const session = await deriveSessionAccount(agentPrivateKeyBytes, agentIndex, sessionIndex);
+    const session = await client.deriveSession(agentIndex, sessionIndex);
     sessionKey = session.address;
     console.log(`  (Derived session key at index ${sessionIndex}: ${sessionKey})`);
   }
@@ -299,9 +294,9 @@ async function cmdSessionRevoke(args: string[]): Promise<void> {
   try {
     const rule = (await cs.getSessionRule(sessionKey)) as any;
     const owner = rule[0] as string;
-    if (owner.toLowerCase() !== client.address.toLowerCase()) {
+    if (owner.toLowerCase() !== client.eoaAddress.toLowerCase()) {
       throw new Error(
-        `Session key ${sessionKey} belongs to ${owner}, not ${client.address}. ` +
+        `Session key ${sessionKey} belongs to ${owner}, not ${client.eoaAddress}. ` +
           "Only the owning EOA can revoke a session key.",
       );
     }
@@ -313,7 +308,7 @@ async function cmdSessionRevoke(args: string[]): Promise<void> {
   console.log("");
   console.log("── Revoking Session Key ───────────────────────────────────");
   console.log(`  Session key:  ${sessionKey}`);
-  console.log(`  EOA:          ${client.address}`);
+  console.log(`  EOA:          ${client.eoaAddress}`);
   console.log("");
 
   const txHash = await cs.revokeSessionKey(sessionKey);
@@ -346,15 +341,14 @@ async function cmdSessionBlock(args: string[]): Promise<void> {
   );
 
   const client = await buildEoaClient(credential);
-  const cs = client.getContractService();
+  const cs = client.getEoaClient().getContractService();
 
   let sessionKey: string;
   if (sessionKeyRaw) {
     sessionKey = sessionKeyRaw;
   } else {
     const sessionIndex = Number(findFlag(args, "--session-index") ?? "0");
-    const agentPrivateKeyBytes = client.getPrivateKey();
-    const session = await deriveSessionAccount(agentPrivateKeyBytes, agentIndex, sessionIndex);
+    const session = await client.deriveSession(agentIndex, sessionIndex);
     sessionKey = session.address;
   }
 
@@ -392,15 +386,14 @@ async function cmdSessionUnblock(args: string[]): Promise<void> {
   );
 
   const client = await buildEoaClient(credential);
-  const cs = client.getContractService();
+  const cs = client.getEoaClient().getContractService();
 
   let sessionKey: string;
   if (sessionKeyRaw) {
     sessionKey = sessionKeyRaw;
   } else {
     const sessionIndex = Number(findFlag(args, "--session-index") ?? "0");
-    const agentPrivateKeyBytes = client.getPrivateKey();
-    const session = await deriveSessionAccount(agentPrivateKeyBytes, agentIndex, sessionIndex);
+    const session = await client.deriveSession(agentIndex, sessionIndex);
     sessionKey = session.address;
   }
 

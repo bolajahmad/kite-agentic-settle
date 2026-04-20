@@ -36,6 +36,7 @@ export const kiteAAWalletAbi = parseAbi([
   "function deposit(address token, uint256 amount) external",
   "function withdraw(address token, uint256 amount) external",
   "function executePayment(address sessionKey, address recipient, address token, uint256 amount) external",
+  "function executePaymentBySig(address sessionKey, address recipient, address token, uint256 amount, uint256 nonce, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external",
   "function revokeSessionKey(address sessionKeyAddress) external",
   "function revokeAllAgentSessions(bytes32 agentId) external",
   "function setAgentRegistry(address _registry) external",
@@ -51,6 +52,8 @@ export const kiteAAWalletAbi = parseAbi([
   "function isSessionValid(address sessionKey) external view returns (bool)",
   "function getUserAgentIds(address user) external view returns (bytes32[])",
   "function getUserBalance(address user, address token) external view returns (uint256)",
+  "function paymentNonces(address sessionKey) external view returns (uint256)",
+  "function domainSeparator() external view returns (bytes32)",
   "function agentRegistry() external view returns (address)",
   "function owner() external view returns (address)",
   // Events
@@ -64,6 +67,7 @@ export const kiteAAWalletAbi = parseAbi([
   "event FundsDeposited(address indexed user, address indexed token, uint256 amount)",
   "event FundsWithdrawn(address indexed user, address indexed token, uint256 amount)",
   "event PaymentExecuted(address indexed sessionKey, bytes32 indexed agentId, address indexed recipient, address token, uint256 amount)",
+  "event PaymentExecutedBySig(address indexed sessionKey, bytes32 indexed agentId, address indexed recipient, address token, uint256 amount, uint256 nonce)",
   "event AgentRegistryUpdated(address indexed registry)",
 ]);
 

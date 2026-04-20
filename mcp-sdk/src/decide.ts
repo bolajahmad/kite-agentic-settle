@@ -1,6 +1,7 @@
 // 3-tier payment decision cascade: Rules -> Cost Model -> LLM
 // Each tier returns "approve", "reject", or "unclear" (pass to next tier).
 
+import { parseUnits } from "viem";
 import type { PaymentRequest } from "./types.js";
 
 export type Decision = "approve" | "reject" | "unclear";
@@ -8,17 +9,17 @@ export type DecisionMode = "auto" | "rules" | "ai" | "cli";
 
 /** Runtime session rules — sourced from on-chain data or indexer, NOT agents.json */
 export interface SessionRules {
-  maxPerCall: string;           // max per-call spend (wei string)
-  maxPerSession: string;        // max per-session spend (wei string)
-  blockedProviders: string[];   // blocked provider addresses
+  maxPerCall: string; // max per-call spend (wei string)
+  maxPerSession: string; // max per-session spend (wei string)
+  blockedProviders: string[]; // blocked provider addresses
   requireApprovalAbove: string; // auto-approve threshold (wei string)
 }
 
 export interface DecisionContext {
   request: PaymentRequest;
   rules: SessionRules;
-  balance: bigint;
-  totalSpentThisSession: bigint;
+  balance: number;
+  totalSpentThisSession: number;
   callCount: number;
   // For LLM tier
   openaiApiKey?: string;
@@ -32,26 +33,41 @@ export interface DecisionResult {
 }
 
 // Tier 1: Rule-based checks
-export function checkRules(ctx: DecisionContext): { decision: Decision; reason?: string } {
+export function checkRules(ctx: DecisionContext): {
+  decision: Decision;
+  reason?: string;
+} {
   const { request, rules, totalSpentThisSession } = ctx;
 
   // Check per-call limit
   const maxPerCall = BigInt(rules.maxPerCall);
   if (maxPerCall > 0n && request.price > maxPerCall) {
-    return { decision: "reject", reason: `Price ${request.price} exceeds per-call limit ${maxPerCall}` };
+    return {
+      decision: "reject",
+      reason: `Price ${request.price} exceeds per-call limit ${maxPerCall}`,
+    };
   }
 
   // Check session budget
   const maxPerSession = BigInt(rules.maxPerSession);
-  if (maxPerSession > 0n && totalSpentThisSession + request.price > maxPerSession) {
-    return { decision: "reject", reason: `Would exceed session budget (${totalSpentThisSession + request.price} > ${maxPerSession})` };
+  if (
+    maxPerSession > 0n &&
+    totalSpentThisSession + request.price > maxPerSession
+  ) {
+    return {
+      decision: "reject",
+      reason: `Would exceed session budget (${totalSpentThisSession + request.price} > ${maxPerSession})`,
+    };
   }
 
   // Check blocked providers
-  if (rules.blockedProviders.length > 0) {
+  if (rules.blockedProviders?.length > 0) {
     const payToLower = request.payTo.toLowerCase();
     if (rules.blockedProviders.some((p) => p.toLowerCase() === payToLower)) {
-      return { decision: "reject", reason: `Provider ${request.payTo} is blocked` };
+      return {
+        decision: "reject",
+        reason: `Provider ${request.payTo} is blocked`,
+      };
     }
   }
 
@@ -65,32 +81,47 @@ export function checkRules(ctx: DecisionContext): { decision: Decision; reason?:
 }
 
 // Tier 2: Cost model — balance check and historical analysis
-export function checkCostModel(ctx: DecisionContext): { decision: Decision; reason?: string } {
+export function checkCostModel(ctx: DecisionContext): {
+  decision: Decision;
+  reason?: string;
+} {
   const { request, balance, totalSpentThisSession, callCount } = ctx;
 
   // Hard reject: insufficient balance
   if (request.price > balance) {
-    return { decision: "reject", reason: `Insufficient balance: need ${request.price}, have ${balance}` };
+    return {
+      decision: "reject",
+      reason: `Insufficient balance: need ${request.price}, have ${balance}`,
+    };
   }
 
   // If balance after payment would be < 10% of what we started with, flag it
   const sessionStart = balance + totalSpentThisSession;
   const afterPayment = balance - request.price;
-  if (sessionStart > 0n && afterPayment * 10n < sessionStart) {
-    return { decision: "unclear", reason: "Payment would leave < 10% of session starting balance" };
+  if (sessionStart > 0 && afterPayment * 10 < sessionStart) {
+    return {
+      decision: "unclear",
+      reason: "Payment would leave < 10% of session starting balance",
+    };
   }
 
   // If we've paid many times this session, approve (recurring pattern = trusted)
   if (callCount >= 3) {
-    const avgCost = totalSpentThisSession / BigInt(callCount);
+    const avgCost = totalSpentThisSession / callCount;
     // If this call costs roughly the same as average, approve
-    if (request.price <= avgCost * 2n) {
-      return { decision: "approve", reason: `Consistent with session avg cost (${callCount} prior calls)` };
+    if (request.price <= avgCost * 2) {
+      return {
+        decision: "approve",
+        reason: `Consistent with session avg cost (${callCount} prior calls)`,
+      };
     }
   }
 
   // Small relative to balance = approve
-  if (balance > 0n && request.price * 100n <= balance) {
+  if (
+    balance > 0n &&
+    BigInt(parseUnits(request.price.toString(), 6)) * 100n <= balance
+  ) {
     return { decision: "approve", reason: "Cost < 1% of balance" };
   }
 
@@ -98,7 +129,9 @@ export function checkCostModel(ctx: DecisionContext): { decision: Decision; reas
 }
 
 // Tier 3: LLM fallback — asks an AI model for a binary decision
-export async function askLLM(ctx: DecisionContext): Promise<{ decision: Decision; reason?: string }> {
+export async function askLLM(
+  ctx: DecisionContext,
+): Promise<{ decision: Decision; reason?: string }> {
   if (!ctx.openaiApiKey) {
     return { decision: "unclear", reason: "No OpenAI API key configured" };
   }
@@ -139,17 +172,27 @@ Respond with exactly one word: APPROVE or REJECT, followed by a brief reason on 
       return { decision: "reject", reason };
     }
 
-    return { decision: "unclear", reason: `LLM returned ambiguous response: ${firstLine}` };
+    return {
+      decision: "unclear",
+      reason: `LLM returned ambiguous response: ${firstLine}`,
+    };
   } catch (err: any) {
     return { decision: "unclear", reason: `LLM error: ${err.message}` };
   }
 }
 
 // Run the full cascade. Returns a final approve/reject decision.
-export async function decide(ctx: DecisionContext, mode: DecisionMode = "auto"): Promise<DecisionResult> {
+export async function decide(
+  ctx: DecisionContext,
+  mode: DecisionMode = "auto",
+): Promise<DecisionResult> {
   // CLI mode: always defer to interactive prompt (handled by caller)
   if (mode === "cli") {
-    return { decision: "approve", reason: "CLI mode — deferred to interactive prompt", tier: "cli" };
+    return {
+      decision: "approve",
+      reason: "CLI mode — deferred to interactive prompt",
+      tier: "cli",
+    };
   }
 
   // Tier 1: Rules
@@ -164,7 +207,11 @@ export async function decide(ctx: DecisionContext, mode: DecisionMode = "auto"):
 
   if (mode === "rules") {
     // Rules-only mode: if rules are unclear, default to reject
-    return { decision: "reject", reason: "Rules inconclusive, defaulting to reject", tier: "rules" };
+    return {
+      decision: "reject",
+      reason: "Rules inconclusive, defaulting to reject",
+      tier: "rules",
+    };
   }
 
   // Tier 2: Cost model
@@ -190,5 +237,9 @@ export async function decide(ctx: DecisionContext, mode: DecisionMode = "auto"):
   }
 
   // All tiers inconclusive — default to reject (safe default)
-  return { decision: "reject", reason: "All decision tiers inconclusive", tier: "rules" };
+  return {
+    decision: "reject",
+    reason: "All decision tiers inconclusive",
+    tier: "rules",
+  };
 }
