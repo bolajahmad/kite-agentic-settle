@@ -44,6 +44,10 @@ async function main() {
   const payChannelAddr = await payChannel.getAddress();
   console.log("PaymentChannel deployed to:", payChannelAddr);
 
+  // Link wallet to channel
+  await wallet.setPaymentChannel(payChannelAddr);
+  console.log("KiteAAWallet linked to PaymentChannel");
+
   console.log("\n--- Deployment Summary ---");
   console.log("AgentRegistry  :", registryAddr);
   console.log("KiteAAWallet   :", walletAddr);

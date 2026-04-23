@@ -70,12 +70,33 @@ class ViemAccountAdapter {
     value: bigint;
     data: `0x${string}`;
   }): Promise<{ hash: string; fee: bigint }> {
-    const hash = await this.walletClient.sendTransaction({
-      to: params.to as `0x${string}`,
-      value: params.value,
-      data: params.data,
+    let hash: `0x${string}`;
+    try {
+      hash = await this.walletClient.sendTransaction({
+        to: params.to as `0x${string}`,
+        value: params.value,
+        data: params.data,
+      });
+    } catch (err: any) {
+      const reason =
+        err?.cause?.reason ??
+        err?.cause?.shortMessage ??
+        err?.shortMessage ??
+        err?.message ??
+        String(err);
+      throw new Error(`Transaction submission failed: ${reason}`);
+    }
+
+    const receipt = await this.publicClient.waitForTransactionReceipt({
+      hash,
+      timeout: 120_000,
+      pollingInterval: 3_000,
     });
-    const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
+
+    if (receipt.status === "reverted") {
+      throw new Error(`Transaction reverted on-chain (hash: ${hash})`);
+    }
+
     const fee = (receipt.gasUsed ?? 0n) * (receipt.effectiveGasPrice ?? 0n);
     return { hash, fee };
   }

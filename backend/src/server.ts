@@ -9,8 +9,9 @@ import walletRoutes from "./routes/wallet";
 import registryRoutes from "./routes/registry";
 import channelRoutes from "./routes/channel";
 import dataRoutes from "./routes/data";
+import streamRoutes from "./routes/channel-data.js";
 import { errorHandler } from "./middlewares/error-handler";
-import { isContractsConfigured } from "./services/contract-service";
+import { isContractsConfigured, startChannelWatcher } from "./services/contract-service";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -46,8 +47,15 @@ app.use("/api/channel", channelRoutes);
 // scheme). The facilitator settles on-chain before the data is returned.
 app.use("/api/data", dataRoutes);
 
+// ─── Channel (batch/stream) data API ──────────────────────────────────
+// Routes under /api/stream use payment channels.  Step 1 returns a 402 with
+// channel metadata; subsequent calls carry X-Channel-Id and accumulate cost
+// via provider-signed receipts that anchor to the PaymentChannel contract.
+app.use("/api/stream", streamRoutes);
+
 app.use(errorHandler);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  startChannelWatcher();
 });

@@ -219,6 +219,7 @@ export class KiteSettleClient {
         defaultPaymentMode: "perCall",
         sessionKey: sessionAddr,
         walletAddress: agentAddr,
+        eoaAddress: eoaClient.address,  // funds live under the EOA
       });
     } else if (defaultPaymentMode === "channel" || defaultPaymentMode === "batch") {
       const { privateKey: agentPrivKey, address: agentAddr } =
@@ -228,6 +229,7 @@ export class KiteSettleClient {
         seedPhrase: agentPrivKey,
         config,
         defaultPaymentMode,
+        eoaAddress: eoaClient.address,  // funds live under the EOA, not the agent
       });
     } else {
       // auto — use EOA-level client

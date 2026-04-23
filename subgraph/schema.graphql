@@ -51,6 +51,8 @@ type Payment @entity(immutable: false) {
   id: ID!
   session: Session!
   agent: Agent!
+  user: User!
+  channel: Channel
 
   recipient: Bytes!
   token: Bytes!
@@ -60,4 +62,67 @@ type Payment @entity(immutable: false) {
   timestamp: BigInt!
   txHash: Bytes!
   type: String! # "PerCall" | "BatchCall" | "BatchTime"
+}
+
+type Channel @entity(immutable: false) {
+  id: ID!
+  channelId: Bytes!
+
+  user: User!
+  provider: Bytes!
+  agent: Agent!
+  session: Session!
+  walletContract: Bytes!
+
+  mode: String! # "PREPAID" | "POSTPAID"
+  token: Bytes!
+  deposit: BigInt!
+  maxSpend: BigInt!
+  maxPerCall: BigInt!
+
+  status: String! # "OPEN", "ACTIVE", "CLOSED", "SETTLEMENT_PENDING"
+  openedAt: BigInt!
+  expiresAt: BigInt!
+  closedAt: BigInt
+
+  settlementInitiator: Bytes
+  settlementDeadline: BigInt
+  highestClaimedCost: BigInt!
+  highestSequenceNumber: BigInt!
+  settledAmount: BigInt!
+  refundAmount: BigInt!
+
+  usageMerkleRoot: Bytes
+  receipts: [Receipt!]! @derivedFrom(field: "channel")
+
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+type Receipt @entity(immutable: false) {
+  id: ID!
+  channel: Channel!
+
+  sequenceNumber: BigInt!
+  cumulativeCost: BigInt!
+  timestamp: BigInt!
+
+  endpoint: String
+  method: String
+
+  submitter: Bytes!
+  txHash: Bytes!
+  createdAt: BigInt!
+}
+
+type ChannelSettlement @entity(immutable: false) {
+  id: ID! # channelId
+  channel: Channel!
+
+  payment: BigInt!
+  refund: BigInt!
+
+  txHash: Bytes!
+
+  finalizedAt: BigInt!
 }

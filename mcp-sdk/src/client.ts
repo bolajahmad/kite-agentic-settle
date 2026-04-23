@@ -25,6 +25,13 @@ export interface KiteClientOptions {
   defaultPaymentMode?: "perCall" | "channel" | "batch" | "auto" | "session";
   walletAddress?: string;
   sessionKey?: string;
+  /**
+   * Override the EOA address stored in ContractService.
+   * Must be set when the credential is an agent/session derived key so that
+   * fund operations (openChannel, deposited-balance checks) use the true
+   * EOA wallet owner, not the derived signer.
+   */
+  eoaAddress?: string;
 }
 
 export class KitePaymentClient {
@@ -82,7 +89,14 @@ export class KitePaymentClient {
       config.rpcUrl,
     );
 
-    const contractService = new ContractService(config, account);
+    // If the caller provides an explicit EOA address (e.g. the paymentClient
+    // is created with an agent/session key but funds live under the EOA)
+    // use that; otherwise fall back to the wallet address derived above.
+    const contractService = new ContractService(
+      config,
+      account,
+      options.eoaAddress ?? address,
+    );
     const keyPair = account.keyPair;
     if (!keyPair?.privateKey)
       throw new Error("Could not extract private key from WDK account");

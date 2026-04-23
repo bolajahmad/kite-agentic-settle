@@ -14,7 +14,13 @@ let signer: ethers.Wallet | undefined;
 
 export function getProvider(): ethers.JsonRpcProvider {
   if (!provider) {
-    provider = new ethers.JsonRpcProvider(RPC_URL);
+    // Use a static network to prevent ethers from polling chain-ID on every
+    // request. We also disable the internal block-polling subscription because
+    // the Kite testnet drops eth_newFilter immediately ("filter not found").
+    provider = new ethers.JsonRpcProvider(RPC_URL, undefined, {
+      staticNetwork: true,
+      polling: false,
+    } as any);
   }
   return provider;
 }
@@ -286,22 +292,16 @@ export async function openChannelOnChain(
   deposit: bigint,
   maxSpend: bigint,
   maxDuration: number,
-  ratePerCall: bigint
+  maxPerCall: bigint,
+  user: string,        // EOA whose KiteAAWallet balance is debited
+  walletContract: string // KiteAAWallet contract address
 ) {
   const pc = getPaymentChannel();
 
-  // For prepaid, approve the channel contract to pull the deposit
-  if (mode === 0 && deposit > 0n) {
-    const tokenContract = new ethers.Contract(
-      token,
-      ["function approve(address spender, uint256 amount) returns (bool)"],
-      getSigner()
-    );
-    const approveTx = await tokenContract.approve(await pc.getAddress(), deposit);
-    await approveTx.wait();
-  }
+  // No ERC20 approve needed — KiteAAWallet.withdrawForChannel transfers
+  // directly from the wallet contract to PaymentChannel.
 
-  const tx = await pc.openChannel(provider, token, mode, deposit, maxSpend, maxDuration, ratePerCall);
+  const tx = await pc.openChannel(provider, token, mode, deposit, maxSpend, maxDuration, maxPerCall, user, walletContract);
   const receipt = await tx.wait();
 
   // Extract channelId from ChannelOpened event
@@ -379,7 +379,7 @@ export async function getChannelOnChain(channelId: string) {
   const pc = getPaymentChannel(getProvider());
   const [
     consumer, provider, token, mode, deposit, maxSpend, maxDuration,
-    openedAt, expiresAt, ratePerCall, settledAmount, status,
+    openedAt, expiresAt, maxPerCall, settledAmount, status,
     settlementDeadline, highestClaimedCost, highestSequenceNumber
   ] = await pc.getChannel(channelId);
   return {
@@ -390,7 +390,7 @@ export async function getChannelOnChain(channelId: string) {
     maxDuration: Number(maxDuration),
     openedAt: Number(openedAt),
     expiresAt: Number(expiresAt),
-    ratePerCall: ratePerCall.toString(),
+    maxPerCall: maxPerCall.toString(),
     settledAmount: settledAmount.toString(),
     status: Number(status),
     settlementDeadline: Number(settlementDeadline),
@@ -461,6 +461,91 @@ export async function getDailySpendOnChain(sessionKeyAddress: string): Promise<s
   const wallet = getKiteAAWallet(getProvider());
   const spend = await wallet.getDailySpend(sessionKeyAddress);
   return spend.toString();
+}
+
+// ─── Channel Auto-Activation Watcher ─────────────────────────────────
+
+/**
+ * Watch for `ChannelOpened` events whose `provider` matches our
+ * `KITE_AA_WALLET_ADDRESS` and automatically call `activateChannel` so that
+ * the SDK's `waitForChannelActive` poll resolves promptly.
+ *
+ * Uses `getLogs` polling instead of `eth_newFilter` because the Kite testnet
+ * RPC drops persistent filters immediately ("filter not found").
+ *
+ * Returns a cleanup function that stops the polling interval.
+ */
+export function startChannelWatcher(): () => void {
+  if (!process.env.PAYMENT_CHANNEL_ADDRESS || !process.env.DEPLOYER_PRIVATE_KEY) {
+    console.log("[ChannelWatcher] Skipping — PAYMENT_CHANNEL_ADDRESS or DEPLOYER_PRIVATE_KEY not set.");
+    return () => {};
+  }
+  // The channel provider is always the backend's signing address (deployer key).
+  // The channel watcher must filter by that address — NOT KITE_AA_WALLET_ADDRESS.
+  const providerAddress = getSigner().address;
+
+  const pc = getPaymentChannel(getProvider());
+  const iface = new ethers.Interface(PaymentChannelABI);
+  const activatedChannels = new Set<string>();
+  let lastBlock = 0;
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const currentBlock = await getProvider().getBlockNumber();
+      if (lastBlock === 0) {
+        // On first run, only watch from current block forward
+        lastBlock = currentBlock;
+        return;
+      }
+      if (currentBlock <= lastBlock) return;
+
+      const logs = await getProvider().getLogs({
+        address: process.env.PAYMENT_CHANNEL_ADDRESS,
+        fromBlock: lastBlock + 1,
+        toBlock: currentBlock,
+      });
+
+      for (const log of logs) {
+        let parsed: ethers.LogDescription | null = null;
+        try {
+          parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
+        } catch { continue; }
+
+        if (parsed?.name !== "ChannelOpened") continue;
+
+        const channelId: string = parsed.args.channelId;
+        const provider: string = parsed.args.provider;
+
+        if (provider.toLowerCase() !== providerAddress.toLowerCase()) continue;
+        if (activatedChannels.has(channelId)) continue;
+        activatedChannels.add(channelId);
+
+        console.log(`[ChannelWatcher] ChannelOpened: channelId=${channelId}, provider=${provider}. Activating...`);
+        activateChannelOnChain(channelId)
+          .then(({ txHash }) => {
+            console.log(`[ChannelWatcher] Channel ${channelId} activated. Tx: ${txHash}`);
+          })
+          .catch((err: any) => {
+            console.error(`[ChannelWatcher] Failed to activate channel ${channelId}: ${err.message}`);
+          });
+      }
+
+      lastBlock = currentBlock;
+    } catch (err: any) {
+      // Non-fatal — just log and continue polling
+      console.error(`[ChannelWatcher] Poll error: ${err.message}`);
+    }
+  };
+
+  const interval = setInterval(poll, 5_000);
+  console.log("[ChannelWatcher] Started — polling every 5s for ChannelOpened events.");
+
+  return () => {
+    stopped = true;
+    clearInterval(interval);
+  };
 }
 
 export async function getAgentSessionKeysOnChain(agentId: string): Promise<string[]> {

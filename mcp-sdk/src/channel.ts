@@ -1,14 +1,10 @@
 import { ContractService } from "./contracts.js";
 import {
   createSignedReceipt,
-  verifyReceipt,
   validateReceipt,
+  verifyReceipt,
 } from "./receipt.js";
-import type {
-  ChannelConfig,
-  ChannelState,
-  Receipt,
-} from "./types.js";
+import type { ChannelConfig, ChannelState, Receipt } from "./types.js";
 
 export class ChannelManager {
   private readonly contractService: ContractService;
@@ -23,7 +19,7 @@ export class ChannelManager {
     contractService: ContractService,
     token: string,
     privateKey: Uint8Array,
-    signerAddress: string
+    signerAddress: string,
   ) {
     this.contractService = contractService;
     this.token = token;
@@ -32,7 +28,7 @@ export class ChannelManager {
   }
 
   async openChannel(
-    config: ChannelConfig
+    config: ChannelConfig,
   ): Promise<{ txHash: string; channelId: `0x${string}` }> {
     const token = config.token || this.token;
     const mode = config.mode === "prepaid" ? 0 : 1;
@@ -44,7 +40,7 @@ export class ChannelManager {
       config.deposit,
       config.maxSpend,
       config.maxDuration,
-      config.ratePerCall
+      config.maxPerCall,
     );
 
     if (!result.channelId) {
@@ -66,10 +62,11 @@ export class ChannelManager {
     callCost: bigint,
     consumerAddress: string,
     requestHash?: string,
-    responseHash?: string
+    responseHash?: string,
   ): Promise<Receipt> {
     const existing = this.receipts.get(channelId) || [];
-    const prevReceipt = existing.length > 0 ? existing[existing.length - 1] : null;
+    const prevReceipt =
+      existing.length > 0 ? existing[existing.length - 1] : null;
 
     const nonce = prevReceipt ? prevReceipt.nonce + 1 : 1;
     const cumulativeCost = (prevReceipt?.cumulativeCost ?? 0n) + callCost;
@@ -97,7 +94,7 @@ export class ChannelManager {
     channelId: `0x${string}`,
     receipt: Receipt,
     providerAddress: string,
-    ratePerCall: bigint
+    maxPerCall: bigint,
   ): Promise<{ valid: boolean; reason?: string }> {
     // Verify signature
     const sigValid = await verifyReceipt(receipt, providerAddress);
@@ -107,8 +104,9 @@ export class ChannelManager {
 
     // Validate fields
     const existing = this.receipts.get(channelId) || [];
-    const prevReceipt = existing.length > 0 ? existing[existing.length - 1] : null;
-    const fieldCheck = validateReceipt(receipt, prevReceipt, ratePerCall);
+    const prevReceipt =
+      existing.length > 0 ? existing[existing.length - 1] : null;
+    const fieldCheck = validateReceipt(receipt, prevReceipt, maxPerCall);
     if (!fieldCheck.valid) {
       return fieldCheck;
     }
@@ -121,7 +119,7 @@ export class ChannelManager {
   // Initiate settlement with the last receipt (starts challenge window)
   async initiateSettlement(
     channelId: `0x${string}`,
-    merkleRoot?: `0x${string}`
+    merkleRoot?: `0x${string}`,
   ): Promise<string> {
     const existing = this.receipts.get(channelId) || [];
 
@@ -133,7 +131,7 @@ export class ChannelManager {
         0n,
         0,
         "0x" as `0x${string}`,
-        merkleRoot
+        merkleRoot,
       );
     }
 
@@ -148,14 +146,14 @@ export class ChannelManager {
       lastReceipt.cumulativeCost,
       lastReceipt.timestamp,
       lastReceipt.signature,
-      merkleRoot
+      merkleRoot,
     );
   }
 
   // Submit a higher receipt during the challenge window (permissionless)
   async submitReceipt(
     channelId: `0x${string}`,
-    receipt: Receipt
+    receipt: Receipt,
   ): Promise<string> {
     if (!receipt.signature) {
       throw new Error("Receipt has no signature");
@@ -166,14 +164,14 @@ export class ChannelManager {
       receipt.nonce,
       receipt.cumulativeCost,
       receipt.timestamp,
-      receipt.signature
+      receipt.signature,
     );
   }
 
   // Finalize settlement after challenge window closes
   async finalize(
     channelId: `0x${string}`,
-    merkleRoot?: `0x${string}`
+    merkleRoot?: `0x${string}`,
   ): Promise<string> {
     return await this.contractService.finalize(channelId, merkleRoot);
   }

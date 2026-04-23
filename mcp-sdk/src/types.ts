@@ -18,7 +18,8 @@ export interface ChannelConfig {
   deposit: bigint;
   maxSpend: bigint;
   maxDuration: number;
-  ratePerCall: bigint;
+  /** Ceiling on cost for any single API call (individual calls may be cheaper). */
+  maxPerCall: bigint;
 }
 
 export interface Receipt {
@@ -56,7 +57,7 @@ export interface ChannelState {
   maxDuration: number;
   openedAt: number;
   expiresAt: number;
-  ratePerCall: bigint;
+  maxPerCall: bigint;
   settledAmount: bigint;
   status: number;
   settlementDeadline: number;

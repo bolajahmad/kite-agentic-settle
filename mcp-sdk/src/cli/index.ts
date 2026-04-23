@@ -21,6 +21,7 @@
 
 import readline from "node:readline";
 import { zeroAddress } from "viem";
+import { KiteSettleClient } from "../kite-settle-client.js";
 import {
   deleteVar,
   getVar,
@@ -28,8 +29,7 @@ import {
   hasVar,
   listVars,
   setVar,
-} from "./vars.js";
-import { KiteSettleClient } from "./kite-settle-client.js";
+} from "../vars.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -361,7 +361,7 @@ async function cmdOnboard(args: string[]) {
 // ── whoami subcommand ──────────────────────────────────────────────
 
 async function cmdWhoami(args: string[]) {
-  const agentIndexStr = findFlag(args, "--agent-index");
+  const agentIndexStr = findFlag(args, "--agent");
 
   try {
     // Load credential from vars
@@ -389,26 +389,23 @@ async function cmdWhoami(args: string[]) {
       info(
         `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
       );
-      info(`  Agent ${agentIndex}'s Address:  ${agent.address}`);
+      info("\n");
+      info(`    Agent ${agentIndex}'s Address:  ${agent.address}`);
 
       // Check agent's on-chain registration status
       try {
         const resolved = await client.resolveAgent(agent.address);
         const agentId = (resolved as any)[0] ?? (resolved as any).agentId;
         if (agentId && agentId !== zeroAddress) {
-          info(`  Agent ID:       ${agentId}`);
-          info(`  Status:         Registered on-chain`);
+          info(`    Agent ID:       ${agentId}`);
+          info(`    Status:         Registered on-chain`);
         } else {
-          info(`  Status:         Not registered on-chain`);
+          info(`    Status:         Not registered on-chain`);
         }
-
-        // Show stored vars for this agent
-        const storedId = KiteSettleClient.getVar(`AGENT_${agentIndex}_ID`);
-        if (storedId) info(`  Stored ID (vars): ${storedId}`);
 
         console.log("");
       } catch (error: any) {
-        info(`  Status:         Not registered on-chain`);
+        info(`      Status:         Not registered on-chain`);
         die(error.message);
       }
     }
@@ -438,10 +435,20 @@ function showHelp() {
 
   Commands:
     kite call                 Call a paid API endpoint
+    kite call --mode batch    Open a channel, make N calls, settle
+    kite call --mode stream   Open a channel, call for T seconds, settle
     kite balance              Show agent token balance
     kite usage                Show usage logs
     kite fund <addr> [amt]    Fund with test tokens
     kite simulate             Run payment simulation
+
+  Channel commands (manual multi-route):
+    kite channel open         Open a payment channel
+    kite channel call         Make a call on an existing channel (any endpoint)
+    kite channel status       Show on-chain + local channel state
+    kite channel list         List all channels for an agent
+    kite channel resume       Re-attach to an existing channel
+    kite channel close        Settle and close a channel
 
   Options:
     --agent-index <n>         Agent derivation index (default: 0)

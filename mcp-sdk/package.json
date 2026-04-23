@@ -1,5 +1,5 @@
 {
-  "name": "@kite-agent-pay/sdk",
+  "name": "@kite-agentic-pay/sdk",
   "version": "0.1.0",
   "description": "Kite Agent Pay SDK and CLI — programmable payments for AI agents",
   "main": "dist/index.js",
@@ -32,7 +32,14 @@
     "fund": "tsx examples/app.ts fund",
     "simulate": "tsx examples/simulate.ts"
   },
-  "keywords": ["payments", "ai-agents", "x402", "blockchain", "kite", "web3"],
+  "keywords": [
+    "payments",
+    "ai-agents",
+    "x402",
+    "blockchain",
+    "kite",
+    "web3"
+  ],
   "author": "",
   "license": "ISC",
   "type": "module",

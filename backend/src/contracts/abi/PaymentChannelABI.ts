@@ -140,8 +140,14 @@ export const PaymentChannelABI = [
       {
         indexed: false,
         internalType: "uint256",
-        name: "ratePerCall",
+        name: "maxPerCall",
         type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "address",
+        name: "walletContract",
+        type: "address",
       },
     ],
     name: "ChannelOpened",
@@ -320,6 +326,11 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "address",
+        name: "walletContract",
+        type: "address",
+      },
+      {
+        internalType: "address",
         name: "provider",
         type: "address",
       },
@@ -360,7 +371,7 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "uint256",
-        name: "ratePerCall",
+        name: "maxPerCall",
         type: "uint256",
       },
       {
@@ -490,7 +501,7 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "uint256",
-        name: "ratePerCall",
+        name: "maxPerCall",
         type: "uint256",
       },
       {
@@ -517,6 +528,11 @@ export const PaymentChannelABI = [
         internalType: "uint256",
         name: "highestSequenceNumber",
         type: "uint256",
+      },
+      {
+        internalType: "address",
+        name: "walletContract",
+        type: "address",
       },
     ],
     stateMutability: "view",
@@ -753,8 +769,13 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "uint256",
-        name: "ratePerCall",
+        name: "maxPerCall",
         type: "uint256",
+      },
+      {
+        internalType: "address",
+        name: "walletContract",
+        type: "address",
       },
     ],
     name: "openChannel",

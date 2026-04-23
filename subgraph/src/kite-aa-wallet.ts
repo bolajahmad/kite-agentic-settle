@@ -3,8 +3,8 @@ import {
   AgentLinked as AgentLinkedEvent,
   FundsDeposited as FundsDepositedEvent,
   FundsWithdrawn as FundsWithdrawnEvent,
-  PaymentExecuted as PaymentExecutedEvent,
   PaymentExecutedBySig as PaymentExecutedBySigEvent,
+  PaymentExecuted as PaymentExecutedEvent,
   ProviderBlocked as ProviderBlockedEvent,
   ProviderUnblocked as ProviderUnblockedEvent,
   SessionBlockedProvidersUpdated as SessionBlockedProvidersUpdatedEvent,
@@ -36,31 +36,55 @@ export function handlePaymentExecuted(event: PaymentExecutedEvent): void {
   let payment = new Payment(id);
   payment.session = event.params.sessionKey.toHex();
   payment.agent = event.params.agentId.toHex();
+  let agent = Agent.load(payment.agent);
+  if (!agent) {
+    agent = new Agent(payment.agent);
+    agent.agentId = event.params.agentId;
+    agent.active = true;
+    agent.createdAt = event.block.timestamp;
+    agent.updatedAt = event.block.timestamp;
+    agent.save();
+  }
 
+  payment.user = agent.owner;
   payment.recipient = event.params.recipient;
   payment.token = event.params.token;
   payment.amount = event.params.amount;
 
   payment.timestamp = event.block.timestamp;
   payment.txHash = event.transaction.hash;
+  payment.channel = null;
   payment.type = "PerCall"; // TODO: determine type based on session rules
 
   payment.save();
 }
 
-export function handlePaymentExecutedBySig(event: PaymentExecutedBySigEvent): void {
+export function handlePaymentExecutedBySig(
+  event: PaymentExecutedBySigEvent,
+): void {
   let id = event.transaction.hash.toHex() + "-" + event.logIndex.toString();
   let payment = new Payment(id);
   payment.session = event.params.sessionKey.toHex();
   payment.agent = event.params.agentId.toHex();
+  let agent = Agent.load(payment.agent);
+  if (!agent) {
+    agent = new Agent(payment.agent);
+    agent.agentId = event.params.agentId;
+    agent.active = true;
+    agent.createdAt = event.block.timestamp;
+    agent.updatedAt = event.block.timestamp;
+    agent.save();
+  }
 
   payment.recipient = event.params.recipient;
   payment.token = event.params.token;
   payment.amount = event.params.amount;
+  payment.user = agent.owner;
 
   payment.timestamp = event.block.timestamp;
   payment.txHash = event.transaction.hash;
   payment.nonce = event.params.nonce;
+  payment.channel = null;
   payment.type = "PerCall"; // TODO: determine type based on session rules
 
   payment.save();

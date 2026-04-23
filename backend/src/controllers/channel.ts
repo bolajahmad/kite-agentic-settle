@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { ethers } from "ethers";
 import {
   openChannelOnChain,
   activateChannelOnChain,
@@ -23,16 +24,20 @@ function isChannelConfigured(): boolean {
 
 export const openChannel = async (req: Request, res: Response) => {
   try {
-    const { provider, token, mode, deposit, maxSpend, maxDuration, ratePerCall } = req.body;
-    if (!provider || !token || mode === undefined || !maxSpend || !maxDuration || !ratePerCall) {
-      return res.status(400).json({ error: "provider, token, mode, maxSpend, maxDuration, ratePerCall are required" });
+    const { provider, token, mode, deposit, maxSpend, maxDuration, maxPerCall, user, walletContract } = req.body;
+    if (!provider || !token || mode === undefined || !maxSpend || !maxDuration || !maxPerCall) {
+      return res.status(400).json({ error: "provider, token, mode, maxSpend, maxDuration, maxPerCall are required" });
+    }
+    if (mode === 0 && (!user || !walletContract)) {
+      return res.status(400).json({ error: "user and walletContract are required for Prepaid channels" });
     }
     if (!isChannelConfigured()) {
       return res.status(503).json({ error: "PaymentChannel contract not configured" });
     }
 
     const result = await openChannelOnChain(
-      provider, token, mode, BigInt(deposit || 0), BigInt(maxSpend), maxDuration, BigInt(ratePerCall)
+      provider, token, mode, BigInt(deposit || 0), BigInt(maxSpend), maxDuration, BigInt(maxPerCall),
+      user ?? ethers.ZeroAddress, walletContract ?? ethers.ZeroAddress
     );
     res.json({ success: true, ...result });
   } catch (err: any) {

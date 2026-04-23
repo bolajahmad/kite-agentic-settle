@@ -8,9 +8,9 @@ dataSources:
     name: KiteAAWallet
     network: kite-ai-testnet
     source:
-      address: "0x2Cea0acbab5D5788d241D7279b2ebE0C5d49512D"
+      address: "0x583b03Bb84f68EaBAef4349A73c90edd76Ab3e24"
       abi: KiteAAWallet
-      startBlock: 20846120
+      startBlock: 20982009
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -59,9 +59,9 @@ dataSources:
     name: AgentRegistry
     network: kite-ai-testnet
     source:
-      address: "0xf4589146A5B6Acacac1CBCB19B46A0FDF05B8AF4"
+      address: "0x06024D7fBaba7ac5393dC01037a6109fAAEeB7c0"
       abi: AgentRegistry
-      startBlock: 20846120
+      startBlock: 20982009
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -78,3 +78,32 @@ dataSources:
         - event: AgentDeactivated(indexed bytes32)
           handler: handleAgentDeactivated
       file: ./src/agent-registry.ts
+
+  - kind: ethereum
+    name: PaymentChannel
+    network: kite-ai-testnet
+    source:
+      address: "0x96e213Ed967402174C8c9180eAD2c219Ee419053"
+      abi: PaymentChannel
+      startBlock: 20982009
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - ChannelOpened
+        - ChannelActivated
+        - SettlementInitiated
+        - ReceiptSubmitted
+        - ChannelFinalized
+      abis:
+        - name: PaymentChannel
+          file: ./abis/PaymentChannelABI.json
+      eventHandlers:
+        - event: ChannelOpened(indexed bytes32,indexed address,indexed address,address,uint8,uint256,uint256,uint256,uint256,address,address)
+          handler: handleChannelOpened
+        - event: ChannelActivated(indexed bytes32)
+          handler: handleChannelActivated
+        - event: SettlementInitiated(indexed bytes32,indexed address,uint256,uint256)
+          handler: handleSettlementInitiated
+      file: ./src/payment-channel.ts

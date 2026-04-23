@@ -2,6 +2,7 @@ import {
   createPublicClient,
   decodeEventLog,
   encodeFunctionData,
+  formatUnits,
   http,
   type PublicClient,
 } from "viem";
@@ -18,10 +19,13 @@ export class ContractService {
   private readonly client: PublicClient;
   private readonly config: KiteConfig;
   private readonly wdkAccount: any;
+  /** The EOA address — owner of KiteAAWallet funds. */
+  private readonly eoaAddress: string;
 
-  constructor(config: KiteConfig, wdkAccount: any) {
+  constructor(config: KiteConfig, wdkAccount: any, eoaAddress?: string) {
     this.config = config;
     this.wdkAccount = wdkAccount;
+    this.eoaAddress = eoaAddress ?? (wdkAccount.getAddress() as string);
     this.client = createPublicClient({
       transport: http(config.rpcUrl),
     });
@@ -42,7 +46,19 @@ export class ContractService {
     data: `0x${string}`,
     value: bigint = 0n,
   ): Promise<{ hash: string; fee: bigint }> {
-    return await this.wdkAccount.sendTransaction({ to, value, data });
+    try {
+      return await this.wdkAccount.sendTransaction({ to, value, data });
+    } catch (err: any) {
+      console.log({ err });
+      const reason =
+        err?.cause?.reason ??
+        err?.cause?.shortMessage ??
+        err?.shortMessage ??
+        err?.message ??
+        String(err);
+      console.error(`[sendTx] Failed calling ${to}:`, reason);
+      throw new Error(reason);
+    }
   }
 
   private async waitAndDecodeLogs(
@@ -388,16 +404,60 @@ export class ContractService {
     deposit: bigint,
     maxSpend: bigint,
     maxDuration: number,
-    ratePerCall: bigint,
+    maxPerCall: bigint,
   ): Promise<{ txHash: string; channelId: `0x${string}` | undefined }> {
-    // Approve deposit for prepaid
+    const signerAddress = this.wdkAccount.getAddress() as string;
+    const user = this.eoaAddress as `0x${string}`;
+    const walletContract = this.config.contracts.kiteAAWallet as `0x${string}`;
+
+    // ── Pre-flight diagnostics ──────────────────────────────────────
+    // Balance check: for prepaid the deposit comes from the EOA's
+    // KiteAAWallet balance — the agent/signer itself has no ERC20 tokens.
+    let balance = 0n;
     if (mode === 0 && deposit > 0n) {
-      const approveData = encodeFunctionData({
-        abi: erc20Abi,
-        functionName: "approve",
-        args: [this.config.contracts.paymentChannel as `0x${string}`, deposit],
+      balance = await this.getDepositedTokenBalance(
+        token as `0x${string}`,
+        user,
+      );
+    }
+
+    if (mode === 0) {
+      if (balance < deposit) {
+        throw new Error(
+          `Insufficient KiteAAWallet balance: have ${formatUnits(balance, 18)}, need ${formatUnits(deposit, 18)}`,
+        );
+      }
+    }
+
+    // No ERC20 approve needed — KiteAAWallet.withdrawForChannel transfers
+    // directly from the wallet contract to PaymentChannel.
+
+    // ── Simulate the call to surface the revert reason ──────────────
+    try {
+      await this.client.simulateContract({
+        address: this.config.contracts.paymentChannel as `0x${string}`,
+        abi: paymentChannelAbi,
+        functionName: "openChannel",
+        args: [
+          provider as `0x${string}`,
+          token as `0x${string}`,
+          mode,
+          deposit,
+          maxSpend,
+          BigInt(maxDuration),
+          maxPerCall,
+          user,
+          walletContract,
+        ],
+        account: signerAddress as `0x${string}`,
       });
-      await this.sendTx(token, approveData);
+    } catch (simErr: any) {
+      const reason =
+        simErr?.cause?.reason ??
+        simErr?.shortMessage ??
+        simErr?.message ??
+        String(simErr);
+      throw new Error(`openChannel simulation failed: ${reason}`);
     }
 
     const data = encodeFunctionData({
@@ -410,13 +470,16 @@ export class ContractService {
         deposit,
         maxSpend,
         BigInt(maxDuration),
-        ratePerCall,
+        maxPerCall,
+        user,
+        walletContract,
       ],
     });
     const result = await this.sendTx(
       this.config.contracts.paymentChannel,
       data,
     );
+    console.log(`[openChannel] Tx: ${result.hash}`);
 
     // Decode ChannelOpened event to get channelId
     const event = await this.waitAndDecodeLogs(
@@ -542,7 +605,7 @@ export class ContractService {
       maxDuration: Number(result[6]),
       openedAt: Number(result[7]),
       expiresAt: Number(result[8]),
-      ratePerCall: result[9],
+      maxPerCall: result[9],
       settledAmount: result[10],
       status: Number(result[11]),
       settlementDeadline: Number(result[12]),

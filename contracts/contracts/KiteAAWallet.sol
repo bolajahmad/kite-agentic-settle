@@ -48,15 +48,10 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         uint256 sessionIndex;      // derivation index for deterministic key regeneration
         bytes32 metadataHash;      // keccak256 of encrypted session metadata
         uint256 valueLimit;        // max per-transaction (in token units)
-        uint256 dailyLimit;        // max aggregate per rolling 24h window
+        uint256 maxValueAllowed;   // lifetime cap on total spend for this session key
         uint256 validUntil;        // expiry timestamp
         address[] blockedProviders; // providers the agent is NOT allowed to pay
         bool active;
-    }
-
-    struct DailySpend {
-        uint256 amount;
-        uint256 windowStart;
     }
 
     // EOA => UserAccount
@@ -65,14 +60,15 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
     mapping(address => mapping(address => uint256)) public userBalances;
     // session key address => rule
     mapping(address => SessionKeyRule) public sessionKeys;
-    // session key => daily spend tracking
-    mapping(address => DailySpend) public dailySpends;
+    // session key => cumulative amount spent over its lifetime
+    mapping(address => uint256) public sessionSpent;
     // agent id => list of session key addresses
     mapping(bytes32 => address[]) public agentSessions;
     // session key => nonce for replay protection in executePaymentBySig
     mapping(address => uint256) public paymentNonces;
 
     address public agentRegistry;
+    address public paymentChannel;
 
     event UserRegistered(address indexed user);
     event AgentLinked(address indexed user, bytes32 indexed agentId);
@@ -83,7 +79,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         uint256 sessionIndex,
         bytes32 metadataHash,
         uint256 valueLimit,
-        uint256 dailyLimit,
+        uint256 maxValueAllowed,
         uint256 validUntil,
         bytes   metadata
     );
@@ -109,6 +105,9 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
     event FundsDeposited(address indexed user, address indexed token, uint256 amount);
     event FundsWithdrawn(address indexed user, address indexed token, uint256 amount);
     event AgentRegistryUpdated(address indexed registry);
+    event PaymentChannelUpdated(address indexed paymentChannel);
+    event ChannelFundsWithdrawn(address indexed user, address indexed token, uint256 amount);
+    event ChannelFundsRefunded(address indexed user, address indexed token, uint256 amount);
 
     modifier onlyRegistered() {
         require(users[msg.sender].registered, "Not registered");
@@ -140,6 +139,12 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         emit AgentRegistryUpdated(_registry);
     }
 
+    function setPaymentChannel(address _paymentChannel) external onlyOwner {
+        require(_paymentChannel != address(0), "Invalid payment channel");
+        paymentChannel = _paymentChannel;
+        emit PaymentChannelUpdated(_paymentChannel);
+    }
+
     // ─── User Functions ────────────────────────────────────────────────
 
     /**
@@ -168,7 +173,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         bytes32 agentId,
         uint256 sessionIndex,
         uint256 valueLimit,
-        uint256 dailyLimit,
+        uint256 maxValueAllowed,
         uint256 validUntil,
         address[] calldata blockedProviders,
         bytes calldata metadata
@@ -176,7 +181,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         require(sessionKeyAddress != address(0), "Invalid session key");
         require(validUntil > block.timestamp, "Expiry must be in future");
         require(valueLimit > 0, "Value limit must be > 0");
-        require(dailyLimit >= valueLimit, "Daily limit must be >= value limit");
+        require(maxValueAllowed >= valueLimit, "maxValueAllowed must be >= valueLimit");
 
         // Verify the caller owns the agent
         bool ownsAgent = false;
@@ -197,7 +202,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
             sessionIndex: sessionIndex,
             metadataHash: mHash,
             valueLimit: valueLimit,
-            dailyLimit: dailyLimit,
+            maxValueAllowed: maxValueAllowed,
             validUntil: validUntil,
             blockedProviders: blockedProviders,
             active: true
@@ -210,7 +215,7 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
             IAgentRegistry(agentRegistry).registerSession(agentId, sessionKeyAddress, sessionIndex, validUntil);
         }
 
-        emit SessionKeyAdded(sessionKeyAddress, msg.sender, agentId, sessionIndex, mHash, valueLimit, dailyLimit, validUntil, metadata);
+        emit SessionKeyAdded(sessionKeyAddress, msg.sender, agentId, sessionIndex, mHash, valueLimit, maxValueAllowed, validUntil, metadata);
     }
 
     function revokeSessionKey(address sessionKeyAddress) external onlyRegistered {
@@ -296,6 +301,62 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         }
     }
 
+    /**
+     * @notice Returns true when `provider` appears in the session key's
+     *         blockedProviders list. Called by PaymentChannel during openChannel.
+     */
+    function isProviderBlocked(address sessionKeyAddress, address provider)
+        external
+        view
+        returns (bool)
+    {
+        address[] storage blocked = sessionKeys[sessionKeyAddress].blockedProviders;
+        for (uint256 i = 0; i < blocked.length; i++) {
+            if (blocked[i] == provider) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @notice Called by the PaymentChannel contract to lock funds for a channel.
+     *         The agent opens the channel, but funds are pulled from the EOA's
+     *         (user's) balance inside this wallet contract.
+     * @param user   The EOA whose balance is debited.
+     * @param token  ERC20 token.
+     * @param amount Amount to lock in the channel.
+     */
+    function withdrawForChannel(
+        address user,
+        address token,
+        uint256 amount
+    ) external nonReentrant {
+        require(msg.sender == paymentChannel, "Only PaymentChannel");
+        require(users[user].registered, "User not registered");
+        require(userBalances[user][token] >= amount, "Insufficient balance for channel");
+        userBalances[user][token] -= amount;
+        IERC20(token).safeTransfer(paymentChannel, amount);
+        emit ChannelFundsWithdrawn(user, token, amount);
+    }
+
+    /**
+     * @notice Called by the PaymentChannel contract to return unused deposit
+     *         back to the EOA's balance after channel settlement.
+     * @param user   The EOA to credit.
+     * @param token  ERC20 token.
+     * @param amount Amount to return.
+     */
+    function refundFromChannel(
+        address user,
+        address token,
+        uint256 amount
+    ) external nonReentrant {
+        require(msg.sender == paymentChannel, "Only PaymentChannel");
+        require(users[user].registered, "User not registered");
+        IERC20(token).safeTransferFrom(paymentChannel, address(this), amount);
+        userBalances[user][token] += amount;
+        emit ChannelFundsRefunded(user, token, amount);
+    }
+
     function deposit(address token, uint256 amount) external onlyRegistered {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         userBalances[msg.sender][token] += amount;
@@ -341,14 +402,9 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
             require(rule.blockedProviders[i] != recipient, "Recipient is blocked");
         }
 
-        // Rolling 24h daily limit
-        DailySpend storage ds = dailySpends[sessionKey];
-        if (block.timestamp >= ds.windowStart + 1 days) {
-            ds.amount = 0;
-            ds.windowStart = block.timestamp;
-        }
-        require(ds.amount + amount <= rule.dailyLimit, "Exceeds daily limit");
-        ds.amount += amount;
+        // Lifetime session spend cap
+        require(sessionSpent[sessionKey] + amount <= rule.maxValueAllowed, "Exceeds session limit");
+        sessionSpent[sessionKey] += amount;
 
         // Deduct from the user's balance
         require(userBalances[rule.user][token] >= amount, "Insufficient user balance");
@@ -412,14 +468,9 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
             require(rule.blockedProviders[i] != recipient, "Recipient is blocked");
         }
 
-        // Rolling 24h daily limit
-        DailySpend storage ds = dailySpends[sessionKey];
-        if (block.timestamp >= ds.windowStart + 1 days) {
-            ds.amount = 0;
-            ds.windowStart = block.timestamp;
-        }
-        require(ds.amount + amount <= rule.dailyLimit, "Exceeds daily limit");
-        ds.amount += amount;
+        // Lifetime session spend cap
+        require(sessionSpent[sessionKey] + amount <= rule.maxValueAllowed, "Exceeds session limit");
+        sessionSpent[sessionKey] += amount;
 
         // Deduct from the user's balance
         require(userBalances[rule.user][token] >= amount, "Insufficient user balance");
@@ -438,12 +489,12 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         address user,
         bytes32 agentId,
         uint256 valueLimit,
-        uint256 dailyLimit,
+        uint256 maxValueAllowed,
         uint256 validUntil,
         bool active
     ) {
         SessionKeyRule storage rule = sessionKeys[sessionKey];
-        return (rule.user, rule.agentId, rule.valueLimit, rule.dailyLimit, rule.validUntil, rule.active);
+        return (rule.user, rule.agentId, rule.valueLimit, rule.maxValueAllowed, rule.validUntil, rule.active);
     }
 
     function getSessionBlockedProviders(address sessionKey) external view returns (address[] memory) {
@@ -454,12 +505,8 @@ contract KiteAAWallet is Ownable, ReentrancyGuard, EIP712 {
         return agentSessions[agentId];
     }
 
-    function getDailySpend(address sessionKey) external view returns (uint256 spent, uint256 windowStart) {
-        DailySpend storage ds = dailySpends[sessionKey];
-        if (block.timestamp >= ds.windowStart + 1 days) {
-            return (0, block.timestamp);
-        }
-        return (ds.amount, ds.windowStart);
+    function getSessionSpent(address sessionKey) external view returns (uint256 spent) {
+        return sessionSpent[sessionKey];
     }
 
     function isSessionValid(address sessionKey) external view returns (bool) {

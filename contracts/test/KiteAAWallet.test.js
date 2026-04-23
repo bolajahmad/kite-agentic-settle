@@ -6,47 +6,37 @@ describe("KiteAAWallet", function () {
   let agentId;
   const ONE_DAY = 86400;
   const VALUE_LIMIT = ethers.parseEther("10");
-  const DAILY_LIMIT = ethers.parseEther("50");
+  const MAX_VALUE_ALLOWED = ethers.parseEther("100"); // lifetime cap for the session
   const metadata = ethers.toUtf8Bytes(JSON.stringify({ name: "Test Agent" }));
 
   beforeEach(async function () {
     [owner, sessionKey, recipient, other] = await ethers.getSigners();
 
-    // Deploy mock ERC20
     const MockToken = await ethers.getContractFactory("MockERC20");
     token = await MockToken.deploy("Mock USDC", "mUSDC", ethers.parseEther("1000000"));
     await token.waitForDeployment();
 
-    // Deploy registry
     const AgentRegistry = await ethers.getContractFactory("AgentRegistry");
     registry = await AgentRegistry.deploy();
     await registry.waitForDeployment();
 
-    // Deploy wallet (no constructor args now)
     const KiteAAWallet = await ethers.getContractFactory("KiteAAWallet");
     wallet = await KiteAAWallet.deploy();
     await wallet.waitForDeployment();
 
-    // Link wallet to registry
     await wallet.setAgentRegistry(await registry.getAddress());
-
-    // Register the EOA on the wallet
     await wallet.connect(owner).register();
 
-    // Register an agent on the registry (owner is msg.sender)
     const tx = await registry.connect(owner).registerAgent(
-      sessionKey.address, // using sessionKey signer as the agentAddress for test convenience
+      sessionKey.address,
       await wallet.getAddress(),
-      0, // agentIndex
+      0,
       metadata
     );
     const receipt = await tx.wait();
     const event = receipt.logs.find(log => registry.interface.parseLog(log)?.name === "AgentRegistered");
     agentId = registry.interface.parseLog(event).args.agentId;
 
-    // agentId is now auto-linked to wallet by the AgentRegistry
-
-    // Deposit tokens: owner approves and deposits into their wallet balance
     await token.connect(owner).approve(await wallet.getAddress(), ethers.parseEther("10000"));
     await wallet.connect(owner).deposit(await token.getAddress(), ethers.parseEther("10000"));
   });
@@ -57,9 +47,7 @@ describe("KiteAAWallet", function () {
     });
 
     it("should reject duplicate registration", async function () {
-      await expect(
-        wallet.connect(owner).register()
-      ).to.be.revertedWith("Already registered");
+      await expect(wallet.connect(owner).register()).to.be.revertedWith("Already registered");
     });
 
     it("should track user balance after deposit", async function () {
@@ -75,43 +63,49 @@ describe("KiteAAWallet", function () {
   });
 
   describe("Session Key Management", function () {
-    it("should add a session key rule and sync to registry", async function () {
+    it("should add a session key rule with maxValueAllowed and sync to registry", async function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
-      // Use a fresh address as the session key
       const newSessionKey = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        newSessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
+        newSessionKey.address, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
       );
 
       const rule = await wallet.getSessionRule(newSessionKey.address);
       expect(rule.user).to.equal(owner.address);
       expect(rule.agentId).to.equal(agentId);
       expect(rule.valueLimit).to.equal(VALUE_LIMIT);
-      expect(rule.dailyLimit).to.equal(DAILY_LIMIT);
+      expect(rule.maxValueAllowed).to.equal(MAX_VALUE_ALLOWED);
       expect(rule.active).to.be.true;
 
-      // Verify session is also registered on the registry
       const regInfo = await registry.getAgentBySession(newSessionKey.address);
       expect(regInfo.agentId).to.equal(agentId);
       expect(regInfo.sessionActive).to.be.true;
+    });
+
+    it("should reject maxValueAllowed < valueLimit", async function () {
+      const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
+      await expect(
+        wallet.connect(owner).addSessionKeyRule(
+          sessionKey.address, agentId, 0, VALUE_LIMIT, VALUE_LIMIT - 1n, expiry, [], "0x"
+        )
+      ).to.be.revertedWith("maxValueAllowed must be >= valueLimit");
     });
 
     it("should reject session key from unregistered user", async function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       await expect(
         wallet.connect(other).addSessionKeyRule(
-          sessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
+          sessionKey.address, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
         )
       ).to.be.revertedWith("Not registered");
     });
 
     it("should reject session key for agent not owned by caller", async function () {
-      // Register 'other' as a user but they don't own any agents
       await wallet.connect(other).register();
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       await expect(
         wallet.connect(other).addSessionKeyRule(
-          sessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
+          sessionKey.address, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
         )
       ).to.be.revertedWith("Agent not owned by caller");
     });
@@ -120,14 +114,13 @@ describe("KiteAAWallet", function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       const newSessionKey = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        newSessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
+        newSessionKey.address, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
       );
       await wallet.connect(owner).revokeSessionKey(newSessionKey.address);
 
       const rule = await wallet.getSessionRule(newSessionKey.address);
       expect(rule.active).to.be.false;
 
-      // Verify registry session is also deactivated
       const regInfo = await registry.getAgentBySession(newSessionKey.address);
       expect(regInfo.sessionActive).to.be.false;
     });
@@ -136,9 +129,8 @@ describe("KiteAAWallet", function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       const newSessionKey = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        newSessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
+        newSessionKey.address, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
       );
-
       await wallet.connect(other).register();
       await expect(
         wallet.connect(other).revokeSessionKey(newSessionKey.address)
@@ -150,10 +142,10 @@ describe("KiteAAWallet", function () {
       const sk1 = ethers.Wallet.createRandom();
       const sk2 = ethers.Wallet.createRandom();
       await wallet.connect(owner).addSessionKeyRule(
-        sk1.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
+        sk1.address, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
       );
       await wallet.connect(owner).addSessionKeyRule(
-        sk2.address, agentId, 1, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x"
+        sk2.address, agentId, 1, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
       );
 
       await wallet.connect(owner).revokeAllAgentSessions(agentId);
@@ -161,7 +153,6 @@ describe("KiteAAWallet", function () {
       expect(await wallet.isSessionValid(sk1.address)).to.be.false;
       expect(await wallet.isSessionValid(sk2.address)).to.be.false;
 
-      // Verify registry sessions are also deactivated
       const reg1 = await registry.getAgentBySession(sk1.address);
       const reg2 = await registry.getAgentBySession(sk2.address);
       expect(reg1.sessionActive).to.be.false;
@@ -171,14 +162,18 @@ describe("KiteAAWallet", function () {
     it("should reject zero address session key", async function () {
       const expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
       await expect(
-        wallet.connect(owner).addSessionKeyRule(ethers.ZeroAddress, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [], "0x")
+        wallet.connect(owner).addSessionKeyRule(
+          ethers.ZeroAddress, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry, [], "0x"
+        )
       ).to.be.revertedWith("Invalid session key");
     });
 
     it("should reject expired session key rule", async function () {
       const pastExpiry = Math.floor(Date.now() / 1000) - 100;
       await expect(
-        wallet.connect(owner).addSessionKeyRule(sessionKey.address, agentId, 0, VALUE_LIMIT, DAILY_LIMIT, pastExpiry, [], "0x")
+        wallet.connect(owner).addSessionKeyRule(
+          sessionKey.address, agentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, pastExpiry, [], "0x"
+        )
       ).to.be.revertedWith("Expiry must be in future");
     });
   });
@@ -188,9 +183,7 @@ describe("KiteAAWallet", function () {
 
     beforeEach(async function () {
       expiry = Math.floor(Date.now() / 1000) + ONE_DAY;
-      // Use a signer as session key so it can call executePayment
       paySessionKey = sessionKey;
-      // We need a fresh agentId that uses a different agent address
       const agentAddr = ethers.Wallet.createRandom();
       const tx = await registry.connect(owner).registerAgent(
         agentAddr.address, await wallet.getAddress(), 1, metadata
@@ -199,33 +192,27 @@ describe("KiteAAWallet", function () {
       const event = receipt.logs.find(log => registry.interface.parseLog(log)?.name === "AgentRegistered");
       const payAgentId = registry.interface.parseLog(event).args.agentId;
 
-      // agentId is auto-linked by registry
-
       await wallet.connect(owner).addSessionKeyRule(
-        paySessionKey.address, payAgentId, 0, VALUE_LIMIT, DAILY_LIMIT, expiry, [other.address], "0x"
+        paySessionKey.address, payAgentId, 0, VALUE_LIMIT, MAX_VALUE_ALLOWED, expiry,
+        [other.address], "0x"
       );
     });
 
     it("should execute payment via session key holder", async function () {
       const amount = ethers.parseEther("5");
       const recipientBalBefore = await token.balanceOf(recipient.address);
-
       await wallet.connect(paySessionKey).executePayment(
         paySessionKey.address, recipient.address, await token.getAddress(), amount
       );
-
-      const recipientBalAfter = await token.balanceOf(recipient.address);
-      expect(recipientBalAfter - recipientBalBefore).to.equal(amount);
+      expect(await token.balanceOf(recipient.address) - recipientBalBefore).to.equal(amount);
     });
 
     it("should deduct from user balance on payment", async function () {
       const amount = ethers.parseEther("5");
       const balBefore = await wallet.getUserBalance(owner.address, await token.getAddress());
-
       await wallet.connect(paySessionKey).executePayment(
         paySessionKey.address, recipient.address, await token.getAddress(), amount
       );
-
       const balAfter = await wallet.getUserBalance(owner.address, await token.getAddress());
       expect(balBefore - balAfter).to.equal(amount);
     });
@@ -238,13 +225,42 @@ describe("KiteAAWallet", function () {
       expect(await token.balanceOf(recipient.address)).to.equal(amount);
     });
 
-    it("should reject payment exceeding per-tx limit", async function () {
-      const amount = ethers.parseEther("15"); // > 10 limit
+    it("should track cumulative session spend", async function () {
+      const amount = ethers.parseEther("5");
+      await wallet.connect(paySessionKey).executePayment(
+        paySessionKey.address, recipient.address, await token.getAddress(), amount
+      );
+      expect(await wallet.getSessionSpent(paySessionKey.address)).to.equal(amount);
+
+      await wallet.connect(paySessionKey).executePayment(
+        paySessionKey.address, recipient.address, await token.getAddress(), amount
+      );
+      expect(await wallet.getSessionSpent(paySessionKey.address)).to.equal(amount * 2n);
+    });
+
+    it("should reject payment exceeding per-tx valueLimit", async function () {
+      const amount = ethers.parseEther("15"); // > VALUE_LIMIT (10)
       await expect(
         wallet.connect(paySessionKey).executePayment(
           paySessionKey.address, recipient.address, await token.getAddress(), amount
         )
       ).to.be.revertedWith("Exceeds per-tx limit");
+    });
+
+    it("should enforce session lifetime limit (maxValueAllowed)", async function () {
+      // 10 payments of VALUE_LIMIT (10 ETH each) = 100 ETH = MAX_VALUE_ALLOWED
+      const amount = VALUE_LIMIT;
+      for (let i = 0; i < 10; i++) {
+        await wallet.connect(paySessionKey).executePayment(
+          paySessionKey.address, recipient.address, await token.getAddress(), amount
+        );
+      }
+      // 11th would exceed lifetime cap
+      await expect(
+        wallet.connect(paySessionKey).executePayment(
+          paySessionKey.address, recipient.address, await token.getAddress(), amount
+        )
+      ).to.be.revertedWith("Exceeds session limit");
     });
 
     it("should reject payment to blocked provider", async function () {
@@ -254,20 +270,6 @@ describe("KiteAAWallet", function () {
           paySessionKey.address, other.address, await token.getAddress(), amount
         )
       ).to.be.revertedWith("Recipient is blocked");
-    });
-
-    it("should enforce daily limit across multiple payments", async function () {
-      const amount = ethers.parseEther("10");
-      for (let i = 0; i < 5; i++) {
-        await wallet.connect(paySessionKey).executePayment(
-          paySessionKey.address, recipient.address, await token.getAddress(), amount
-        );
-      }
-      await expect(
-        wallet.connect(paySessionKey).executePayment(
-          paySessionKey.address, recipient.address, await token.getAddress(), amount
-        )
-      ).to.be.revertedWith("Exceeds daily limit");
     });
 
     it("should reject payment from unauthorized caller", async function () {
@@ -292,7 +294,6 @@ describe("KiteAAWallet", function () {
 
   describe("Funds Management", function () {
     it("should allow deposits and track per-user balance", async function () {
-      // 'other' registers and deposits
       await wallet.connect(other).register();
       const depositAmount = ethers.parseEther("500");
       await token.transfer(other.address, depositAmount);
@@ -300,7 +301,6 @@ describe("KiteAAWallet", function () {
       await wallet.connect(other).deposit(await token.getAddress(), depositAmount);
 
       expect(await wallet.getUserBalance(other.address, await token.getAddress())).to.equal(depositAmount);
-      // owner's balance should be untouched
       expect(await wallet.getUserBalance(owner.address, await token.getAddress())).to.equal(ethers.parseEther("10000"));
     });
 
