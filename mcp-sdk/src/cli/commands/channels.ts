@@ -836,11 +836,7 @@ async function cmdSessionExtend(_args: string[]): Promise<void> {
   console.log("  Channels cannot be extended in-place on-chain.");
 }
 
-// keep reference so TypeScript doesn't error on the removed dispatcher case
-void cmdSessionExtend;
-
 // ── Public dispatcher ─────────────────────────────────────────────────────────
-
 export async function cmdChannels(args: string[]): Promise<void> {
   const sub = args[0];
 

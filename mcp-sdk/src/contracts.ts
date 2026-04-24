@@ -160,6 +160,20 @@ export class ContractService {
     })) as string;
   }
 
+  /** Update the URI for an agent NFT (caller must be the agent NFT owner). */
+  async setAgentURI(agentId: bigint, newURI: string): Promise<string> {
+    const data = encodeFunctionData({
+      abi: identityRegistryAbi,
+      functionName: "setAgentURI",
+      args: [agentId, newURI],
+    });
+    const result = await this.sendTx(
+      this.config.contracts.identityRegistry,
+      data,
+    );
+    return result.hash;
+  }
+
   /** Get the EOA owner of an agent NFT. */
   async getAgentOwner(agentId: bigint): Promise<string> {
     return (await this.client.readContract({

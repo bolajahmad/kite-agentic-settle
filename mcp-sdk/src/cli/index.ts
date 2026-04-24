@@ -391,6 +391,12 @@ async function main() {
         await cmdWhoami(args.slice(1));
         break;
 
+      case "agent": {
+        const { cmdAgent } = await import("./commands/agent.js");
+        await cmdAgent(args.slice(1));
+        break;
+      }
+
       case "onboard": {
         const { cmdOnboardAgent } = await import("./commands/agent.js");
         await cmdOnboardAgent(args.slice(1));

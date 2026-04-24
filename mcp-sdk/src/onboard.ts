@@ -22,8 +22,8 @@ import {
 // ── Types ──────────────────────────────────────────────────────────
 
 export interface OnboardOptions {
-  /** EIP-8004 agent URI (IPFS/base64) string. Required. */
-  agentURI: string;
+  /** EIP-8004 agent URI (IPFS/base64) string. Optional. */
+  agentURI?: string;
   /** Seed phrase for encrypting the session key. Generated if omitted. */
   sessionSeed?: string;
   /** Per-transaction spending limit (human-readable token amount). Default: "1". */
@@ -42,7 +42,7 @@ export interface OnboardOptions {
 export interface OnboardResult {
   eoaAddress: string;
   agentId: bigint;
-  agentURI: string;
+  agentURI?: string;
   sessionKeyAddress: string;
   /** Encrypted session key blob (store privately; decrypt with sessionSeed). */
   encryptedSessionKey: string;
@@ -149,7 +149,7 @@ export async function onboardAgent(
   log("Storing credentials in vars...");
   try {
     setVar(`AGENT_${agentId}_ID`, agentId.toString());
-    setVar(`AGENT_${agentId}_URI`, options.agentURI);
+    if (options.agentURI) setVar(`AGENT_${agentId}_URI`, options.agentURI);
     setVar(`SESSION_${agentId}_${sessionIndex}_ADDRESS`, session.address);
     setVar(`SESSION_${agentId}_${sessionIndex}_ENCRYPTED`, encryptedSessionKey);
   } catch {

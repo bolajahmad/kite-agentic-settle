@@ -396,6 +396,11 @@ export class KiteSettleClient {
     return this.eoaClient.getContractService().getAgentURI(agentId);
   }
 
+  /** Update the agentURI stored on IdentityRegistry for an agent the caller owns. */
+  async updateAgentURI(agentId: bigint, newURI: string): Promise<string> {
+    return this.eoaClient.getContractService().setAgentURI(agentId, newURI);
+  }
+
   // ── Payment Channels ─────────────────────────────────────────
 
   /** Open a new payment channel with a provider. */
