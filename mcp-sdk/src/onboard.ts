@@ -1,64 +1,79 @@
 /**
- * Full onboarding flow for the Kite Agent Pay ecosystem.
+ * Full onboarding flow for the Kite Agent Pay ecosystem (IdentityRegistry v2).
  *
- * Orchestrates: EOA registration → Agent creation → Session key setup → Funding.
- * Replaces the 5-step frontend wizard with a single programmatic call.
+ * Orchestrates:
+ *   1. EOA registration on KiteAAWallet
+ *   2. Agent NFT mint on IdentityRegistry (EIP-8004 agentURI)
+ *   3. Session key derivation (agentId-bound, encrypted with seed phrase)
+ *   4. Session key rule registration on IdentityRegistry via KiteAAWallet
+ *   5. Optional KTT deposit into KiteAAWallet
  */
 
-import { formatUnits, parseUnits, stringToHex } from "viem";
+import { formatUnits, parseUnits } from "viem";
 import type { ContractService } from "./contracts.js";
 import type { KiteConfig } from "./types.js";
 import { setVar } from "./vars.js";
-import { deriveAgentAccount, deriveSessionAccount } from "./wallet.js";
+import {
+  deriveSessionForAgent,
+  encryptSessionKey,
+  generateSeedPhrase,
+} from "./wallet.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
 export interface OnboardOptions {
-  agentName: string;
-  category?: string;
-  description?: string;
-  tags?: string[];
-  // Optional: specify an existing agent index to resume registration for.
-  // If omitted, a new agent is always created at the next available index.
-  agentIndex?: number;
-  // Session rules (KTT amounts as human-readable strings)
-  valueLimit?: string; // max per tx, default "1"
-  dailyLimit?: string; // max daily, default "10"
-  validDays?: number; // session validity, default 30
-  // Funding (optional, KTT / KITE as human-readable strings)
-  fundAmount?: string; // KTT to deposit into AAWallet
-  gasAmount?: string; // native KITE to send to agent for gas
+  /** EIP-8004 agent URI (IPFS/base64) string. Required. */
+  agentURI: string;
+  /** Seed phrase for encrypting the session key. Generated if omitted. */
+  sessionSeed?: string;
+  /** Per-transaction spending limit (human-readable token amount). Default: "1". */
+  valueLimit?: string;
+  /** Lifetime session spending cap. Default: "10". */
+  maxValueAllowed?: string;
+  /** Session validity in days. Default: 30. */
+  validDays?: number;
+  /** agentIds blocked from using this session key. */
+  blockedAgents?: bigint[];
+  /** KTT amount to deposit into KiteAAWallet. Optional. */
+  fundAmount?: string;
+  gasAmount?: string;
 }
 
 export interface OnboardResult {
   eoaAddress: string;
-  agentAddress: string;
-  agentPrivateKey: string;
-  agentId: `0x${string}`;
+  agentId: bigint;
+  agentURI: string;
   sessionKeyAddress: string;
-  sessionKeyPrivateKey: string;
+  /** Encrypted session key blob (store privately; decrypt with sessionSeed). */
+  encryptedSessionKey: string;
+  /** The seed phrase used for encryption. MUST be stored securely by the user. */
+  sessionSeed: string;
   txHashes: { step: string; hash: string }[];
   wasAlreadyRegistered: boolean;
+  walletUSDTBalance: string;
+  validUntil: number;
+  // Compat fields (legacy consumers)
+  agentAddress: string;
+  agentPrivateKey: string;
+  sessionKeyPrivateKey: string;
   kiteBalance: string;
-  kttBalance: string;
-  walletKttBalance: string;
+  usdtBalance: string;
   agentIndex: number;
   sessionIndex: number;
-  validUntil: number;
 }
 
 // ── Core Flow ──────────────────────────────────────────────────────
 
 /**
- * Register an EOA user, create an agent with a session key, and
- * optionally fund the wallet — all in one call.
+ * Register an EOA user, mint an agent NFT, derive + encrypt a session key,
+ * and optionally fund the KiteAAWallet — all in one call.
  *
- * @param contracts  - ContractService initialised with the EOA's account
- * @param eoaPrivateKey - EOA private key bytes (for deterministic derivation)
- * @param eoaAddress    - EOA address
- * @param config        - KiteConfig (network + contract addresses)
- * @param options       - Agent metadata + session rules + funding amounts
- * @param onStep        - Optional callback for progress logging
+ * @param contracts     ContractService initialised with the EOA's account
+ * @param eoaPrivateKey EOA private key bytes (for session derivation)
+ * @param eoaAddress    EOA address
+ * @param config        KiteConfig (network + contract addresses)
+ * @param options       Agent metadata + session rules + funding amounts
+ * @param onStep        Optional callback for progress logging
  */
 export async function onboardAgent(
   contracts: ContractService,
@@ -71,251 +86,115 @@ export async function onboardAgent(
   const txHashes: { step: string; hash: string }[] = [];
   const log = (msg: string) => onStep?.(msg);
 
-  // ── Step 1: Register EOA as user on KiteAAWallet ────────────────
+  // ── Step 1: Register EOA on KiteAAWallet ────────────────────────
   log("Checking user registration...");
   const wasAlreadyRegistered = await contracts.isUserRegistered(eoaAddress);
-
   if (wasAlreadyRegistered) {
-    log("EOA already registered.");
+    log("User already registered.");
   } else {
-    log("Registering EOA on KiteAAWallet...");
+    log("Registering user on KiteAAWallet...");
     const hash = await contracts.registerUser();
-    txHashes.push({ step: "Register EOA", hash });
+    txHashes.push({ step: "Register User", hash });
   }
 
-  // ── Step 2: Determine agent index ────────────────────────────────
-  log("Reading existing agents...");
-  const existingAgents = await contracts.getOwnerAgents(eoaAddress);
-  let agentIndex: number;
-
-  if (options.agentIndex !== undefined) {
-    // Caller specified an existing agent to resume/update
-    agentIndex = options.agentIndex;
-    log(`Using specified agent index: ${agentIndex}`);
-  } else {
-    // Create the next agent
-    agentIndex = existingAgents.length;
-    log(
-      `Found ${existingAgents.length} existing agent(s). Next index: ${agentIndex}`,
-    );
-  }
-
-  // ── Step 3: Derive agent address deterministically ──────────────
-  log("Deriving agent address...");
-  const agent = await deriveAgentAccount(eoaPrivateKey, agentIndex);
-  log(`Agent address: ${agent.address}`);
-
-  // ── Step 4: Register agent on AgentRegistry (idempotent) ────────
-  let agentId: `0x${string}`;
-  let agentAlreadyRegistered = false;
-
-  // Check if this agent address is already registered
-  try {
-    const resolved = await contracts.resolveAgentByAddress(agent.address);
-    const resolvedId = (resolved as any)[0] ?? (resolved as any).agentId;
-    // A non-zero agentId means the agent is registered
-    if (
-      resolvedId &&
-      resolvedId !==
-        "0x0000000000000000000000000000000000000000000000000000000000000000"
-    ) {
-      agentId = resolvedId as `0x${string}`;
-      agentAlreadyRegistered = true;
-      log(`Agent already registered. ID: ${agentId}`);
-    } else {
-      agentId = await registerNewAgent();
-    }
-  } catch {
-    // resolveAgentByAddress may revert for unknown agents
-    agentId = await registerNewAgent();
-  }
-
-  async function registerNewAgent(): Promise<`0x${string}`> {
-    log("Registering agent on-chain...");
-    const metadata = JSON.stringify({
-      version: "0.1.0",
-      name: options.agentName,
-      category: options.category || "",
-      description: options.description || "",
-      tags: options.tags || [],
-    });
-    const metadataHex = stringToHex(metadata);
-    const { txHash: regHash, agentId: newAgentId } =
-      await contracts.registerAgent(
-        agent.address,
-        config.contracts.kiteAAWallet,
-        agentIndex,
-        metadataHex,
-      );
-    txHashes.push({ step: "Register Agent", hash: regHash });
-    log(`Agent registered. ID: ${newAgentId}`);
-    return newAgentId;
-  }
-
-  // ── Step 5: Agent is auto-linked to wallet by AgentRegistry ──────
-  // The AgentRegistry.registerAgent() call automatically calls
-  // KiteAAWallet.addAgentId(agentId, owner), so no separate step needed.
-  // Just verify it was linked:
-  const userAgentIds = await contracts.getUserAgentIds(eoaAddress);
-  const alreadyLinked = userAgentIds.some(
-    (id) => id.toLowerCase() === agentId.toLowerCase(),
+  // ── Step 2: Register agent NFT on IdentityRegistry ──────────────
+  log("Registering agent on IdentityRegistry...");
+  const { txHash: regHash, agentId } = await contracts.registerAgentOnRegistry(
+    options.agentURI,
   );
+  txHashes.push({ step: "Register Agent", hash: regHash });
+  log(`Agent registered. agentId: ${agentId}`);
 
-  if (!alreadyLinked && !agentAlreadyRegistered) {
-    // Fallback: if auto-link didn't work (e.g. old registry deployment),
-    // manually link it.
-    log("Auto-link not detected, manually linking agent to wallet...");
-    const addIdHash = await contracts.addAgentId(agentId, eoaAddress);
-    txHashes.push({ step: "Link Agent to Wallet", hash: addIdHash });
-  } else {
-    log("Agent linked to wallet (auto-linked by registry).");
-  }
-
-  // ── Step 6: Derive session key deterministically ────────────────
-  const sessionIndex = 0; // first session for this agent
+  // ── Step 3: Derive session key (agentId-bound) ───────────────────
+  const sessionIndex = 0;
   log("Deriving session key...");
-  const session = await deriveSessionAccount(
+  const session = await deriveSessionForAgent(
     eoaPrivateKey,
-    agentIndex,
+    agentId,
     sessionIndex,
   );
   log(`Session key: ${session.address}`);
 
-  // ── Step 7: Add session key rule (skip if session already exists)
-  let sessionAlreadyExists = false;
+  // ── Step 4: Encrypt session key ──────────────────────────────────
+  const sessionSeed = options.sessionSeed ?? generateSeedPhrase();
+  const encryptedSessionKey = encryptSessionKey(
+    session.privateKey,
+    sessionSeed,
+  );
+
+  // ── Step 5: Register session key rule ───────────────────────────
+  const valueLimit = parseUnits(options.valueLimit ?? "1", 18);
+  const maxValueAllowed = parseUnits(options.maxValueAllowed ?? "10", 18);
+  const validUntil =
+    Math.floor(Date.now() / 1000) + (options.validDays ?? 7) * 86400;
+
+  log("Registering session key rule...");
 
   try {
-    const existingSessionKeys = await contracts.getAgentSessionKeys(agentId);
-    sessionAlreadyExists = existingSessionKeys.some(
-      (key) => key.toLowerCase() === (session.address as string).toLowerCase(),
+    const sessionHash = await contracts.addSessionKeyRule(
+      agentId,
+      session.address,
+      valueLimit,
+      maxValueAllowed,
+      BigInt(validUntil),
+      options.blockedAgents ?? [],
     );
-  } catch {
-    // If reading session keys fails, proceed to add
+    txHashes.push({ step: "Add Session Key Rule", hash: sessionHash });
+  } catch (err: any) {
+    const msg = err?.message ?? String(err);
+    log(`Warning: Could not add session key rule — ${msg.slice(0, 120)}`);
   }
 
-  const valueLimit = parseUnits(options.valueLimit || "1", 18);
-  const dailyLimit = parseUnits(options.dailyLimit || "10", 18);
-  const validUntil =
-    Math.floor(Date.now() / 1000) + (options.validDays || 30) * 86400;
-
-  if (!sessionAlreadyExists) {
-    log("Adding session key rule...");
-    // Build encrypted session metadata
-    const sessionMeta = JSON.stringify({
-      name: `${options.agentName}-session-${sessionIndex}`,
-      purpose: options.description || "default session",
-      agentIndex,
-      sessionIndex,
-      createdAt: new Date().toISOString(),
-    });
-    const sessionMetadataHex = stringToHex(sessionMeta) as `0x${string}`;
-    try {
-      const sessionHash = await contracts.addSessionKeyRule(
-        session.address,
-        agentId,
-        sessionIndex,
-        valueLimit,
-        dailyLimit,
-        validUntil,
-        [],
-        sessionMetadataHex,
-      );
-      txHashes.push({ step: "Add Session Key Rule", hash: sessionHash });
-    } catch (err: any) {
-      const msg = err?.message ?? String(err);
-      log(`Warning: Could not add session key — ${msg.slice(0, 120)}`);
-    }
-  } else {
-    log("Session key already registered for this agent.");
-  }
-
-  // ── Step 8: Store credentials in vars with deterministic tags ──
+  // ── Step 6: Persist credentials in vars ─────────────────────────
   log("Storing credentials in vars...");
   try {
-    setVar(`AGENT_${agentIndex}_PRIVATE_KEY`, agent.privateKey);
-    setVar(`AGENT_${agentIndex}_ADDRESS`, agent.address);
-    setVar(`AGENT_${agentIndex}_ID`, agentId);
-    setVar(
-      `SESSION_${agentIndex}_${sessionIndex}_PRIVATE_KEY`,
-      session.privateKey,
-    );
-    setVar(`SESSION_${agentIndex}_${sessionIndex}_ADDRESS`, session.address);
+    setVar(`AGENT_${agentId}_ID`, agentId.toString());
+    setVar(`AGENT_${agentId}_URI`, options.agentURI);
+    setVar(`SESSION_${agentId}_${sessionIndex}_ADDRESS`, session.address);
+    setVar(`SESSION_${agentId}_${sessionIndex}_ENCRYPTED`, encryptedSessionKey);
   } catch {
     log("Warning: Could not persist credentials to vars.");
   }
 
-  // ── Step 9: Read balances ───────────────────────────────────────
-  log("Reading balances...");
-  const kiteBalance = await contracts.getNativeBalance(eoaAddress);
-  const kttBalance = await contracts.getTokenBalance(
-    config.token as `0x${string}`,
-    eoaAddress as `0x${string}`,
-  );
-  const walletKttBalance = await contracts.getDepositedTokenBalance(
-    config.token as `0x${string}`,
-    eoaAddress as `0x${string}`,
-  );
-
-  // ── Step 10: Optional funding ────────────────────────────────────
-  if (options.fundAmount && parseFloat(options.fundAmount) > 0) {
+  // ── Step 7: Optional USDT deposit ────────────────────────────────
+  if (options.fundAmount && Number.parseFloat(options.fundAmount) > 0) {
     const amount = parseUnits(options.fundAmount, 18);
-    log(`Depositing ${options.fundAmount} KTT into wallet...`);
+    log(`Depositing ${options.fundAmount} USDT into wallet...`);
     try {
       const depositHash = await contracts.depositToWallet(config.token, amount);
-      txHashes.push({ step: "Deposit KTT", hash: depositHash });
+      txHashes.push({ step: "Deposit USDT", hash: depositHash });
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      if (
-        msg.includes("e450d38c") ||
-        msg.includes("InsufficientBalance") ||
-        msg.includes("insufficient")
-      ) {
-        log(
-          `Skipped KTT deposit — insufficient balance (need ${options.fundAmount} KTT)`,
-        );
-      } else {
-        log(`Skipped KTT deposit — ${msg.slice(0, 120)}`);
-      }
+      log(`Skipped USDT deposit — ${msg.slice(0, 120)}`);
     }
   }
 
-  if (options.gasAmount && parseFloat(options.gasAmount) > 0) {
-    const amount = parseUnits(options.gasAmount, 18);
-    log(`Sending ${options.gasAmount} KITE to agent for gas...`);
-    try {
-      const gasHash = await contracts.sendNativeToken(agent.address, amount);
-      txHashes.push({ step: "Fund Agent Gas", hash: gasHash });
-    } catch (err: any) {
-      const msg = err?.message ?? String(err);
-      if (
-        msg.includes("insufficient funds") ||
-        msg.includes("insufficient balance")
-      ) {
-        log(
-          `Skipped gas funding — insufficient native balance (need ${options.gasAmount} KITE)`,
-        );
-      } else {
-        log(`Skipped gas funding — ${msg.slice(0, 120)}`);
-      }
-    }
-  }
+  // ── Step 8: Read final balances ──────────────────────────────────
+  const walletUSDTBalance = await contracts.getDepositedTokenBalance(
+    config.token as `0x${string}`,
+    eoaAddress as `0x${string}`,
+  );
 
   log("Onboarding complete!");
 
   return {
     eoaAddress,
-    agentAddress: agent.address,
-    agentPrivateKey: agent.privateKey,
     agentId,
+    agentURI: options.agentURI,
     sessionKeyAddress: session.address,
-    sessionKeyPrivateKey: session.privateKey,
+    encryptedSessionKey,
+    sessionSeed,
     txHashes,
     wasAlreadyRegistered,
-    kiteBalance: formatUnits(kiteBalance, 18),
-    kttBalance: formatUnits(kttBalance, 18),
-    walletKttBalance: formatUnits(walletKttBalance, 18),
-    agentIndex,
-    sessionIndex,
+    walletUSDTBalance: formatUnits(walletUSDTBalance, 18),
     validUntil,
+    // Compat fields
+    agentAddress: eoaAddress,
+    agentPrivateKey: "",
+    sessionKeyPrivateKey: session.privateKey,
+    kiteBalance: "0",
+    usdtBalance: formatUnits(walletUSDTBalance, 18),
+    agentIndex: 0,
+    sessionIndex: 0,
   };
 }

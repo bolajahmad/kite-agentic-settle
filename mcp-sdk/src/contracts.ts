@@ -7,8 +7,8 @@ import {
   type PublicClient,
 } from "viem";
 import {
-  agentRegistryAbi,
   erc20Abi,
+  identityRegistryAbi,
   kiteAAWalletAbi,
   paymentChannelAbi,
   walletFactoryAbi,
@@ -89,80 +89,119 @@ export class ContractService {
 
   // -- Agent Registry --
 
-  async registerAgent(
-    agentAddress: string,
-    walletContract: string,
-    agentIndex: number,
-    metadata: `0x${string}`,
-  ): Promise<{ txHash: string; agentId: `0x${string}` }> {
-    const data = encodeFunctionData({
-      abi: agentRegistryAbi,
-      functionName: "registerAgent",
-      args: [
-        agentAddress as `0x${string}`,
-        walletContract as `0x${string}`,
-        BigInt(agentIndex),
-        metadata,
-      ],
-    });
-    const result = await this.sendTx(this.config.contracts.agentRegistry, data);
+  // -- Agent / IdentityRegistry --
 
-    // Decode AgentRegistered event to get the on-chain generated agentId
+  /**
+   * Register an agent NFT on IdentityRegistry.
+   * Returns the on-chain agentId (ERC-721 tokenId) decoded from the Registered event.
+   */
+  async registerAgentOnRegistry(
+    agentURI?: string,
+  ): Promise<{ txHash: string; agentId: bigint }> {
+    const data = encodeFunctionData({
+      abi: identityRegistryAbi,
+      functionName: "register",
+      args: agentURI ? [agentURI] : undefined,
+    });
+    const result = await this.sendTx(
+      this.config.contracts.identityRegistry,
+      data,
+    );
     const event = await this.waitAndDecodeLogs(
       result.hash,
-      agentRegistryAbi,
-      "AgentRegistered",
+      identityRegistryAbi,
+      "Registered",
     );
-    const agentId = event?.args?.agentId as `0x${string}`;
-    if (!agentId) throw new Error("Failed to decode AgentRegistered event");
-
+    const agentId = event?.args?.agentId as bigint;
+    if (agentId === undefined)
+      throw new Error("Failed to decode Registered event");
     return { txHash: result.hash, agentId };
   }
 
-  async registerSession(
-    agentId: `0x${string}`,
+  /** Register a session key on IdentityRegistry (via KiteAAWallet proxy). */
+  async registerSessionOnRegistry(
+    agentId: bigint,
     sessionKey: string,
-    sessionIndex: number,
-    validUntil: number,
+    user: string,
+    walletContract: string,
+    valueLimit: bigint,
+    maxValueAllowed: bigint,
+    validUntil: bigint,
+    blockedAgents: bigint[] = [],
   ): Promise<string> {
     const data = encodeFunctionData({
-      abi: agentRegistryAbi,
+      abi: identityRegistryAbi,
       functionName: "registerSession",
       args: [
         agentId,
         sessionKey as `0x${string}`,
-        BigInt(sessionIndex),
-        BigInt(validUntil),
+        user as `0x${string}`,
+        walletContract as `0x${string}`,
+        valueLimit,
+        maxValueAllowed,
+        validUntil,
+        blockedAgents,
       ],
     });
-    const result = await this.sendTx(this.config.contracts.agentRegistry, data);
+    const result = await this.sendTx(
+      this.config.contracts.identityRegistry,
+      data,
+    );
     return result.hash;
   }
 
-  async getAgent(agentId: `0x${string}`) {
-    return await this.client.readContract({
-      address: this.config.contracts.agentRegistry as `0x${string}`,
-      abi: agentRegistryAbi,
-      functionName: "getAgent",
-      args: [agentId],
-    });
-  }
-
-  async resolveAgentByAddress(agentAddr: string) {
-    return await this.client.readContract({
-      address: this.config.contracts.agentRegistry as `0x${string}`,
-      abi: agentRegistryAbi,
-      functionName: "resolveAgentByAddress",
-      args: [agentAddr as `0x${string}`],
-    });
-  }
-
-  async getOwnerAgents(ownerAddr: string): Promise<readonly `0x${string}`[]> {
+  /** Get the URI for an agent NFT. */
+  async getAgentURI(agentId: bigint): Promise<string> {
     return (await this.client.readContract({
-      address: this.config.contracts.agentRegistry as `0x${string}`,
-      abi: agentRegistryAbi,
-      functionName: "getOwnerAgents",
-      args: [ownerAddr as `0x${string}`],
+      address: this.config.contracts.identityRegistry as `0x${string}`,
+      abi: identityRegistryAbi,
+      functionName: "agentURI",
+      args: [agentId],
+    })) as string;
+  }
+
+  /** Get the EOA owner of an agent NFT. */
+  async getAgentOwner(agentId: bigint): Promise<string> {
+    return (await this.client.readContract({
+      address: this.config.contracts.identityRegistry as `0x${string}`,
+      abi: identityRegistryAbi,
+      functionName: "ownerOf",
+      args: [agentId],
+    })) as string;
+  }
+
+  // ── IdentityRegistry session queries ─────────────────────────────
+
+  /** Read session status from IdentityRegistry. */
+  async validateSession(sessionKey: string) {
+    return await this.client.readContract({
+      address: this.config.contracts.identityRegistry as `0x${string}`,
+      abi: identityRegistryAbi,
+      functionName: "validateSession",
+      args: [sessionKey as `0x${string}`],
+    });
+  }
+
+  /** Full session rule including blockedProviders array. */
+  async getSessionFromRegistry(sessionKey: string) {
+    return await this.client.readContract({
+      address: this.config.contracts.identityRegistry as `0x${string}`,
+      abi: identityRegistryAbi,
+      functionName: "getSession",
+      args: [sessionKey as `0x${string}`],
+    });
+  }
+
+  /** All session keys ever registered for the given agent (by IdentityRegistry tokenId). */
+  /** All session keys ever registered for the given agent. */
+  async getAgentSessionsFromRegistry(
+    agentId: bigint,
+  ): Promise<readonly `0x${string}`[]> {
+    return (await this.client.readContract({
+      address: this.config.contracts.identityRegistry as `0x${string}`,
+      abi: identityRegistryAbi,
+      functionName: "getAgentSessions",
+      args: [agentId],
     })) as readonly `0x${string}`[];
   }
 
@@ -184,36 +223,6 @@ export class ContractService {
       functionName: "isRegistered",
       args: [address as `0x${string}`],
     });
-  }
-
-  async addAgentId(agentId: `0x${string}`, owner: string): Promise<string> {
-    const data = encodeFunctionData({
-      abi: kiteAAWalletAbi,
-      functionName: "addAgentId",
-      args: [agentId, owner as `0x${string}`],
-    });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
-    return result.hash;
-  }
-
-  async getUserAgentIds(address: string): Promise<readonly `0x${string}`[]> {
-    return (await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
-      abi: kiteAAWalletAbi,
-      functionName: "getUserAgentIds",
-      args: [address as `0x${string}`],
-    })) as readonly `0x${string}`[];
-  }
-
-  async getAgentSessionKeys(
-    agentId: `0x${string}`,
-  ): Promise<readonly `0x${string}`[]> {
-    return (await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
-      abi: kiteAAWalletAbi,
-      functionName: "getAgentSessionKeys",
-      args: [agentId],
-    })) as readonly `0x${string}`[];
   }
 
   async getNativeBalance(address: string): Promise<bigint> {
@@ -263,73 +272,41 @@ export class ContractService {
   }
 
   async addSessionKeyRule(
+    agentId: bigint,
     sessionKey: string,
-    agentId: `0x${string}`,
-    sessionIndex: number,
     valueLimit: bigint,
-    dailyLimit: bigint,
-    validUntil: number,
-    blockedProviders: string[],
-    metadata: `0x${string}` = "0x",
+    maxValueAllowed: bigint,
+    validUntil: bigint,
+    blockedAgents: bigint[] = [],
   ): Promise<string> {
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "addSessionKeyRule",
       args: [
-        sessionKey as `0x${string}`,
         agentId,
-        BigInt(sessionIndex),
+        sessionKey as `0x${string}`,
         valueLimit,
-        dailyLimit,
-        BigInt(validUntil),
-        blockedProviders as `0x${string}`[],
-        metadata,
+        maxValueAllowed,
+        validUntil,
+        blockedAgents,
       ],
     });
     const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
     return result.hash;
   }
 
-  async updateBlockedProviders(
-    sessionKey: string,
-    blockedProviders: string[],
+  /** Block or unblock a provider at the user level (applies to all sessions). */
+  async setBlockedProvider(
+    provider: string,
+    blocked: boolean,
   ): Promise<string> {
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
-      functionName: "updateBlockedProviders",
-      args: [sessionKey as `0x${string}`, blockedProviders as `0x${string}`[]],
+      functionName: "setBlockedProvider",
+      args: [provider as `0x${string}`, blocked],
     });
     const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
     return result.hash;
-  }
-
-  async blockProvider(sessionKey: string, provider: string): Promise<string> {
-    const data = encodeFunctionData({
-      abi: kiteAAWalletAbi,
-      functionName: "blockProvider",
-      args: [sessionKey as `0x${string}`, provider as `0x${string}`],
-    });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
-    return result.hash;
-  }
-
-  async unblockProvider(sessionKey: string, provider: string): Promise<string> {
-    const data = encodeFunctionData({
-      abi: kiteAAWalletAbi,
-      functionName: "unblockProvider",
-      args: [sessionKey as `0x${string}`, provider as `0x${string}`],
-    });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
-    return result.hash;
-  }
-
-  async getSessionRule(sessionKey: string) {
-    return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
-      abi: kiteAAWalletAbi,
-      functionName: "getSessionRule",
-      args: [sessionKey as `0x${string}`],
-    });
   }
 
   async revokeSessionKey(sessionKey: string): Promise<string> {
@@ -342,31 +319,20 @@ export class ContractService {
     return result.hash;
   }
 
-  async getSessionBlockedProviders(
-    sessionKey: string,
-  ): Promise<readonly `0x${string}`[]> {
-    return (await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
-      abi: kiteAAWalletAbi,
-      functionName: "getSessionBlockedProviders",
-      args: [sessionKey as `0x${string}`],
-    })) as readonly `0x${string}`[];
-  }
-
-  async isSessionValid(sessionKey: string): Promise<boolean> {
+  async isNonceUsed(sessionKey: string, nonce: bigint): Promise<boolean> {
     return await this.client.readContract({
       address: this.config.contracts.kiteAAWallet as `0x${string}`,
       abi: kiteAAWalletAbi,
-      functionName: "isSessionValid",
-      args: [sessionKey as `0x${string}`],
+      functionName: "isNonceUsed",
+      args: [sessionKey as `0x${string}`, nonce],
     });
   }
 
-  async getPaymentNonce(sessionKey: string): Promise<bigint> {
+  async getSessionSpent(sessionKey: string): Promise<bigint> {
     return await this.client.readContract({
       address: this.config.contracts.kiteAAWallet as `0x${string}`,
       abi: kiteAAWalletAbi,
-      functionName: "paymentNonces",
+      functionName: "getSessionSpent",
       args: [sessionKey as `0x${string}`],
     });
   }
@@ -446,7 +412,6 @@ export class ContractService {
           maxSpend,
           BigInt(maxDuration),
           maxPerCall,
-          user,
           walletContract,
         ],
         account: signerAddress as `0x${string}`,
@@ -471,7 +436,6 @@ export class ContractService {
         maxSpend,
         BigInt(maxDuration),
         maxPerCall,
-        user,
         walletContract,
       ],
     });
@@ -695,19 +659,27 @@ export class ContractService {
 
   async executePayment(
     walletAddress: string,
+    agentId: bigint,
     sessionKey: string,
     recipient: string,
     token: string,
     amount: bigint,
+    nonce: bigint,
+    deadline: bigint,
+    sig: `0x${string}`,
   ): Promise<string> {
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "executePayment",
       args: [
+        agentId,
         sessionKey as `0x${string}`,
         recipient as `0x${string}`,
         token as `0x${string}`,
         amount,
+        nonce,
+        deadline,
+        sig,
       ],
     });
     const result = await this.sendTx(walletAddress, data);

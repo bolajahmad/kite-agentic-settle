@@ -784,7 +784,8 @@ export async function callApi(args: string[]) {
     : undefined;
 
   // Resolve on-chain session rules to power the decision engine.
-  const [agentId] = await settle.resolveAgent(agentAddress);
+  const resolvedOwner = await settle.resolveAgent(BigInt(agentAddress));
+  const agentId = resolvedOwner ?? agentAddress;
   const sessions = await getSessionsByAgent(agentId);
 
   const defaultRule: SessionRules = {

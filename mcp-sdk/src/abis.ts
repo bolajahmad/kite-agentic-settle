@@ -1,6 +1,33 @@
 import { parseAbi } from "viem";
 
-// ── AgentRegistry ABI ─────────────────────────────────────────────
+// ── IdentityRegistry ABI ──────────────────────────────────────────
+// ERC-8004 / ERC-721 identity + session registry.
+// agentId = ERC-721 tokenId (uint256, starts at 1).
+
+export const identityRegistryAbi = parseAbi([
+  // Write
+  "function register(string agentURI) external returns (uint256 agentId)",
+  "function register() external returns (uint256 agentId)",
+  "function setAgentURI(uint256 agentId, string newURI) external",
+  "function registerSession(uint256 agentId, address sessionKey, address user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil, uint256[] blockedAgents) external",
+  "function revokeSession(address sessionKey) external",
+  // Read (sessions)
+  "function validateSession(address sessionKey) external view returns (bool active, uint256 agentId, address user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil)",
+  "function getSession(address sessionKey) external view returns (uint256 agentId, address user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil, uint256[] blockedAgents, bool active)",
+  "function getAgentSessions(uint256 agentId) external view returns (address[])",
+  "function isAgentBlocked(address sessionKey, uint256 agentId) external view returns (bool)",
+  // Read (agents / ERC-721)
+  "function ownerOf(uint256 tokenId) external view returns (address)",
+  "function balanceOf(address owner) external view returns (uint256)",
+  "function totalAgents() external view returns (uint256)",
+  "function agentURI(uint256 agentId) external view returns (string)",
+  // Events
+  "event Registered(uint256 indexed agentId, string agentURI, address indexed owner)",
+  "event SessionRegistered(uint256 indexed agentId, address indexed sessionKey, address indexed user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil)",
+  "event SessionRevoked(uint256 indexed agentId, address indexed sessionKey)",
+]);
+
+// ── AgentRegistry ABI (legacy — kept for backwards compat) ────────
 // Source of truth: frontend/utils/contracts/abi/AgentRegistryABI.ts
 
 export const agentRegistryAbi = parseAbi([
@@ -31,48 +58,34 @@ export const agentRegistryAbi = parseAbi([
 export const kiteAAWalletAbi = parseAbi([
   // Write
   "function register() external",
-  "function addAgentId(bytes32 agentId, address owner) external",
-  "function addSessionKeyRule(address sessionKeyAddress, bytes32 agentId, uint256 sessionIndex, uint256 valueLimit, uint256 dailyLimit, uint256 validUntil, address[] blockedProviders, bytes metadata) external",
+  "function addSessionKeyRule(uint256 agentId, address sessionKey, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil, uint256[] blockedAgents) external",
+  "function revokeSessionKey(address sessionKey) external",
   "function deposit(address token, uint256 amount) external",
   "function withdraw(address token, uint256 amount) external",
-  "function executePayment(address sessionKey, address recipient, address token, uint256 amount) external",
-  "function executePaymentBySig(address sessionKey, address recipient, address token, uint256 amount, uint256 nonce, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external",
-  "function revokeSessionKey(address sessionKeyAddress) external",
-  "function revokeAllAgentSessions(bytes32 agentId) external",
-  "function setAgentRegistry(address _registry) external",
-  "function setPaymentChannel(address _paymentChannel) external",
+  "function executePayment(uint256 agentId, address sessionKey, address recipient, address token, uint256 amount, uint256 nonce, uint256 deadline, bytes sig) external",
+  "function setIdentityRegistry(address _registry) external",
+  "function setPaymentChannel(address _channel) external",
   "function withdrawForChannel(address user, address token, uint256 amount) external",
   "function refundFromChannel(address user, address token, uint256 amount) external",
-  "function updateBlockedProviders(address sessionKeyAddress, address[] newBlockedProviders) external",
-  "function blockProvider(address sessionKeyAddress, address provider) external",
-  "function unblockProvider(address sessionKeyAddress, address provider) external",
+  "function setBlockedProvider(address provider, bool blocked) external",
+  "function setBlockedProviders(address[] providers, bool blocked) external",
   // Read
   "function isRegistered(address user) external view returns (bool)",
-  "function getSessionRule(address sessionKey) external view returns (address user, bytes32 agentId, uint256 valueLimit, uint256 dailyLimit, uint256 validUntil, bool active)",
-  "function getSessionBlockedProviders(address sessionKey) external view returns (address[])",
-  "function getAgentSessionKeys(bytes32 agentId) external view returns (address[])",
-  "function getDailySpend(address sessionKey) external view returns (uint256 spent, uint256 windowStart)",
-  "function isSessionValid(address sessionKey) external view returns (bool)",
-  "function getUserAgentIds(address user) external view returns (bytes32[])",
   "function getUserBalance(address user, address token) external view returns (uint256)",
-  "function paymentNonces(address sessionKey) external view returns (uint256)",
-  "function domainSeparator() external view returns (bytes32)",
-  "function agentRegistry() external view returns (address)",
+  "function getSessionSpent(address sessionKey) external view returns (uint256)",
+  "function isNonceUsed(address sessionKey, uint256 nonce) external view returns (bool)",
+  "function isProviderBlocked(address user, address provider) external view returns (bool)",
+  "function identityRegistry() external view returns (address)",
+  "function paymentChannel() external view returns (address)",
   "function owner() external view returns (address)",
   // Events
   "event UserRegistered(address indexed user)",
-  "event AgentLinked(address indexed user, bytes32 indexed agentId)",
-  "event SessionKeyAdded(address indexed sessionKey, address indexed user, bytes32 indexed agentId, uint256 sessionIndex, bytes32 metadataHash, uint256 valueLimit, uint256 dailyLimit, uint256 validUntil, bytes metadata)",
-  "event SessionKeyRevoked(address indexed sessionKey, bytes32 indexed agentId)",
-  "event SessionBlockedProvidersUpdated(address indexed sessionKey, address[] blockedProviders)",
-  "event ProviderBlocked(address indexed sessionKey, address indexed provider)",
-  "event ProviderUnblocked(address indexed sessionKey, address indexed provider)",
   "event FundsDeposited(address indexed user, address indexed token, uint256 amount)",
   "event FundsWithdrawn(address indexed user, address indexed token, uint256 amount)",
-  "event PaymentExecuted(address indexed sessionKey, bytes32 indexed agentId, address indexed recipient, address token, uint256 amount)",
-  "event PaymentExecutedBySig(address indexed sessionKey, bytes32 indexed agentId, address indexed recipient, address token, uint256 amount, uint256 nonce)",
-  "event AgentRegistryUpdated(address indexed registry)",
-  "event PaymentChannelUpdated(address indexed paymentChannel)",
+  "event PaymentExecuted(address indexed sessionKey, uint256 indexed agentId, address indexed recipient, address token, uint256 amount, uint256 nonce)",
+  "event BlockedProvidersUpdated(address indexed user)",
+  "event IdentityRegistryUpdated(address indexed registry)",
+  "event PaymentChannelUpdated(address indexed channel)",
   "event ChannelFundsWithdrawn(address indexed user, address indexed token, uint256 amount)",
   "event ChannelFundsRefunded(address indexed user, address indexed token, uint256 amount)",
 ]);

@@ -15,7 +15,7 @@
     }
   },
   "bin": {
-    "kite": "./dist/cli.js"
+    "kite": "./dist/cli/index.js"
   },
   "files": [
     "dist",

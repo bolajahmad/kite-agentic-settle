@@ -258,108 +258,7 @@ async function cmdInit() {
   console.log("");
 }
 
-// ── onboard subcommand ─────────────────────────────────────────────
-
-async function cmdOnboard(args: string[]) {
-  header("Kite Agent Pay — Onboard Agent");
-
-  // Accept flags or prompt interactively
-  let name = findFlag(args, "--name");
-  let category = findFlag(args, "--category");
-  let description = findFlag(args, "--description");
-  let valueLimitStr = findFlag(args, "--value-limit");
-  let dailyLimitStr = findFlag(args, "--daily-limit");
-  let validDaysStr = findFlag(args, "--valid-days");
-  let fundAmountStr = findFlag(args, "--fund");
-  let gasAmountStr = findFlag(args, "--gas");
-  const agentIndexStr = findFlag(args, "--agent-index");
-
-  let credential: string | undefined;
-
-  // Check vars first, then prompt
-  credential = getVar("PRIVATE_KEY");
-  if (!credential) {
-    credential = await prompt("  Seed phrase or private key: ", true);
-  }
-
-  if (!credential) die("Seed phrase or private key is required");
-
-  // Interactive prompts for missing values
-  if (!name) name = await prompt("  Agent name: ");
-  if (!name) die("Agent name is required");
-
-  if (!category)
-    category =
-      (await prompt("  Category (e.g. defi, social, data) [general]: ")) ||
-      "general";
-  if (!description) description = (await prompt("  Description []: ")) || "";
-
-  if (!valueLimitStr)
-    valueLimitStr =
-      (await prompt("  Value limit per tx in USDT [1.0]: ")) || "1.0";
-  if (!dailyLimitStr)
-    dailyLimitStr = (await prompt("  Daily limit in USDT [10.0]: ")) || "10.0";
-  if (!validDaysStr)
-    validDaysStr = (await prompt("  Session validity in days [30]: ")) || "30";
-
-  const wantFund = await prompt("  Fund agent wallet? (y/N): ");
-  if (wantFund.toLowerCase() === "y") {
-    if (!fundAmountStr)
-      fundAmountStr =
-        (await prompt("  USDT amount to deposit [1.0]: ")) || "1.0";
-    if (!gasAmountStr)
-      gasAmountStr =
-        (await prompt("  Native gas to send in ETH [0.001]: ")) || "0.001";
-  }
-
-  // Create client
-  info("");
-  info("Starting onboarding...");
-
-  try {
-    const client = await KiteSettleClient.create({ credential });
-
-    const result = await client.onboard(
-      {
-        agentName: name,
-        category,
-        description,
-        agentIndex:
-          agentIndexStr !== undefined ? parseInt(agentIndexStr, 10) : undefined,
-        valueLimit: valueLimitStr,
-        dailyLimit: dailyLimitStr,
-        validDays: parseInt(validDaysStr!, 10),
-        fundAmount: fundAmountStr,
-        gasAmount: gasAmountStr,
-      },
-      (step) => info(`  → ${step}`),
-    );
-
-    header("Onboarding Complete");
-    info(`  EOA Address:          ${result.eoaAddress}`);
-    info(`  Agent Address:        ${result.agentAddress}`);
-    info(`  Agent Private Key:    ${result.agentPrivateKey}`);
-    info(`  Agent ID (on-chain):  ${result.agentId}`);
-    info(`  Session Address:      ${result.sessionKeyAddress}`);
-    info(`  Session Private Key:  ${result.sessionKeyPrivateKey}`);
-    info("");
-    info(`  Transactions:`);
-    for (const tx of result.txHashes) {
-      if (tx.hash) info(`    ${tx.step}: ${tx.hash}`);
-    }
-    info("");
-    info(`  Balances:`);
-    info(`    USDT (wallet):  ${result.walletKttBalance}`);
-    info(`    USDT (EOA):     ${result.kttBalance}`);
-    info(`    Native (EOA):  ${result.kiteBalance}`);
-    console.log("");
-  } catch (err: any) {
-    die(err.message);
-  }
-}
-
 // ── whoami subcommand ──────────────────────────────────────────────
-
 async function cmdWhoami(args: string[]) {
   const agentIndexStr = findFlag(args, "--agent");
 
@@ -488,13 +387,15 @@ async function main() {
         await cmdInit();
         break;
 
-      case "onboard":
-        await cmdOnboard(args.slice(1));
-        break;
-
       case "whoami":
         await cmdWhoami(args.slice(1));
         break;
+
+      case "onboard": {
+        const { cmdOnboardAgent } = await import("./commands/agent.js");
+        await cmdOnboardAgent(args.slice(1));
+        break;
+      }
 
       case "channel": {
         const { cmdChannels } = await import("./commands/channels.js");

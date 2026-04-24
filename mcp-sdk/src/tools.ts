@@ -5,9 +5,9 @@
  * (via MCP) can discover and invoke them.
  */
 
-import { KitePaymentClient } from "./index.js";
-import type { PaymentRequest, InterceptorOptions } from "./types.js";
 import { stringToHex } from "viem";
+import { KitePaymentClient } from "./index.js";
+import type { InterceptorOptions } from "./types.js";
 
 // ── Tool Definitions ───────────────────────────────────────────────
 
@@ -20,15 +20,30 @@ export interface McpToolDefinition {
 export const TOOLS: McpToolDefinition[] = [
   {
     name: "call_paid_api",
-    description: "Call a paid API endpoint. The SDK handles 402 payment negotiation automatically. Returns the API response data and a payment receipt if payment was made.",
+    description:
+      "Call a paid API endpoint. The SDK handles 402 payment negotiation automatically. Returns the API response data and a payment receipt if payment was made.",
     inputSchema: {
       type: "object",
       properties: {
         url: { type: "string", description: "The API endpoint URL to call" },
-        method: { type: "string", enum: ["GET", "POST", "PUT", "DELETE"], default: "GET" },
-        body: { type: "string", description: "Request body for POST/PUT requests" },
-        autopay: { type: "boolean", default: true, description: "Whether to automatically pay if 402 is returned" },
-        maxAmount: { type: "string", description: "Maximum payment amount in wei (optional spending cap)" },
+        method: {
+          type: "string",
+          enum: ["GET", "POST", "PUT", "DELETE"],
+          default: "GET",
+        },
+        body: {
+          type: "string",
+          description: "Request body for POST/PUT requests",
+        },
+        autopay: {
+          type: "boolean",
+          default: true,
+          description: "Whether to automatically pay if 402 is returned",
+        },
+        maxAmount: {
+          type: "string",
+          description: "Maximum payment amount in wei (optional spending cap)",
+        },
       },
       required: ["url"],
     },
@@ -39,13 +54,17 @@ export const TOOLS: McpToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        token: { type: "string", description: "Token contract address (defaults to KTT)" },
+        token: {
+          type: "string",
+          description: "Token contract address (defaults to KTT)",
+        },
       },
     },
   },
   {
     name: "get_usage_logs",
-    description: "Get the agent's API call usage logs including amounts paid, services called, and transaction hashes.",
+    description:
+      "Get the agent's API call usage logs including amounts paid, services called, and transaction hashes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -55,36 +74,49 @@ export const TOOLS: McpToolDefinition[] = [
   },
   {
     name: "get_total_spent",
-    description: "Get the total amount of tokens the agent has spent across all API calls in this session.",
+    description:
+      "Get the total amount of tokens the agent has spent across all API calls in this session.",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "register_agent",
-    description: "Register this agent on the Kite AgentRegistry contract with metadata. The agent address used is the current wallet address.",
+    description:
+      "Register this agent on the Kite AgentRegistry contract with metadata. The agent address used is the current wallet address.",
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "Agent name (e.g. 'weather-bot')" },
+        name: {
+          type: "string",
+          description: "Agent name (e.g. 'weather-bot')",
+        },
         description: { type: "string", description: "Agent description" },
-        category: { type: "string", description: "Agent category (Research, Trading, Social, Dev, Other)" },
+        category: {
+          type: "string",
+          description: "Agent category (Research, Trading, Social, Dev, Other)",
+        },
       },
       required: ["name"],
     },
   },
   {
     name: "resolve_agent",
-    description: "Look up an agent by its on-chain address on the Kite AgentRegistry.",
+    description:
+      "Look up an agent by its on-chain address on the Kite AgentRegistry.",
     inputSchema: {
       type: "object",
       properties: {
-        address: { type: "string", description: "Agent address to look up (0x...)" },
+        address: {
+          type: "string",
+          description: "Agent address to look up (0x...)",
+        },
       },
       required: ["address"],
     },
   },
   {
     name: "deposit_to_wallet",
-    description: "Deposit tokens into the KiteAAWallet (shared treasury) for use in API payments.",
+    description:
+      "Deposit tokens into the KiteAAWallet (shared treasury) for use in API payments.",
     inputSchema: {
       type: "object",
       properties: {
@@ -95,18 +127,37 @@ export const TOOLS: McpToolDefinition[] = [
   },
   {
     name: "onboard_agent",
-    description: "Full onboarding flow: register EOA user, create a new agent with session key rules, and optionally fund the wallet. Returns all created addresses, private keys, and transaction hashes. Use this when setting up a new agent from scratch.",
+    description:
+      "Full onboarding flow: register EOA user, create a new agent with session key rules, and optionally fund the wallet. Returns all created addresses, private keys, and transaction hashes. Use this when setting up a new agent from scratch.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Agent name" },
-        category: { type: "string", description: "Agent category (Research, Trading, Social, Dev, Other)" },
+        category: {
+          type: "string",
+          description: "Agent category (Research, Trading, Social, Dev, Other)",
+        },
         description: { type: "string", description: "Agent description" },
-        valueLimit: { type: "string", description: "Max payment per transaction in KTT (default: 1)" },
-        dailyLimit: { type: "string", description: "Max daily spending in KTT (default: 10)" },
-        validDays: { type: "number", description: "Session validity in days (default: 30)" },
-        fundAmount: { type: "string", description: "KTT to deposit into AAWallet (default: 0)" },
-        gasAmount: { type: "string", description: "KITE to send to agent for gas (default: 0)" },
+        valueLimit: {
+          type: "string",
+          description: "Max payment per transaction in KTT (default: 1)",
+        },
+        dailyLimit: {
+          type: "string",
+          description: "Max daily spending in KTT (default: 10)",
+        },
+        validDays: {
+          type: "number",
+          description: "Session validity in days (default: 30)",
+        },
+        fundAmount: {
+          type: "string",
+          description: "KTT to deposit into AAWallet (default: 0)",
+        },
+        gasAmount: {
+          type: "string",
+          description: "KITE to send to agent for gas (default: 0)",
+        },
       },
       required: ["name"],
     },
@@ -118,7 +169,7 @@ export const TOOLS: McpToolDefinition[] = [
 export async function handleTool(
   client: KitePaymentClient,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): Promise<unknown> {
   switch (toolName) {
     case "call_paid_api": {
@@ -126,7 +177,9 @@ export async function handleTool(
       const method = (args.method as string) || "GET";
       const body = args.body as string | undefined;
       const autopay = args.autopay !== false;
-      const maxAmount = args.maxAmount ? BigInt(args.maxAmount as string) : undefined;
+      const maxAmount = args.maxAmount
+        ? BigInt(args.maxAmount as string)
+        : undefined;
 
       const fetchOpts: InterceptorOptions = {};
       if (!autopay) fetchOpts.autoPayEnabled = false;
@@ -142,7 +195,11 @@ export async function handleTool(
       const responseBody = await response.text();
 
       let parsed: unknown;
-      try { parsed = JSON.parse(responseBody); } catch { parsed = responseBody; }
+      try {
+        parsed = JSON.parse(responseBody);
+      } catch {
+        parsed = responseBody;
+      }
 
       const logs = client.getUsageLogs();
       const lastLog = logs.length > 0 ? logs[logs.length - 1] : null;
@@ -150,16 +207,20 @@ export async function handleTool(
       return {
         status: response.status,
         data: parsed,
-        payment: lastLog ? {
-          amount: lastLog.amount.toString(),
-          txHash: lastLog.txHash,
-          timestamp: lastLog.timestamp,
-        } : null,
+        payment: lastLog
+          ? {
+              amount: lastLog.amount.toString(),
+              txHash: lastLog.txHash,
+              timestamp: lastLog.timestamp,
+            }
+          : null,
       };
     }
 
     case "check_balance": {
-      const balance = await client.getTokenBalance(args.token as string | undefined);
+      const balance = await client.getTokenBalance(
+        args.token as string | undefined,
+      );
       return {
         address: client.address,
         balance: balance.toString(),
@@ -190,7 +251,12 @@ export async function handleTool(
       const name = args.name as string;
       const description = (args.description as string) || "";
       const category = (args.category as string) || "";
-      const metadata = JSON.stringify({ name, description, category, version: "0.1.0" });
+      const metadata = JSON.stringify({
+        name,
+        description,
+        category,
+        version: "0.1.0",
+      });
       const metadataHex = stringToHex(metadata);
       const result = await client.registerAgent(metadataHex);
       return {
@@ -201,8 +267,11 @@ export async function handleTool(
 
     case "resolve_agent": {
       const address = args.address as string;
-      const agent = await client.resolveAgentByAddress(address);
-      return agent;
+      // Resolve by agentId (bigint tokenId) from IdentityRegistry
+      const agentId = BigInt(address);
+      const uri = await client.getAgentURI(agentId);
+      const owner = await client.getAgentOwner(agentId);
+      return { agentId: agentId.toString(), uri, owner };
     }
 
     case "deposit_to_wallet": {
@@ -213,11 +282,9 @@ export async function handleTool(
 
     case "onboard_agent": {
       const result = await client.onboard({
-        agentName: args.name as string,
-        category: args.category as string | undefined,
-        description: args.description as string | undefined,
+        agentURI: (args.agentURI as string) ?? (args.name as string) ?? "",
         valueLimit: args.valueLimit as string | undefined,
-        dailyLimit: args.dailyLimit as string | undefined,
+        maxValueAllowed: args.maxValueAllowed as string | undefined,
         validDays: args.validDays as number | undefined,
         fundAmount: args.fundAmount as string | undefined,
         gasAmount: args.gasAmount as string | undefined,
@@ -226,13 +293,14 @@ export async function handleTool(
         eoaAddress: result.eoaAddress,
         agentAddress: result.agentAddress,
         agentPrivateKey: result.agentPrivateKey,
-        agentId: result.agentId,
+        agentId: result.agentId?.toString(),
         sessionKeyAddress: result.sessionKeyAddress,
         sessionKeyPrivateKey: result.sessionKeyPrivateKey,
+        encryptedSessionKey: result.encryptedSessionKey,
         txHashes: result.txHashes,
         kiteBalance: result.kiteBalance,
-        kttBalance: result.kttBalance,
-        walletKttBalance: result.walletKttBalance,
+        usdtBalance: result.usdtBalance,
+        walletUSDTBalance: result.walletUSDTBalance,
         validUntil: new Date(result.validUntil * 1000).toISOString(),
       };
     }

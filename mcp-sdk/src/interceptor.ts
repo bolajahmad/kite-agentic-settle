@@ -233,8 +233,8 @@ export class PaymentInterceptor {
       );
     }
 
-    // Fetch the current nonce for this session key (replay protection)
-    const nonce = await this.contractService.getPaymentNonce(sessionKey);
+    // Generate a random bitmap nonce (any unique uint256; bitmap-based replay protection)
+    const nonce = BigInt(Date.now()) * BigInt(1_000_000) + BigInt(Math.floor(Math.random() * 1_000_000));
     // 5-minute deadline
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
 
@@ -252,17 +252,19 @@ export class PaymentInterceptor {
         verifyingContract: kiteAAWallet,
       },
       types: {
-        PaymentAuthorization: [
+        Payment: [
+          { name: "agentId",    type: "uint256" },
           { name: "sessionKey", type: "address" },
-          { name: "recipient", type: "address" },
-          { name: "token", type: "address" },
-          { name: "amount", type: "uint256" },
-          { name: "nonce", type: "uint256" },
-          { name: "deadline", type: "uint256" },
+          { name: "recipient",  type: "address" },
+          { name: "token",      type: "address" },
+          { name: "amount",     type: "uint256" },
+          { name: "nonce",      type: "uint256" },
+          { name: "deadline",   type: "uint256" },
         ],
       },
-      primaryType: "PaymentAuthorization",
+      primaryType: "Payment",
       message: {
+        agentId: BigInt(this.agentId),
         sessionKey: sessionKey as `0x${string}`,
         recipient: offer.payTo as `0x${string}`,
         token: offer.asset as `0x${string}`,
@@ -273,7 +275,7 @@ export class PaymentInterceptor {
     });
 
     // Encode as base64 JSON — the facilitator decodes this and calls
-    // KiteAAWallet.executePaymentBySig(sessionKey, recipient, token, amount, nonce, deadline, v, r, s)
+    // KiteAAWallet.executePayment(sessionKey, recipient, token, amount, nonce, deadline, sig)
     //
     // Flat top-level fields match the facilitator's X402PaymentPayload interface.
     const payload = {
@@ -281,6 +283,7 @@ export class PaymentInterceptor {
       version: "1",
       chainId,
       settlementContract: kiteAAWallet,
+      agentId: this.agentId,
       sessionKey,
       recipient: offer.payTo,
       token: offer.asset,

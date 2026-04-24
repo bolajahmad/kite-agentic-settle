@@ -1,4 +1,4 @@
-import { formatUnits, parseUnits, stringToHex } from "viem";
+import { formatUnits, parseUnits } from "viem";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { getVar } from "../../vars.js";
 import { findFlag, prompt } from "../index.js";
@@ -28,7 +28,7 @@ async function cmdSessionStart(args: string[]): Promise<void> {
   const dailyLimitStr = findFlag(args, "--daily-limit");
   const validDaysStr = findFlag(args, "--valid-days");
   const purpose = findFlag(args, "--purpose") ?? "default session";
-  const blockedProvidersStr = findFlag(args, "--block");
+  const blockedAgentsStr = findFlag(args, "--block-agent");
 
   const client = await buildEoaClient(credential);
   const cs = client.getEoaClient().getContractService();
@@ -37,66 +37,38 @@ async function cmdSessionStart(args: string[]): Promise<void> {
   const agent = await client.deriveAgent(agentIndex);
   const session = await client.deriveSession(agentIndex, sessionIndex);
 
-  // Resolve agentId on-chain
-  let agentId: `0x${string}`;
-  try {
-    const resolved = await client.resolveAgent(agent.address);
-    agentId = ((resolved as any)[0] ??
-      (resolved as any).agentId) as `0x${string}`;
-    if (
-      !agentId ||
-      agentId ===
-        "0x0000000000000000000000000000000000000000000000000000000000000000"
-    ) {
-      throw new Error("Agent not registered on-chain.");
-    }
-  } catch (err: any) {
-    throw new Error(
-      `Agent at index ${agentIndex} (${agent.address}) is not registered. ` +
-        "Run: npx kite onboard --name <name>",
-    );
-  }
+  // agentId in IdentityRegistry = ERC-721 tokenId = agentIndex + 1
+  const agentId = BigInt(agentIndex + 1);
 
   const valueLimit = parseUnits(valueLimitStr ?? "1", 18);
-  const dailyLimit = parseUnits(dailyLimitStr ?? "10", 18);
+  const maxValueAllowed = parseUnits(dailyLimitStr ?? "10", 18); // lifetime spend cap
   const validDays = Number(validDaysStr ?? "30");
-  const validUntil = Math.floor(Date.now() / 1000) + validDays * 86_400;
+  const validUntil = BigInt(Math.floor(Date.now() / 1000) + validDays * 86_400);
 
-  const blockedProviders: `0x${string}`[] = blockedProvidersStr
-    ? (blockedProvidersStr.split(",").map((a) => a.trim()) as `0x${string}`[])
+  const blockedAgents: bigint[] = blockedAgentsStr
+    ? blockedAgentsStr.split(",").map((a) => BigInt(a.trim()))
     : [];
-
-  const sessionMeta = JSON.stringify({
-    purpose,
-    agentIndex,
-    sessionIndex,
-    createdAt: new Date().toISOString(),
-  });
-  const sessionMetaHex = stringToHex(sessionMeta) as `0x${string}`;
 
   console.log("");
   console.log("── Creating Session Key ───────────────────────────────────");
   console.log(`  EOA:             ${client.eoaAddress}`);
-  console.log(`  Agent index:     ${agentIndex}  (${agent.address})`);
-  console.log(`  Agent ID:        ${agentId}`);
-  console.log(`  Session index:   ${sessionIndex}  (${session.address})`);
+  console.log(`  Agent index:     ${agentIndex}  (agent ID: ${agentId})`);
+  console.log(`  Session key:     ${session.address}`);
   console.log(`  Value limit:     ${valueLimitStr ?? "1"} per tx`);
-  console.log(`  Daily limit:     ${dailyLimitStr ?? "10"}`);
+  console.log(`  Max spend:       ${dailyLimitStr ?? "10"} lifetime cap`);
   console.log(`  Valid for:       ${validDays} days`);
-  if (blockedProviders.length > 0) {
-    console.log(`  Blocked:         ${blockedProviders.join(", ")}`);
+  if (blockedAgents.length > 0) {
+    console.log(`  Blocked agents:  ${blockedAgents.join(", ")}`);
   }
   console.log("");
 
   const txHash = await cs.addSessionKeyRule(
-    session.address,
     agentId,
-    sessionIndex,
+    session.address,
     valueLimit,
-    dailyLimit,
+    maxValueAllowed,
     validUntil,
-    blockedProviders,
-    sessionMetaHex,
+    blockedAgents,
   );
 
   console.log(`  Tx:              ${txHash}`);
@@ -105,7 +77,7 @@ async function cmdSessionStart(args: string[]): Promise<void> {
   console.log("── Session Key Created ────────────────────────────────────");
   console.log(`  Session key:     ${session.address}`);
   console.log(
-    `  Valid until:     ${new Date(validUntil * 1000).toISOString()}`,
+    `  Valid until:     ${new Date(Number(validUntil) * 1000).toISOString()}`,
   );
   console.log("");
   console.log("  Manage with:");
@@ -133,20 +105,9 @@ async function cmdSessionList(args: string[]): Promise<void> {
 
   const agent = await client.deriveAgent(agentIndex);
 
-  // Resolve agentId
-  let agentId: `0x${string}`;
-  try {
-    const resolved = await client.resolveAgent(agent.address);
-    agentId = ((resolved as any)[0] ??
-      (resolved as any).agentId) as `0x${string}`;
-  } catch {
-    throw new Error(
-      `Agent at index ${agentIndex} (${agent.address}) is not registered. ` +
-        "Run: npx kite onboard --name <name>",
-    );
-  }
-
-  const sessionKeys = await cs.getAgentSessionKeys(agentId);
+  // In IdentityRegistry, agentId = ERC-721 tokenId = agentIndex + 1
+  const agentTokenId = BigInt(agentIndex + 1);
+  const sessionKeys = await cs.getAgentSessionsFromRegistry(agentTokenId);
 
   if (sessionKeys.length === 0) {
     console.log("");
@@ -161,43 +122,42 @@ async function cmdSessionList(args: string[]): Promise<void> {
   console.log(
     `  Session keys for agent ${agent.address} (index ${agentIndex})`,
   );
-  console.log(`  Agent ID: ${agentId}`);
+  console.log(`  Agent ID: ${agentTokenId}`);
   console.log("");
 
   for (const sk of sessionKeys) {
-    let valid = false;
-    let rule:
-      | readonly [string, `0x${string}`, bigint, bigint, bigint, boolean]
-      | null = null;
-    let blocked: readonly `0x${string}`[] = [];
+    let sessionData: any = null;
+    let sessionValid = false;
 
     try {
-      valid = await cs.isSessionValid(sk);
-      rule = (await cs.getSessionRule(sk)) as any;
-      blocked = await cs.getSessionBlockedProviders(sk);
+      const [active, , , , , , validUntil] = (await cs.validateSession(sk)) as any;
+      sessionData = { active, validUntil: Number(validUntil) };
+      sessionValid = active && sessionData.validUntil > Math.floor(Date.now() / 1000);
     } catch {
       // partial failure — still show what we can
     }
 
-    const statusBadge = rule
-      ? rule[5]
-        ? valid
+    const statusBadge = sessionData
+      ? sessionData.active
+        ? sessionValid
           ? "Active"
           : "Expired"
         : "Revoked"
       : "Unknown";
     console.log(`  ${sk}  [${statusBadge}]`);
-    if (rule) {
-      console.log(
-        `    Limits:   ${formatUnits(rule[2], 18)} per-tx / ${formatUnits(rule[3], 18)} daily`,
-      );
-      const validUntil = Number(rule[4]);
-      console.log(
-        `    Valid until: ${new Date(validUntil * 1000).toISOString()}`,
-      );
-    }
-    if (blocked.length > 0) {
-      console.log(`    Blocked:  ${blocked.join(", ")}`);
+    if (sessionData) {
+      const rule = (await cs.getSessionFromRegistry(sk).catch(() => null)) as any;
+      if (rule) {
+        console.log(
+          `    Limits:   ${formatUnits(rule.valueLimit, 18)} per-tx / ${formatUnits(rule.maxValueAllowed, 18)} total`,
+        );
+        console.log(
+          `    Valid until: ${new Date(sessionData.validUntil * 1000).toISOString()}`,
+        );
+        if (rule.blockedProviders?.length > 0) {
+          console.log(`    Blocked:  ${rule.blockedProviders.join(", ")}`);
+        }
+      }
     }
     console.log("");
   }
@@ -238,27 +198,21 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
   console.log("");
 
   try {
-    const rule = (await cs.getSessionRule(sessionKey)) as readonly [
-      string, // user (EOA)
-      `0x${string}`, // agentId
-      bigint, // valueLimit
-      bigint, // dailyLimit
-      bigint, // validUntil
-      boolean, // active
-    ];
-    const valid = await cs.isSessionValid(sessionKey);
-    const blocked = await cs.getSessionBlockedProviders(sessionKey);
+    const [active, agentId, user, , valueLimit, maxValueAllowed, validUntilBig] =
+      (await cs.validateSession(sessionKey)) as any;
+    const rule = (await cs.getSessionFromRegistry(sessionKey)) as any;
 
-    const validUntil = Number(rule[4]);
+    const validUntil = Number(validUntilBig);
     const now = Math.floor(Date.now() / 1000);
     const secsRemaining = validUntil - now;
-    const statusLabel = rule[5] ? (valid ? "Active" : "Expired") : "Revoked";
+    const sessionValid = active && secsRemaining > 0;
+    const statusLabel = active ? (sessionValid ? "Active" : "Expired") : "Revoked";
 
     console.log(`  Status:       ${statusLabel}`);
-    console.log(`  Owner (EOA):  ${rule[0]}`);
-    console.log(`  Agent ID:     ${rule[1]}`);
-    console.log(`  Value limit:  ${formatUnits(rule[2], 18)} per tx`);
-    console.log(`  Daily limit:  ${formatUnits(rule[3], 18)}`);
+    console.log(`  Owner (EOA):  ${user}`);
+    console.log(`  Agent ID:     ${agentId}`);
+    console.log(`  Value limit:  ${formatUnits(valueLimit, 18)} per tx`);
+    console.log(`  Max spend:    ${formatUnits(maxValueAllowed, 18)} lifetime cap`);
     console.log(`  Valid until:  ${new Date(validUntil * 1000).toISOString()}`);
     if (secsRemaining > 0) {
       const days = Math.floor(secsRemaining / 86400);
@@ -267,6 +221,7 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
     } else {
       console.log(`  Time left:    EXPIRED`);
     }
+    const blocked: string[] = rule?.blockedProviders ?? [];
     if (blocked.length > 0) {
       console.log(`  Blocked providers:`);
       for (const p of blocked) {
@@ -314,8 +269,8 @@ async function cmdSessionRevoke(args: string[]): Promise<void> {
 
   // Verify the session belongs to this EOA before revoking
   try {
-    const rule = (await cs.getSessionRule(sessionKey)) as any;
-    const owner = rule[0] as string;
+    const [, , user] = (await cs.validateSession(sessionKey)) as any;
+    const owner = user as string;
     if (owner.toLowerCase() !== client.eoaAddress.toLowerCase()) {
       throw new Error(
         `Session key ${sessionKey} belongs to ${owner}, not ${client.eoaAddress}. ` +
@@ -324,7 +279,7 @@ async function cmdSessionRevoke(args: string[]): Promise<void> {
     }
   } catch (err: any) {
     if (err.message.includes("belongs to")) throw err;
-    // If getSessionRule fails, the key may not exist — still try revoke
+    // If validateSession fails, the key may not exist — still try revoke
   }
 
   console.log("");
@@ -381,15 +336,15 @@ async function cmdSessionBlock(args: string[]): Promise<void> {
   console.log(`  Provider:     ${provider}`);
   console.log("");
 
-  const txHash = await cs.blockProvider(sessionKey, provider);
-
-  console.log(`  Tx:           ${txHash}`);
-  console.log(`  Explorer:     https://testnet.kitescan.ai/tx/${txHash}`);
-  console.log("");
-  console.log(
-    `  Provider ${provider} is now blocked for session ${sessionKey}.`,
+  // In the new IdentityRegistry design, blocked providers are set at session
+  // creation time. To block a provider, revoke this session key and create a
+  // new one with the provider in the blockedProviders list.
+  throw new Error(
+    "Dynamic provider blocking is not supported. " +
+    "Revoke this session and create a new one with the provider blocked:\n" +
+    `  npx kite session revoke --session-key ${sessionKey}\n` +
+    `  npx kite session start --block ${provider}`,
   );
-  console.log("──────────────────────────────────────────────────────────");
 }
 
 // ── session unblock ───────────────────────────────────────────────────────────
@@ -429,15 +384,15 @@ async function cmdSessionUnblock(args: string[]): Promise<void> {
   console.log(`  Provider:     ${provider}`);
   console.log("");
 
-  const txHash = await cs.unblockProvider(sessionKey, provider);
-
-  console.log(`  Tx:           ${txHash}`);
-  console.log(`  Explorer:     https://testnet.kitescan.ai/tx/${txHash}`);
-  console.log("");
-  console.log(
-    `  Provider ${provider} is now unblocked for session ${sessionKey}.`,
+  // In the new IdentityRegistry design, blocked providers are set at session
+  // creation time and cannot be individually removed.
+  // To unblock a provider, revoke this session and create a new one
+  // without that provider in the blockedProviders list.
+  throw new Error(
+    "Dynamic provider unblocking is not supported. " +
+    "Revoke this session and create a new one without the blocked provider:\n" +
+    `  npx kite session revoke --session-key ${sessionKey}`,
   );
-  console.log("──────────────────────────────────────────────────────────");
 }
 
 // ── Public dispatcher ─────────────────────────────────────────────────────────

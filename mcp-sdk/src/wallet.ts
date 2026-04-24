@@ -13,6 +13,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { HDKey } from "@scure/bip32";
 import { entropyToMnemonic, mnemonicToSeedSync } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
 // ── Credential Detection ──────────────────────────────────────────
 
@@ -219,4 +220,68 @@ export async function deriveSessionAccount(
     "Sign this to generate a new Session. This does not cost gas.",
     `m/44'/60'/0'/${agentIndex}/${sessionIndex}`,
   );
+}
+
+/**
+ * Derive a session key for a specific agent using the EOA private key + agentId.
+ *
+ * The agentId (on-chain NFT tokenId) is baked into the signed message so
+ * each agent gets a different session key even for the same session index.
+ *
+ * Message: "Kite: create session for agent {agentId}, index {sessionIndex}"
+ * Path:    m/44'/60'/0'/0/{sessionIndex}
+ */
+export async function deriveSessionForAgent(
+  eoaPrivateKey: Uint8Array,
+  agentId: bigint,
+  sessionIndex: number,
+): Promise<{ address: string; privateKey: `0x${string}` }> {
+  return deriveKeyFromSignedMessage(
+    eoaPrivateKey,
+    `Kite: create session for agent ${agentId}, index ${sessionIndex}`,
+    `m/44'/60'/0'/0/${sessionIndex}`,
+  );
+}
+
+/**
+ * Encrypt a session private key using AES-256-GCM keyed to the seed phrase.
+ * Returns a JSON string containing salt, iv, authTag, and ciphertext (all hex).
+ */
+export function encryptSessionKey(privateKeyHex: string, seedPhrase: string): string {
+  const salt = randomBytes(16);
+  const key = scryptSync(seedPhrase, salt, 32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([
+    cipher.update(privateKeyHex, "utf8"),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+  return JSON.stringify({
+    salt: salt.toString("hex"),
+    iv: iv.toString("hex"),
+    tag: tag.toString("hex"),
+    data: encrypted.toString("hex"),
+  });
+}
+
+/**
+ * Decrypt an encrypted session key blob produced by `encryptSessionKey`.
+ */
+export function decryptSessionKey(encryptedJson: string, seedPhrase: string): string {
+  const { salt, iv, tag, data } = JSON.parse(encryptedJson) as {
+    salt: string; iv: string; tag: string; data: string;
+  };
+  const key = scryptSync(seedPhrase, Buffer.from(salt, "hex"), 32);
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    key,
+    Buffer.from(iv, "hex"),
+  );
+  decipher.setAuthTag(Buffer.from(tag, "hex"));
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(data, "hex")),
+    decipher.final(),
+  ]);
+  return decrypted.toString("utf8");
 }

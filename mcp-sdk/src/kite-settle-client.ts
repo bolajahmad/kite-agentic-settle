@@ -367,41 +367,33 @@ export class KiteSettleClient {
     metadata: `0x${string}`,
     agentIndex = 0,
     walletContract?: string,
-  ): Promise<{ txHash: string; agentId: `0x${string}` }> {
-    const agentKey = await deriveAgentAccount(
-      this.eoaClient.getPrivateKey(),
-      agentIndex,
-    );
-    const agentClient = await KitePaymentClient.create({
-      seedPhrase: agentKey.privateKey,
-      config: this.config,
-    });
-    return agentClient.registerAgent(metadata, agentIndex, walletContract);
+  ): Promise<{ txHash: string; agentId: bigint }> {
+    return this.eoaClient.getContractService().registerAgentOnRegistry(metadata);
   }
 
   /** Register a session key for an agent on KiteAAWallet. */
   async registerSessionKey(
-    agentId: `0x${string}`,
+    agentId: bigint,
     sessionKey: string,
     sessionIndex: number,
     validUntil: number,
   ): Promise<string> {
-    return this.eoaClient.registerSession(
+    return this.eoaClient.getContractService().addSessionKeyRule(
       agentId,
       sessionKey,
-      sessionIndex,
-      validUntil,
+      BigInt(0), BigInt(0), BigInt(validUntil), [],
     );
   }
 
-  /** Resolve an agent by its wallet address → [agentId, metadata]. */
-  async resolveAgent(address: string) {
-    return this.eoaClient.resolveAgentByAddress(address);
+  /** Resolve an agent by its on-chain ID → owner address. */
+  async resolveAgent(agentId: bigint | string) {
+    const id = typeof agentId === "string" ? BigInt(agentId) : agentId;
+    return this.eoaClient.getContractService().getAgentOwner(id).catch(() => null);
   }
 
-  /** Look up an agent by its on-chain ID. */
-  async getAgent(agentId: `0x${string}`) {
-    return this.eoaClient.getAgent(agentId);
+  /** Look up an agent by its on-chain ID (agentId = bigint tokenId). */
+  async getAgent(agentId: bigint) {
+    return this.eoaClient.getContractService().getAgentURI(agentId);
   }
 
   // ── Payment Channels ─────────────────────────────────────────

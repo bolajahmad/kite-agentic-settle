@@ -2,9 +2,9 @@ export interface KiteConfig {
   rpcUrl: string;
   chainId: number;
   contracts: {
-    agentRegistry: string;
+    identityRegistry: string;
+    attestationRegistry: string;
     kiteAAWallet: string;
-    anchorMerkle: string;
     paymentChannel: string;
     walletFactory?: string;
   };

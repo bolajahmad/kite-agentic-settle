@@ -145,44 +145,20 @@ export class KitePaymentClient {
     return generateSeedPhrase();
   }
 
-  // -- Agent Registration --
+  // -- Agent Registration (IdentityRegistry) --
 
   async registerAgent(
-    metadata: `0x${string}`,
-    agentIndex: number = 0,
-    walletContract?: string,
-  ): Promise<{ txHash: string; agentId: `0x${string}` }> {
-    const wallet = walletContract || this.config.contracts.kiteAAWallet;
-    return await this.contractService.registerAgent(
-      this.address,
-      wallet,
-      agentIndex,
-      metadata,
-    );
+    agentURI: string,
+  ): Promise<{ txHash: string; agentId: bigint }> {
+    return await this.contractService.registerAgentOnRegistry(agentURI);
   }
 
-  async getAgent(agentId: `0x${string}`) {
-    return await this.contractService.getAgent(agentId);
+  async getAgentURI(agentId: bigint): Promise<string> {
+    return await this.contractService.getAgentURI(agentId);
   }
 
-  async resolveAgentByAddress(address: string) {
-    return await this.contractService.resolveAgentByAddress(address);
-  }
-
-  // -- Session Keys --
-
-  async registerSession(
-    agentId: `0x${string}`,
-    sessionKey: string,
-    sessionIndex: number,
-    validUntil: number,
-  ): Promise<string> {
-    return await this.contractService.registerSession(
-      agentId,
-      sessionKey,
-      sessionIndex,
-      validUntil,
-    );
+  async getAgentOwner(agentId: bigint): Promise<string> {
+    return await this.contractService.getAgentOwner(agentId);
   }
 
   // -- Wallet --
