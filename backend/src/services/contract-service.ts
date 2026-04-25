@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
-import { AgentRegistryABI } from "../contracts/abi/AgentRegistryABI.js";
+import { AttestationRegistryABI } from "../contracts/abi/AttestationRegistry.js";
+import { IdentityRegistryABI } from "../contracts/abi/IdentityRegistryABI.js";
 import { KiteAAWalletABI } from "../contracts/abi/KiteAAWalletABI.js";
-import { AnchorMerkleABI } from "../contracts/abi/AnchorMerkleABI.js";
 import { PaymentChannelABI } from "../contracts/abi/PaymentChannelABI.js";
 
 // ─── Provider & Signer ────────────────────────────────────────────────
@@ -43,60 +43,68 @@ function getContractAddress(envVar: string): string {
   return addr;
 }
 
-export function getAgentRegistry(signerOrProvider?: ethers.Signer | ethers.Provider) {
+export function getIdentityRegistry(
+  signerOrProvider?: ethers.Signer | ethers.Provider,
+) {
   return new ethers.Contract(
-    getContractAddress("AGENT_REGISTRY_ADDRESS"),
-    AgentRegistryABI,
-    signerOrProvider ?? getSigner()
+    getContractAddress("IDENTITY_REGISTRY_ADDRESS"),
+    IdentityRegistryABI,
+    signerOrProvider ?? getSigner(),
   );
 }
 
-export function getKiteAAWallet(signerOrProvider?: ethers.Signer | ethers.Provider) {
+export function getKiteAAWallet(
+  signerOrProvider?: ethers.Signer | ethers.Provider,
+) {
   return new ethers.Contract(
     getContractAddress("KITE_AA_WALLET_ADDRESS"),
     KiteAAWalletABI,
-    signerOrProvider ?? getSigner()
+    signerOrProvider ?? getSigner(),
   );
 }
 
-export function getAnchorMerkle(signerOrProvider?: ethers.Signer | ethers.Provider) {
+export function getAttestationRegistry(
+  signerOrProvider?: ethers.Signer | ethers.Provider,
+) {
   return new ethers.Contract(
-    getContractAddress("ANCHOR_MERKLE_ADDRESS"),
-    AnchorMerkleABI,
-    signerOrProvider ?? getSigner()
+    getContractAddress("ATTESTATION_REGISTRY_ADDRESS"),
+    AttestationRegistryABI,
+    signerOrProvider ?? getSigner(),
   );
 }
 
-export function getPaymentChannel(signerOrProvider?: ethers.Signer | ethers.Provider) {
+export function getPaymentChannel(
+  signerOrProvider?: ethers.Signer | ethers.Provider,
+) {
   return new ethers.Contract(
     getContractAddress("PAYMENT_CHANNEL_ADDRESS"),
     PaymentChannelABI,
-    signerOrProvider ?? getSigner()
+    signerOrProvider ?? getSigner(),
   );
 }
 
-// ─── Agent Registry Operations ────────────────────────────────────────
+// ─── Identity Registry Operations ────────────────────────────────────────
 
 export async function registerAgentOnChain(
   agentId: string,
   agentDomain: string,
   agentAddress: string,
-  walletContract: string
+  walletContract: string,
 ) {
-  const registry = getAgentRegistry();
+  const registry = getIdentityRegistry();
   const agentIdBytes32 = ethers.id(agentId);
   const tx = await registry.registerAgent(
     agentIdBytes32,
     agentDomain,
     agentAddress,
-    walletContract
+    walletContract,
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash, agentIdBytes32 };
 }
 
 export async function getAgentFromChain(agentId: string) {
-  const registry = getAgentRegistry(getProvider());
+  const registry = getIdentityRegistry(getProvider());
   const agentIdBytes32 = ethers.id(agentId);
   const [agentDomain, agentAddress, walletContract, ownerAddr, active] =
     await registry.getAgent(agentIdBytes32);
@@ -104,7 +112,7 @@ export async function getAgentFromChain(agentId: string) {
 }
 
 export async function resolveAgentByDomainOnChain(domain: string) {
-  const registry = getAgentRegistry(getProvider());
+  const registry = getIdentityRegistry(getProvider());
   const [agentId, agentAddress, walletContract, active] =
     await registry.resolveAgentByDomain(domain);
   return { agentId, agentAddress, walletContract, active };
@@ -113,14 +121,14 @@ export async function resolveAgentByDomainOnChain(domain: string) {
 export async function registerSessionOnChain(
   agentId: string,
   sessionKeyAddress: string,
-  validUntil: number
+  validUntil: number,
 ) {
-  const registry = getAgentRegistry();
+  const registry = getIdentityRegistry();
   const agentIdBytes32 = ethers.id(agentId);
   const tx = await registry.registerSession(
     agentIdBytes32,
     sessionKeyAddress,
-    validUntil
+    validUntil,
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash };
@@ -134,7 +142,7 @@ export async function addSessionKeyRuleOnChain(
   valueLimit: bigint,
   dailyLimit: bigint,
   validUntil: number,
-  blockedProviders: string[]
+  blockedProviders: string[],
 ) {
   const wallet = getKiteAAWallet();
   const agentIdBytes32 = ethers.id(agentId);
@@ -144,64 +152,51 @@ export async function addSessionKeyRuleOnChain(
     valueLimit,
     dailyLimit,
     validUntil,
-    blockedProviders
+    blockedProviders,
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash };
 }
 
-export async function executePaymentOnChain(
-  sessionKeyAddress: string,
-  recipient: string,
-  token: string,
-  amount: bigint
-) {
-  const wallet = getKiteAAWallet();
-  const tx = await wallet.executePayment(
-    sessionKeyAddress,
-    recipient,
-    token,
-    amount
-  );
-  const receipt = await tx.wait();
-  return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
-}
-
 /**
- * Facilitator path: settle an x402 programmable-settlement payment by submitting
- * the session-key-signed EIP-712 authorisation to the contract.
- * The facilitator (backend signer) pays gas; the session key's user balance is debited.
+ * Execute a payment on-chain by submitting the session-key-signed EIP-712
+ * authorisation.  The facilitator (backend signer) pays gas; the agent's
+ * user balance in KiteAAWallet is debited.
+ *
+ * sig is the full 65-byte hex signature from the agent's signTypedData call.
  */
-export async function executePaymentBySigOnChain(
+export async function executePaymentOnChain(
+  agentId: bigint,
   sessionKey: string,
   recipient: string,
   token: string,
   amount: bigint,
   nonce: bigint,
   deadline: bigint,
-  v: number,
-  r: string,
-  s: string
+  sig: string,
 ) {
   const wallet = getKiteAAWallet();
-  const tx = await wallet.executePaymentBySig(
+  const tx = await wallet.executePayment(
+    agentId,
     sessionKey,
     recipient,
     token,
     amount,
     nonce,
     deadline,
-    v,
-    r as `0x${string}`,
-    s as `0x${string}`
+    sig,
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
 }
 
-export async function getPaymentNonceFromChain(sessionKey: string): Promise<bigint> {
+/** Pre-flight replay check — returns true when the nonce was already consumed. */
+export async function isNonceUsedOnChain(
+  sessionKey: string,
+  nonce: bigint,
+): Promise<boolean> {
   const wallet = getKiteAAWallet(getProvider());
-  return BigInt(await wallet.paymentNonces(sessionKey));
+  return Boolean(await wallet.isNonceUsed(sessionKey, nonce));
 }
 
 export async function getSessionRuleFromChain(sessionKeyAddress: string) {
@@ -230,9 +225,12 @@ export async function depositToWallet(token: string, amount: bigint) {
   const tokenContract = new ethers.Contract(
     token,
     ["function approve(address spender, uint256 amount) returns (bool)"],
-    getSigner()
+    getSigner(),
   );
-  const approveTx = await tokenContract.approve(await wallet.getAddress(), amount);
+  const approveTx = await tokenContract.approve(
+    await wallet.getAddress(),
+    amount,
+  );
   await approveTx.wait();
 
   const tx = await wallet.deposit(token, amount);
@@ -246,33 +244,39 @@ export async function anchorMerkleRoot(
   merkleRoot: string,
   logCount: number,
   metadata: string,
-  agentIds: string[]
+  agentIds: string[],
 ) {
-  const merkle = getAnchorMerkle();
+  const merkle = getAttestationRegistry();
   const agentIdBytes32 = agentIds.map((id) => ethers.id(id));
   const tx = await merkle.anchorRoot(
     merkleRoot,
     logCount,
     metadata,
-    agentIdBytes32
+    agentIdBytes32,
   );
   const receipt = await tx.wait();
-  return { txHash: receipt.hash, anchorIndex: receipt.logs.length > 0 ? receipt.logs[0] : null };
+  return {
+    txHash: receipt.hash,
+    anchorIndex: receipt.logs.length > 0 ? receipt.logs[0] : null,
+  };
 }
 
 export async function verifyLeafOnChain(
   anchorIndex: number,
   leaf: string,
-  proof: string[]
+  proof: string[],
 ) {
-  const merkle = getAnchorMerkle();
+  const merkle = getAttestationRegistry();
   const tx = await merkle.verifyLeaf(anchorIndex, leaf, proof);
   const receipt = await tx.wait();
   // Parse the LeafVerified event
-  const iface = new ethers.Interface(AnchorMerkleABI);
+  const iface = new ethers.Interface(AttestationRegistryABI);
   for (const log of receipt.logs) {
     try {
-      const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
+      const parsed = iface.parseLog({
+        topics: log.topics as string[],
+        data: log.data,
+      });
       if (parsed?.name === "LeafVerified") {
         return { valid: parsed.args.valid, txHash: receipt.hash };
       }
@@ -293,15 +297,25 @@ export async function openChannelOnChain(
   maxSpend: bigint,
   maxDuration: number,
   maxPerCall: bigint,
-  user: string,        // EOA whose KiteAAWallet balance is debited
-  walletContract: string // KiteAAWallet contract address
+  user: string, // EOA whose KiteAAWallet balance is debited
+  walletContract: string, // KiteAAWallet contract address
 ) {
   const pc = getPaymentChannel();
 
   // No ERC20 approve needed — KiteAAWallet.withdrawForChannel transfers
   // directly from the wallet contract to PaymentChannel.
 
-  const tx = await pc.openChannel(provider, token, mode, deposit, maxSpend, maxDuration, maxPerCall, user, walletContract);
+  const tx = await pc.openChannel(
+    provider,
+    token,
+    mode,
+    deposit,
+    maxSpend,
+    maxDuration,
+    maxPerCall,
+    user,
+    walletContract,
+  );
   const receipt = await tx.wait();
 
   // Extract channelId from ChannelOpened event
@@ -309,12 +323,17 @@ export async function openChannelOnChain(
   let channelId: string | undefined;
   for (const log of receipt.logs) {
     try {
-      const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
+      const parsed = iface.parseLog({
+        topics: log.topics as string[],
+        data: log.data,
+      });
       if (parsed?.name === "ChannelOpened") {
         channelId = parsed.args.channelId;
         break;
       }
-    } catch { continue; }
+    } catch {
+      continue;
+    }
   }
 
   return { txHash: receipt.hash, channelId };
@@ -333,11 +352,16 @@ export async function initiateSettlementOnChain(
   cumulativeCost: bigint,
   timestamp: number,
   providerSignature: string,
-  merkleRoot: string = "0x0000000000000000000000000000000000000000000000000000000000000000"
+  merkleRoot: string = "0x0000000000000000000000000000000000000000000000000000000000000000",
 ) {
   const pc = getPaymentChannel();
   const tx = await pc.initiateSettlement(
-    channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature, merkleRoot
+    channelId,
+    sequenceNumber,
+    cumulativeCost,
+    timestamp,
+    providerSignature,
+    merkleRoot,
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash };
@@ -348,11 +372,15 @@ export async function submitReceiptOnChain(
   sequenceNumber: number,
   cumulativeCost: bigint,
   timestamp: number,
-  providerSignature: string
+  providerSignature: string,
 ) {
   const pc = getPaymentChannel();
   const tx = await pc.submitReceipt(
-    channelId, sequenceNumber, cumulativeCost, timestamp, providerSignature
+    channelId,
+    sequenceNumber,
+    cumulativeCost,
+    timestamp,
+    providerSignature,
   );
   const receipt = await tx.wait();
   return { txHash: receipt.hash };
@@ -360,7 +388,7 @@ export async function submitReceiptOnChain(
 
 export async function finalizeOnChain(
   channelId: string,
-  merkleRoot: string = "0x0000000000000000000000000000000000000000000000000000000000000000"
+  merkleRoot: string = "0x0000000000000000000000000000000000000000000000000000000000000000",
 ) {
   const pc = getPaymentChannel();
   const tx = await pc.finalize(channelId, merkleRoot);
@@ -378,12 +406,26 @@ export async function forceCloseExpiredOnChain(channelId: string) {
 export async function getChannelOnChain(channelId: string) {
   const pc = getPaymentChannel(getProvider());
   const [
-    consumer, provider, token, mode, deposit, maxSpend, maxDuration,
-    openedAt, expiresAt, maxPerCall, settledAmount, status,
-    settlementDeadline, highestClaimedCost, highestSequenceNumber
+    consumer,
+    provider,
+    token,
+    mode,
+    deposit,
+    maxSpend,
+    maxDuration,
+    openedAt,
+    expiresAt,
+    maxPerCall,
+    settledAmount,
+    status,
+    settlementDeadline,
+    highestClaimedCost,
+    highestSequenceNumber,
   ] = await pc.getChannel(channelId);
   return {
-    consumer, provider, token,
+    consumer,
+    provider,
+    token,
     mode: Number(mode),
     deposit: deposit.toString(),
     maxSpend: maxSpend.toString(),
@@ -412,12 +454,16 @@ export async function getSettlementStateOnChain(channelId: string) {
   };
 }
 
-export async function isChannelExpiredOnChain(channelId: string): Promise<boolean> {
+export async function isChannelExpiredOnChain(
+  channelId: string,
+): Promise<boolean> {
   const pc = getPaymentChannel(getProvider());
   return await pc.isChannelExpired(channelId);
 }
 
-export async function getChannelTimeRemainingOnChain(channelId: string): Promise<number> {
+export async function getChannelTimeRemainingOnChain(
+  channelId: string,
+): Promise<number> {
   const pc = getPaymentChannel(getProvider());
   const remaining = await pc.getChannelTimeRemaining(channelId);
   return Number(remaining);
@@ -427,13 +473,21 @@ export async function getReceiptHashOnChain(
   channelId: string,
   sequenceNumber: number,
   cumulativeCost: bigint,
-  timestamp: number
+  timestamp: number,
 ): Promise<string> {
   const pc = getPaymentChannel(getProvider());
-  return await pc.getReceiptHash(channelId, sequenceNumber, cumulativeCost, timestamp);
+  return await pc.getReceiptHash(
+    channelId,
+    sequenceNumber,
+    cumulativeCost,
+    timestamp,
+  );
 }
 
-export async function getLockedFundsOnChain(wallet: string, token: string): Promise<string> {
+export async function getLockedFundsOnChain(
+  wallet: string,
+  token: string,
+): Promise<string> {
   const pc = getPaymentChannel(getProvider());
   const locked = await pc.getLockedFunds(wallet, token);
   return locked.toString();
@@ -446,18 +500,22 @@ export async function getWalletBalance(token: string): Promise<string> {
   const tokenContract = new ethers.Contract(
     token,
     ["function balanceOf(address) view returns (uint256)"],
-    getProvider()
+    getProvider(),
   );
   const balance = await tokenContract.balanceOf(walletAddress);
   return balance.toString();
 }
 
-export async function isSessionValidOnChain(sessionKeyAddress: string): Promise<boolean> {
+export async function isSessionValidOnChain(
+  sessionKeyAddress: string,
+): Promise<boolean> {
   const wallet = getKiteAAWallet(getProvider());
   return await wallet.isSessionValid(sessionKeyAddress);
 }
 
-export async function getDailySpendOnChain(sessionKeyAddress: string): Promise<string> {
+export async function getDailySpendOnChain(
+  sessionKeyAddress: string,
+): Promise<string> {
   const wallet = getKiteAAWallet(getProvider());
   const spend = await wallet.getDailySpend(sessionKeyAddress);
   return spend.toString();
@@ -476,8 +534,13 @@ export async function getDailySpendOnChain(sessionKeyAddress: string): Promise<s
  * Returns a cleanup function that stops the polling interval.
  */
 export function startChannelWatcher(): () => void {
-  if (!process.env.PAYMENT_CHANNEL_ADDRESS || !process.env.DEPLOYER_PRIVATE_KEY) {
-    console.log("[ChannelWatcher] Skipping — PAYMENT_CHANNEL_ADDRESS or DEPLOYER_PRIVATE_KEY not set.");
+  if (
+    !process.env.PAYMENT_CHANNEL_ADDRESS ||
+    !process.env.DEPLOYER_PRIVATE_KEY
+  ) {
+    console.log(
+      "[ChannelWatcher] Skipping — PAYMENT_CHANNEL_ADDRESS or DEPLOYER_PRIVATE_KEY not set.",
+    );
     return () => {};
   }
   // The channel provider is always the backend's signing address (deployer key).
@@ -510,8 +573,13 @@ export function startChannelWatcher(): () => void {
       for (const log of logs) {
         let parsed: ethers.LogDescription | null = null;
         try {
-          parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
-        } catch { continue; }
+          parsed = iface.parseLog({
+            topics: log.topics as string[],
+            data: log.data,
+          });
+        } catch {
+          continue;
+        }
 
         if (parsed?.name !== "ChannelOpened") continue;
 
@@ -522,13 +590,19 @@ export function startChannelWatcher(): () => void {
         if (activatedChannels.has(channelId)) continue;
         activatedChannels.add(channelId);
 
-        console.log(`[ChannelWatcher] ChannelOpened: channelId=${channelId}, provider=${provider}. Activating...`);
+        console.log(
+          `[ChannelWatcher] ChannelOpened: channelId=${channelId}, provider=${provider}. Activating...`,
+        );
         activateChannelOnChain(channelId)
           .then(({ txHash }) => {
-            console.log(`[ChannelWatcher] Channel ${channelId} activated. Tx: ${txHash}`);
+            console.log(
+              `[ChannelWatcher] Channel ${channelId} activated. Tx: ${txHash}`,
+            );
           })
           .catch((err: any) => {
-            console.error(`[ChannelWatcher] Failed to activate channel ${channelId}: ${err.message}`);
+            console.error(
+              `[ChannelWatcher] Failed to activate channel ${channelId}: ${err.message}`,
+            );
           });
       }
 
@@ -540,7 +614,9 @@ export function startChannelWatcher(): () => void {
   };
 
   const interval = setInterval(poll, 5_000);
-  console.log("[ChannelWatcher] Started — polling every 5s for ChannelOpened events.");
+  console.log(
+    "[ChannelWatcher] Started — polling every 5s for ChannelOpened events.",
+  );
 
   return () => {
     stopped = true;
@@ -548,7 +624,9 @@ export function startChannelWatcher(): () => void {
   };
 }
 
-export async function getAgentSessionKeysOnChain(agentId: string): Promise<string[]> {
+export async function getAgentSessionKeysOnChain(
+  agentId: string,
+): Promise<string[]> {
   const wallet = getKiteAAWallet(getProvider());
   const agentIdBytes32 = ethers.id(agentId);
   return await wallet.getAgentSessionKeys(agentIdBytes32);
@@ -564,16 +642,22 @@ export async function withdrawFromWallet(token: string, amount: bigint) {
 // ─── Registry Read Operations ─────────────────────────────────────────
 
 export async function resolveAgentByAddressOnChain(address: string) {
-  const registry = getAgentRegistry(getProvider());
+  const registry = getIdentityRegistry(getProvider());
   const [agentId, agentDomain, walletContract, active] =
     await registry.resolveAgentByAddress(address);
   return { agentId, agentDomain, walletContract, active };
 }
 
 export async function getAgentBySessionOnChain(sessionKey: string) {
-  const registry = getAgentRegistry(getProvider());
-  const [agentId, agentDomain, agentAddress, agentActive, sessionActive, sessionValidUntil] =
-    await registry.getAgentBySession(sessionKey);
+  const registry = getIdentityRegistry(getProvider());
+  const [
+    agentId,
+    agentDomain,
+    agentAddress,
+    agentActive,
+    sessionActive,
+    sessionValidUntil,
+  ] = await registry.getAgentBySession(sessionKey);
   return {
     agentId,
     agentDomain,
@@ -584,13 +668,15 @@ export async function getAgentBySessionOnChain(sessionKey: string) {
   };
 }
 
-export async function getOwnerAgentsOnChain(ownerAddress: string): Promise<string[]> {
-  const registry = getAgentRegistry(getProvider());
+export async function getOwnerAgentsOnChain(
+  ownerAddress: string,
+): Promise<string[]> {
+  const registry = getIdentityRegistry(getProvider());
   return await registry.getOwnerAgents(ownerAddress);
 }
 
 export async function deactivateAgentOnChain(agentId: string) {
-  const registry = getAgentRegistry();
+  const registry = getIdentityRegistry();
   const agentIdBytes32 = ethers.id(agentId);
   const tx = await registry.deactivateAgent(agentIdBytes32);
   const receipt = await tx.wait();
@@ -600,7 +686,7 @@ export async function deactivateAgentOnChain(agentId: string) {
 // ─── AnchorMerkle Read Operations ─────────────────────────────────────
 
 export async function getAnchorOnChain(anchorIndex: number) {
-  const merkle = getAnchorMerkle(getProvider());
+  const merkle = getAttestationRegistry(getProvider());
   const [merkleRoot, timestamp, logCount, metadata] =
     await merkle.getAnchor(anchorIndex);
   return {
@@ -612,13 +698,15 @@ export async function getAnchorOnChain(anchorIndex: number) {
 }
 
 export async function getTotalAnchorsOnChain(): Promise<number> {
-  const merkle = getAnchorMerkle(getProvider());
+  const merkle = getAttestationRegistry(getProvider());
   const total = await merkle.totalAnchors();
   return Number(total);
 }
 
-export async function getAgentAnchorIndicesOnChain(agentId: string): Promise<number[]> {
-  const merkle = getAnchorMerkle(getProvider());
+export async function getAgentAnchorIndicesOnChain(
+  agentId: string,
+): Promise<number[]> {
+  const merkle = getAttestationRegistry(getProvider());
   const agentIdBytes32 = ethers.id(agentId);
   const indices = await merkle.getAgentAnchorIndices(agentIdBytes32);
   return indices.map((i: bigint) => Number(i));
@@ -628,7 +716,7 @@ export async function getAgentAnchorIndicesOnChain(agentId: string): Promise<num
 
 export function isContractsConfigured(): boolean {
   return !!(
-    process.env.AGENT_REGISTRY_ADDRESS &&
+    process.env.IDENTITY_REGISTRY_ADDRESS &&
     process.env.KITE_AA_WALLET_ADDRESS &&
     process.env.ANCHOR_MERKLE_ADDRESS &&
     process.env.DEPLOYER_PRIVATE_KEY

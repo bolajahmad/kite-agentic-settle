@@ -93,28 +93,9 @@
         "internalType": "address",
         "name": "user",
         "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
       }
     ],
-    "name": "AgentLinked",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "registry",
-        "type": "address"
-      }
-    ],
-    "name": "AgentRegistryUpdated",
+    "name": "BlockedProvidersUpdated",
     "type": "event"
   },
   {
@@ -229,6 +210,19 @@
       {
         "indexed": true,
         "internalType": "address",
+        "name": "registry",
+        "type": "address"
+      }
+    ],
+    "name": "IdentityRegistryUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
         "name": "previousOwner",
         "type": "address"
       },
@@ -248,7 +242,7 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "paymentChannel",
+        "name": "channel",
         "type": "address"
       }
     ],
@@ -266,46 +260,9 @@
       },
       {
         "indexed": true,
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "recipient",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "address",
-        "name": "token",
-        "type": "address"
-      },
-      {
-        "indexed": false,
         "internalType": "uint256",
-        "name": "amount",
-        "type": "uint256"
-      }
-    ],
-    "name": "PaymentExecuted",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
         "name": "agentId",
-        "type": "bytes32"
+        "type": "uint256"
       },
       {
         "indexed": true,
@@ -332,144 +289,7 @@
         "type": "uint256"
       }
     ],
-    "name": "PaymentExecutedBySig",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "provider",
-        "type": "address"
-      }
-    ],
-    "name": "ProviderBlocked",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "provider",
-        "type": "address"
-      }
-    ],
-    "name": "ProviderUnblocked",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "address[]",
-        "name": "blockedProviders",
-        "type": "address[]"
-      }
-    ],
-    "name": "SessionBlockedProvidersUpdated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "sessionIndex",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes32",
-        "name": "metadataHash",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "valueLimit",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "maxValueAllowed",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "validUntil",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes",
-        "name": "metadata",
-        "type": "bytes"
-      }
-    ],
-    "name": "SessionKeyAdded",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "SessionKeyRevoked",
+    "name": "PaymentExecuted",
     "type": "event"
   },
   {
@@ -488,37 +308,14 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "address",
-        "name": "owner",
-        "type": "address"
-      }
-    ],
-    "name": "addAgentId",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "sessionKeyAddress",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      },
-      {
         "internalType": "uint256",
-        "name": "sessionIndex",
+        "name": "agentId",
         "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "sessionKey",
+        "type": "address"
       },
       {
         "internalType": "uint256",
@@ -536,14 +333,9 @@
         "type": "uint256"
       },
       {
-        "internalType": "address[]",
-        "name": "blockedProviders",
-        "type": "address[]"
-      },
-      {
-        "internalType": "bytes",
-        "name": "metadata",
-        "type": "bytes"
+        "internalType": "uint256[]",
+        "name": "blockedAgents",
+        "type": "uint256[]"
       }
     ],
     "name": "addSessionKeyRule",
@@ -552,58 +344,27 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "agentRegistry",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "agentSessions",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [
       {
         "internalType": "address",
-        "name": "sessionKeyAddress",
+        "name": "",
         "type": "address"
       },
       {
         "internalType": "address",
-        "name": "provider",
+        "name": "",
         "type": "address"
       }
     ],
-    "name": "blockProvider",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "name": "blockedProviders",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -622,19 +383,6 @@
     "name": "deposit",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "domainSeparator",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -683,33 +431,10 @@
   {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "recipient",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "token",
-        "type": "address"
-      },
-      {
         "internalType": "uint256",
-        "name": "amount",
+        "name": "agentId",
         "type": "uint256"
-      }
-    ],
-    "name": "executePayment",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
+      },
       {
         "internalType": "address",
         "name": "sessionKey",
@@ -741,106 +466,14 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint8",
-        "name": "v",
-        "type": "uint8"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "r",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "s",
-        "type": "bytes32"
+        "internalType": "bytes",
+        "name": "sig",
+        "type": "bytes"
       }
     ],
-    "name": "executePaymentBySig",
+    "name": "executePayment",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "getAgentSessionKeys",
-    "outputs": [
-      {
-        "internalType": "address[]",
-        "name": "",
-        "type": "address[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      }
-    ],
-    "name": "getSessionBlockedProviders",
-    "outputs": [
-      {
-        "internalType": "address[]",
-        "name": "",
-        "type": "address[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      }
-    ],
-    "name": "getSessionRule",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "valueLimit",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "maxValueAllowed",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "validUntil",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "active",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -855,27 +488,8 @@
     "outputs": [
       {
         "internalType": "uint256",
-        "name": "spent",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      }
-    ],
-    "name": "getUserAgentIds",
-    "outputs": [
-      {
-        "internalType": "bytes32[]",
         "name": "",
-        "type": "bytes32[]"
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -906,10 +520,47 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "identityRegistry",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
-        "name": "sessionKeyAddress",
+        "name": "sessionKey",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "nonce",
+        "type": "uint256"
+      }
+    ],
+    "name": "isNonceUsed",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
         "type": "address"
       },
       {
@@ -949,25 +600,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      }
-    ],
-    "name": "isSessionValid",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "owner",
     "outputs": [
@@ -988,25 +620,6 @@
         "internalType": "address",
         "name": "",
         "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "paymentNonces",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1052,81 +665,14 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "revokeAllAgentSessions",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
-        "name": "sessionKeyAddress",
+        "name": "sessionKey",
         "type": "address"
       }
     ],
     "name": "revokeSessionKey",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "sessionKeys",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "agentId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "sessionIndex",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "metadataHash",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "valueLimit",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "maxValueAllowed",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "validUntil",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "active",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1152,11 +698,34 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_registry",
+        "name": "provider",
         "type": "address"
+      },
+      {
+        "internalType": "bool",
+        "name": "blocked",
+        "type": "bool"
       }
     ],
-    "name": "setAgentRegistry",
+    "name": "setBlockedProvider",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address[]",
+        "name": "providers",
+        "type": "address[]"
+      },
+      {
+        "internalType": "bool",
+        "name": "blocked",
+        "type": "bool"
+      }
+    ],
+    "name": "setBlockedProviders",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1165,7 +734,20 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_paymentChannel",
+        "name": "_registry",
+        "type": "address"
+      }
+    ],
+    "name": "setIdentityRegistry",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "_channel",
         "type": "address"
       }
     ],
@@ -1191,36 +773,24 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "sessionKeyAddress",
+        "name": "",
         "type": "address"
       },
       {
-        "internalType": "address",
-        "name": "provider",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
-    "name": "unblockProvider",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
+    "name": "usedNonces",
+    "outputs": [
       {
-        "internalType": "address",
-        "name": "sessionKeyAddress",
-        "type": "address"
-      },
-      {
-        "internalType": "address[]",
-        "name": "newBlockedProviders",
-        "type": "address[]"
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
-    "name": "updateBlockedProviders",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1306,5 +876,9 @@
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
+  },
+  {
+    "stateMutability": "payable",
+    "type": "receive"
   }
 ]

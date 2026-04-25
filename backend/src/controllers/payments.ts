@@ -122,19 +122,23 @@ const TOKEN_ADDRESS = process.env.TESTNET_TOKEN || "0x0fF5393387ad2f9f691FD6Fd28
 
 export const executeDirectPayment = async (req: Request, res: Response) => {
   try {
-    const { sessionKeyAddress, recipient, amount, token, agentId, serviceId } = req.body;
-    if (!sessionKeyAddress || !recipient || !amount) {
-      return res.status(400).json({ error: "sessionKeyAddress, recipient, and amount are required" });
+    const { sessionKeyAddress, recipient, amount, token, agentId, serviceId, nonce, deadline, signature } = req.body;
+    if (!sessionKeyAddress || !recipient || !amount || !nonce || !deadline || !signature) {
+      return res.status(400).json({ error: "sessionKeyAddress, recipient, amount, nonce, deadline, and signature are required" });
     }
     if (!isContractsConfigured()) {
       return res.status(503).json({ error: "Contracts not configured" });
     }
 
     const result = await executePaymentOnChain(
+      BigInt(agentId || "0"),
       sessionKeyAddress,
       recipient,
       token || TOKEN_ADDRESS,
-      BigInt(amount)
+      BigInt(amount),
+      BigInt(nonce),
+      BigInt(deadline),
+      signature
     );
 
     const log = {

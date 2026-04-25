@@ -7,10 +7,8 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
-/**
- * @dev Minimal interface for pulling/refunding funds from KiteAAWallet and
- *      reading session key rules.
- */
+// ─── Interfaces ────────────────────────────────────────────────────────────
+
 interface IKiteAAWallet {
     function withdrawForChannel(
         address user,
@@ -24,43 +22,41 @@ interface IKiteAAWallet {
         uint256 amount
     ) external;
 
-    /**
-     * @notice Returns all fields of a session key rule (matches the auto-generated
-     *         public getter for the `sessionKeys` mapping in KiteAAWallet).
-     *         `blockedProviders` is the address[] stored in the rule.
-     */
-    function sessionKeys(
+    function getUserBalance(
+        address user,
+        address token
+    ) external view returns (uint256);
+
+    function identityRegistry() external view returns (address);
+
+    function isRegistered(address user) external view returns (bool);
+
+    function isProviderBlocked(
+        address user,
+        address provider
+    ) external view returns (bool);
+}
+
+interface IIdentityRegistry {
+    function validateSession(
         address sessionKey
     )
         external
         view
         returns (
+            bool active,
+            uint256 agentId,
             address user,
-            bytes32 agentId,
-            uint256 sessionIndex,
-            bytes32 metadataHash,
+            address walletContract,
             uint256 valueLimit,
             uint256 maxValueAllowed,
-            uint256 validUntil,
-            bool active
+            uint256 validUntil
         );
 
-    /**
-     * @notice Returns true when `provider` appears in the session key's
-     *         blockedProviders list.
-     */
-    function isProviderBlocked(
+    function isAgentBlocked(
         address sessionKey,
-        address provider
+        uint256 agentId
     ) external view returns (bool);
-
-    /**
-     * @notice Returns the deposited token balance for `user` inside the wallet.
-     */
-    function getUserBalance(
-        address user,
-        address token
-    ) external view returns (uint256);
 }
 
 /**
@@ -68,17 +64,19 @@ interface IKiteAAWallet {
  * @notice Manages payment channels between agent consumers and providers.
  *         Supports prepaid (escrow) and postpaid (credit) modes.
  *
+ *         Session validation is fully delegated to IdentityRegistry —
+ *         this contract never holds session state. The consumer's identity
+ *         (EOA / user) is read from the registry at channel open time.
+ *
  *         Uses a challenge-based settlement model:
  *           Open → Active → SettlementPending → Closed
  *
- *         When either party initiates settlement, a challenge window opens.
- *         During this window ANYONE can submit a higher valid receipt (permissionless).
+ *         During the challenge window ANYONE can submit a higher valid receipt.
  *         After the window closes, `finalize()` settles based on the highest
- *         receipt seen, ensuring neither party can cheat — even if the other
- *         is offline at settlement time.
+ *         receipt seen.
  *
- *         Merkle roots are stored for audit / attestation / reputation purposes
- *         only — they do NOT determine payment amounts.
+ *         Merkle roots are stored for audit / attestation purposes only —
+ *         they do NOT determine payment amounts.
  */
 contract PaymentChannel is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -98,38 +96,37 @@ contract PaymentChannel is ReentrancyGuard {
 
     struct Channel {
         bytes32 channelId;
-        address consumer; // agent/session-key address (makes API calls)
-        address walletContract; // KiteAAWallet contract; user (EOA) is derived from session key
-        address provider; // provider agent's address
-        address token; // ERC20 token for payment
+        address consumer; // session key that opened the channel
+        address user; // EOA (derived from session at open)
+        address walletContract; // KiteAAWallet holding the user's funds
+        address provider;
+        address token;
         PaymentMode mode;
-        uint256 deposit; // locked funds (0 for postpaid)
-        uint256 maxSpend; // hard cap on total payment
-        uint256 maxDuration; // seconds
+        uint256 deposit;
+        uint256 maxSpend;
+        uint256 maxDuration;
         uint256 openedAt;
         uint256 expiresAt;
-        uint256 maxPerCall; // ceiling on cost for any single API call
-        uint256 settledAmount; // final settlement amount (set on finalize)
-        bytes32 usageMerkleRoot; // optional: root for off-chain audit / attestation
+        uint256 maxPerCall;
+        uint256 settledAmount;
+        bytes32 usageMerkleRoot;
         ChannelStatus status;
-        // Settlement state
-        uint256 settlementDeadline; // challenge window end timestamp
-        uint256 highestClaimedCost; // best valid cumulativeCost submitted so far
-        uint256 highestSequenceNumber; // sequence number of the best receipt
-        address settlementInitiator; // who started settlement
+        uint256 settlementDeadline;
+        uint256 highestClaimedCost;
+        uint256 highestSequenceNumber;
+        address settlementInitiator;
     }
 
     mapping(bytes32 => Channel) public channels;
     uint256 public totalChannels;
 
-    // Tracks which KiteAAWallet funds are locked in channels
-    // wallet address => token => locked amount
+    // walletContract => token => locked amount
     mapping(address => mapping(address => uint256)) public lockedFunds;
 
-    // Challenge window: how long parties have to submit counter-evidence
     uint256 public constant CHALLENGE_WINDOW = 1 hours;
-    // Grace period after expiry before anyone can force-close
     uint256 public constant CLOSE_GRACE_PERIOD = 5 minutes;
+
+    // ─── Events ────────────────────────────────────────────────────────
 
     event ChannelOpened(
         bytes32 indexed channelId,
@@ -173,6 +170,8 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 amount
     );
 
+    // ─── Modifiers ─────────────────────────────────────────────────────
+
     modifier onlyChannelParty(bytes32 channelId) {
         Channel storage ch = channels[channelId];
         require(
@@ -194,22 +193,26 @@ contract PaymentChannel is ReentrancyGuard {
 
     /**
      * @notice Open a new payment channel.
-     *         `msg.sender` must be a registered, non-expired session key in `walletContract`.
-     *         The session key's limits are enforced:
-     *           - maxPerCall  ≤ sessionKey.valueLimit
-     *           - maxSpend    ≤ sessionKey.dailyLimit
-     *           - channel expiry ≤ sessionKey.validUntil
-     *           - provider    ∉ sessionKey.blockedProviders
-     *         The EOA `user` is derived from the session key — callers do not pass it.
-     *         For prepaid mode the deposit is pulled from the user's KiteAAWallet balance.
-     * @param provider        The provider agent address
-     * @param token           ERC20 token address
-     * @param mode            Prepaid (escrow) or Postpaid (credit)
-     * @param deposit         Amount to lock (must be > 0 for prepaid, 0 for postpaid)
-     * @param maxSpend        Hard cap on total payment
-     * @param maxDuration     Channel duration in seconds
-     * @param maxPerCall      Ceiling on cost for any single API call
-     * @param walletContract  The KiteAAWallet contract where msg.sender is registered
+     *         `msg.sender` MUST be an active session key registered in
+     *         IdentityRegistry (via the wallet contract).
+     *
+     *         Session limits are enforced:
+     *           - maxPerCall ≤ session.valueLimit
+     *           - maxSpend   ≤ session.maxValueAllowed
+     *           - channel expiry ≤ session.validUntil
+     *           - provider ∉ session.blockedProviders
+     *
+     *         The EOA `user` and `walletContract` are derived from the session
+     *         rule — callers do not pass them.
+     *
+     * @param provider       Provider agent address
+     * @param token          ERC20 token address
+     * @param mode           Prepaid or Postpaid
+     * @param deposit        Amount to lock (> 0 for prepaid, 0 for postpaid)
+     * @param maxSpend       Hard cap on total payment
+     * @param maxDuration    Channel duration in seconds
+     * @param maxPerCall     Ceiling on cost for any single API call
+     * @param walletContract The KiteAAWallet where msg.sender is a registered session key
      */
     function openChannel(
         address provider,
@@ -230,22 +233,28 @@ contract PaymentChannel is ReentrancyGuard {
         require(maxPerCall > 0, "maxPerCall must be > 0");
         require(walletContract != address(0), "Wallet contract required");
 
-        // ── Session key validation ────────────────────────────────────────────
-        // msg.sender is the session key. The EOA (user) is encoded inside the rule.
+        // ── Session validation via IdentityRegistry ────────────────────
         IKiteAAWallet wallet = IKiteAAWallet(walletContract);
+        address registry = wallet.identityRegistry();
+        require(registry != address(0), "Wallet has no IdentityRegistry");
+
+        IIdentityRegistry identityRegistry = IIdentityRegistry(registry);
         (
-            address user, // agentId // sessionIndex // metadataHash
+            bool active, // agentId
             ,
-            ,
-            ,
+            address user,
+            address sessionWallet,
             uint256 valueLimit,
             uint256 maxValueAllowed,
-            uint256 validUntil,
-            bool active
-        ) = wallet.sessionKeys(msg.sender);
+            uint256 validUntil
+        ) = identityRegistry.validateSession(msg.sender);
 
         require(active, "Session key is not active");
         require(block.timestamp <= validUntil, "Session key expired");
+        require(
+            sessionWallet == walletContract,
+            "Session not registered to this wallet"
+        );
         require(
             maxPerCall <= valueLimit,
             "maxPerCall exceeds session valueLimit"
@@ -259,10 +268,10 @@ contract PaymentChannel is ReentrancyGuard {
             "Channel duration exceeds session validity"
         );
         require(
-            !wallet.isProviderBlocked(msg.sender, provider),
-            "Provider is blocked by this session"
+            !wallet.isProviderBlocked(user, provider),
+            "Provider is blocked by this user"
         );
-        // ─────────────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────
 
         if (mode == PaymentMode.Prepaid) {
             require(deposit > 0, "Prepaid requires deposit");
@@ -272,8 +281,6 @@ contract PaymentChannel is ReentrancyGuard {
                 deposit <= wallet.getUserBalance(user, token),
                 "Insufficient wallet balance for deposit"
             );
-            // Pull funds from the EOA's KiteAAWallet balance — the agent itself
-            // holds no tokens; all funds live in the wallet contract.
             wallet.withdrawForChannel(user, token, deposit);
             lockedFunds[walletContract][token] += deposit;
             emit FundsLocked(walletContract, token, deposit);
@@ -296,6 +303,7 @@ contract PaymentChannel is ReentrancyGuard {
         channels[channelId] = Channel({
             channelId: channelId,
             consumer: msg.sender,
+            user: user,
             walletContract: walletContract,
             provider: provider,
             token: token,
@@ -341,22 +349,14 @@ contract PaymentChannel is ReentrancyGuard {
         emit ChannelActivated(channelId);
     }
 
-    // ─── Settlement Phase ──────────────────────────────────────────────
+    // ─── Settlement ────────────────────────────────────────────────────
 
     /**
-     * @notice Initiate settlement on a channel. Either party can call this.
-     *         Opens a challenge window during which anyone can submit a higher receipt.
+     * @notice Initiate settlement. Either party can call this.
+     *         Opens the challenge window so anyone can submit a higher receipt.
      *
-     *         To claim zero usage (no calls made), pass sequenceNumber = 0 and
-     *         cumulativeCost = 0 with an empty signature. The provider can still
-     *         submit a valid receipt during the challenge window.
-     *
-     * @param channelId         The channel to settle
-     * @param sequenceNumber    Receipt sequence number (0 for empty claim)
-     * @param cumulativeCost    Claimed total cost (0 for empty claim)
-     * @param timestamp         Receipt timestamp (ignored if empty claim)
-     * @param providerSignature Provider's signature (empty bytes for zero claim)
-     * @param merkleRoot        Optional merkle root for audit
+     *         Pass sequenceNumber = 0 and cumulativeCost = 0 with empty signature
+     *         to claim zero usage.
      */
     function initiateSettlement(
         bytes32 channelId,
@@ -373,7 +373,6 @@ contract PaymentChannel is ReentrancyGuard {
             "Channel not settleable"
         );
 
-        // If a receipt is provided (non-zero claim), verify it
         if (cumulativeCost > 0 || sequenceNumber > 0) {
             _verifyReceipt(
                 ch,
@@ -401,15 +400,7 @@ contract PaymentChannel is ReentrancyGuard {
     }
 
     /**
-     * @notice Submit a receipt during the challenge window. PERMISSIONLESS —
-     *         anyone holding a valid provider-signed receipt can call this.
-     *         Only updates state if the submitted receipt is higher than the current best.
-     *
-     * @param channelId         The channel in settlement
-     * @param sequenceNumber    Receipt sequence number
-     * @param cumulativeCost    Total cost from receipt (must be > current highest)
-     * @param timestamp         Receipt timestamp
-     * @param providerSignature Provider's signature over the receipt
+     * @notice Submit a higher receipt during the challenge window. Permissionless.
      */
     function submitReceipt(
         bytes32 channelId,
@@ -440,7 +431,6 @@ contract PaymentChannel is ReentrancyGuard {
             timestamp,
             providerSignature
         );
-
         ch.highestClaimedCost = cumulativeCost;
         ch.highestSequenceNumber = sequenceNumber;
 
@@ -453,12 +443,8 @@ contract PaymentChannel is ReentrancyGuard {
     }
 
     /**
-     * @notice Finalize settlement after the challenge window has closed.
-     *         Anyone can call this. Pays based on the highest valid receipt
-     *         submitted during the challenge window.
-     *
-     * @param channelId The channel to finalize
-     * @param merkleRoot Optional final merkle root for audit (overrides if non-zero)
+     * @notice Finalize settlement after the challenge window closes.
+     *         Anyone can call this.
      */
     function finalize(
         bytes32 channelId,
@@ -482,9 +468,7 @@ contract PaymentChannel is ReentrancyGuard {
     }
 
     /**
-     * @notice Force-close an expired channel by initiating settlement.
-     *         Anyone can call this after expiry + grace period.
-     *         Starts the challenge window so provider can still submit receipts.
+     * @notice Force-close an expired channel. Anyone can call after expiry + grace period.
      */
     function forceCloseExpired(bytes32 channelId) external nonReentrant {
         Channel storage ch = channels[channelId];
@@ -550,21 +534,16 @@ contract PaymentChannel is ReentrancyGuard {
             if (payment > 0) {
                 IERC20(ch.token).safeTransfer(ch.provider, payment);
             }
-            // Refund unused deposit back to the EOA's KiteAAWallet balance.
-            // The EOA (user) is derived from the session key stored in the wallet contract.
+
             if (refund > 0 && ch.walletContract != address(0)) {
-                (address settleUser, , , , , , , ) = IKiteAAWallet(
-                    ch.walletContract
-                ).sessionKeys(ch.consumer);
-                // Approve KiteAAWallet to pull the refund back
+                // Approve wallet to pull refund back from PaymentChannel
                 IERC20(ch.token).approve(ch.walletContract, refund);
                 IKiteAAWallet(ch.walletContract).refundFromChannel(
-                    settleUser,
+                    ch.user,
                     ch.token,
                     refund
                 );
             } else if (refund > 0) {
-                // Fallback: refund directly to consumer
                 IERC20(ch.token).safeTransfer(ch.consumer, refund);
             }
 
@@ -579,7 +558,6 @@ contract PaymentChannel is ReentrancyGuard {
                 ch.usageMerkleRoot
             );
         } else {
-            // Postpaid: pull payment from consumer
             if (amount > 0) {
                 IERC20(ch.token).safeTransferFrom(
                     ch.consumer,
@@ -603,6 +581,7 @@ contract PaymentChannel is ReentrancyGuard {
         view
         returns (
             address consumer,
+            address user,
             address provider,
             address token,
             PaymentMode mode,
@@ -623,6 +602,7 @@ contract PaymentChannel is ReentrancyGuard {
         Channel storage ch = channels[channelId];
         return (
             ch.consumer,
+            ch.user,
             ch.provider,
             ch.token,
             ch.mode,

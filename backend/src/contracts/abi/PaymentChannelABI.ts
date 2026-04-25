@@ -326,6 +326,11 @@ export const PaymentChannelABI = [
       },
       {
         internalType: "address",
+        name: "user",
+        type: "address",
+      },
+      {
+        internalType: "address",
         name: "walletContract",
         type: "address",
       },
@@ -457,6 +462,11 @@ export const PaymentChannelABI = [
       {
         internalType: "address",
         name: "consumer",
+        type: "address",
+      },
+      {
+        internalType: "address",
+        name: "user",
         type: "address",
       },
       {

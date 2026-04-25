@@ -1,7 +1,6 @@
 import { ethers } from "ethers";
 import {
   isContractsConfigured,
-  executePaymentOnChain,
   getSessionRuleFromChain,
   getKiteAAWallet,
   getProvider,
@@ -74,19 +73,10 @@ export const settlePayment = async (
   const { authorization, recipient } = payload;
   const token = authorization.token || TOKEN_ADDRESS;
 
-  // If contracts are deployed, settle on-chain
-  if (isContractsConfigured() && authorization.sessionKey) {
-    const result = await executePaymentOnChain(
-      authorization.sessionKey,
-      recipient,
-      token,
-      BigInt(authorization.amount)
-    );
-    return { success: true, txHash: result.txHash, onChain: true };
-  }
-
-  // Fallback: local-only mode (no contracts deployed)
-  console.warn("Contracts not configured — returning mock settlement");
+  // On-chain settlement requires the full x402 signed payload (nonce, deadline, sig).
+  // Use processX402Payment() in facilitator.ts for the real flow.
+  // This PoC path falls back to mock mode.
+  console.warn("settlePayment PoC path: on-chain settlement requires X-PAYMENT sig — returning mock");
   return {
     success: true,
     txHash: ethers.hexlify(ethers.randomBytes(32)),

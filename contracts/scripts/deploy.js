@@ -12,48 +12,48 @@ async function main() {
     ),
   );
 
-  // 1. Deploy AgentRegistry
-  const AgentRegistry = await hre.ethers.getContractFactory("AgentRegistry");
-  const registry = await AgentRegistry.deploy();
+  // 1. Deploy IdentityRegistry (ERC-721 agent NFTs + session management)
+  const IdentityRegistry = await hre.ethers.getContractFactory("IdentityRegistry");
+  const registry = await IdentityRegistry.deploy();
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
-  console.log("AgentRegistry deployed to:", registryAddr);
+  console.log("IdentityRegistry deployed to:", registryAddr);
 
-  // 2. Deploy KiteAAWallet (multi-tenant, no owner arg)
+  // 2. Deploy KiteAAWallet (EIP-4337 AA wallet, sessions live on IdentityRegistry)
   const KiteAAWallet = await hre.ethers.getContractFactory("KiteAAWallet");
   const wallet = await KiteAAWallet.deploy();
   await wallet.waitForDeployment();
   const walletAddr = await wallet.getAddress();
   console.log("KiteAAWallet deployed to:", walletAddr);
 
-  // Link wallet to registry
-  await wallet.setAgentRegistry(registryAddr);
-  console.log("KiteAAWallet linked to AgentRegistry");
+  // Link wallet → registry
+  await wallet.setIdentityRegistry(registryAddr);
+  console.log("KiteAAWallet linked to IdentityRegistry");
 
-  // 3. Deploy AnchorMerkle
-  const AnchorMerkle = await hre.ethers.getContractFactory("AnchorMerkle");
-  const merkle = await AnchorMerkle.deploy();
-  await merkle.waitForDeployment();
-  const merkleAddr = await merkle.getAddress();
-  console.log("AnchorMerkle deployed to:", merkleAddr);
-
-  // 4. Deploy PaymentChannel
+  // 3. Deploy PaymentChannel (reads sessions from IdentityRegistry via wallet)
   const PaymentChannel = await hre.ethers.getContractFactory("PaymentChannel");
   const payChannel = await PaymentChannel.deploy();
   await payChannel.waitForDeployment();
   const payChannelAddr = await payChannel.getAddress();
   console.log("PaymentChannel deployed to:", payChannelAddr);
 
-  // Link wallet to channel
+  // Link wallet → channel (so wallet can authorize channel withdrawals)
   await wallet.setPaymentChannel(payChannelAddr);
   console.log("KiteAAWallet linked to PaymentChannel");
 
+  // 4. Deploy AttestationRegistry (EIP-8004 Reputation + Validation + Merkle)
+  const AttestationRegistry = await hre.ethers.getContractFactory("AttestationRegistry");
+  const attestation = await AttestationRegistry.deploy(registryAddr);
+  await attestation.waitForDeployment();
+  const attestationAddr = await attestation.getAddress();
+  console.log("AttestationRegistry deployed to:", attestationAddr);
+
   console.log("\n--- Deployment Summary ---");
-  console.log("AgentRegistry  :", registryAddr);
-  console.log("KiteAAWallet   :", walletAddr);
-  console.log("AnchorMerkle   :", merkleAddr);
-  console.log("PaymentChannel :", payChannelAddr);
-  console.log("Network        :", hre.network.name);
+  console.log("IdentityRegistry   :", registryAddr);
+  console.log("KiteAAWallet       :", walletAddr);
+  console.log("PaymentChannel     :", payChannelAddr);
+  console.log("AttestationRegistry:", attestationAddr);
+  console.log("Network            :", hre.network.name);
 
   const deploymentsPath = path.resolve(__dirname, "../deployments.json");
   let deployments = {};
@@ -72,10 +72,10 @@ async function main() {
   const networkName = hre.network.name;
 
   deployments[networkName] = {
-    AgentRegistry: registryAddr,
+    IdentityRegistry: registryAddr,
     KiteAAWallet: walletAddr,
-    AnchorMerkle: merkleAddr,
     PaymentChannel: payChannelAddr,
+    AttestationRegistry: attestationAddr,
   };
 
   fs.writeFileSync(deploymentsPath, JSON.stringify(deployments, null, 2));

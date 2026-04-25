@@ -1,10 +1,8 @@
 type Agent @entity(immutable: false) {
   id: ID!
-  agentId: Bytes!
-  address: Bytes!
-  wallet: Bytes!
-  index: BigInt!
-  metadata: Bytes
+  agentId: BigInt!
+  metadata: String
+  wallet: Bytes
 
   owner: User!
 
@@ -21,14 +19,14 @@ type Session @entity(immutable: false) {
   user: User!
   agent: Agent!
 
-  sessionIndex: BigInt!
+  # sessionIndex: BigInt!
   validUntil: BigInt!
-  valueLimit: BigInt
-  dailyLimit: BigInt
+  valueLimit: BigInt!
+  maxLimit: BigInt!
   metadataHash: Bytes
 
   status: String! # "ACTIVE", "REVOKED", "EXPIRED"
-  blockedProviders: [Bytes!] # address[]
+  blockedAgents: [Bytes!] # address[]
   createdAt: BigInt!
   updatedAt: BigInt!
 }
@@ -36,12 +34,15 @@ type Session @entity(immutable: false) {
 type User @entity(immutable: false) {
   id: ID!
   address: Bytes!
+  wallet: Bytes!
 
   agents: [Agent!]! @derivedFrom(field: "owner")
   sessions: [Session!]! @derivedFrom(field: "user")
 
+  blockedProviders: [Bytes!] # address[]
   totalDeposited: BigInt!
   totalWithdrawn: BigInt!
+  lockedInChannels: BigInt!
 
   createdAt: BigInt!
   updatedAt: BigInt!

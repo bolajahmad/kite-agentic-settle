@@ -1,9 +1,9 @@
 {
   "kiteTestnet": {
-    "AgentRegistry": "0x06024D7fBaba7ac5393dC01037a6109fAAEeB7c0",
-    "KiteAAWallet": "0x583b03Bb84f68EaBAef4349A73c90edd76Ab3e24",
-    "AnchorMerkle": "0x7404A5e5c731e50168A2fcD0675f99D81b5d1f4C",
-    "PaymentChannel": "0x96e213Ed967402174C8c9180eAD2c219Ee419053"
+    "IdentityRegistry": "0xc2a94C26987A0c480d0da82f2cB6675AE0fc50fb",
+    "KiteAAWallet": "0x0DB3Ad9b0182BdBB8fa8B32C609946D0C05079d8",
+    "PaymentChannel": "0x312e805C810D6e5dD6234f796d8575B62c43c810",
+    "AttestationRegistry": "0xc967d18A2BcC682c52A424b879EcA94215faE81b"
   },
   "usdt": {
     "address": "0x43408C22242fa6A59DE28ab7128Ea4aC121C5569"

@@ -1,7 +1,6 @@
-import { ethers } from "ethers";
 import {
-  executePaymentBySigOnChain,
-  getPaymentNonceFromChain,
+  executePaymentOnChain,
+  isNonceUsedOnChain,
 } from "./contract-service.js";
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -11,6 +10,7 @@ export interface X402PaymentPayload {
   version: string;
   chainId: number;
   settlementContract?: string;
+  agentId?: string;
   sessionKey: string;
   recipient: string;
   token: string;
@@ -120,12 +120,9 @@ export async function validatePaymentPayload(
   }
 
   // On-chain nonce check — reject replays before touching the chain
-  const onChainNonce = await getPaymentNonceFromChain(payload.sessionKey);
-  const payloadNonce = BigInt(payload.nonce);
-  if (payloadNonce !== onChainNonce) {
-    throw new Error(
-      `Nonce mismatch: payload has ${payloadNonce}, contract expects ${onChainNonce}`
-    );
+  const nonceUsed = await isNonceUsedOnChain(payload.sessionKey, BigInt(payload.nonce));
+  if (nonceUsed) {
+    throw new Error(`Nonce ${payload.nonce} has already been used for session key ${payload.sessionKey}`);
   }
 }
 
@@ -139,29 +136,19 @@ export async function settleX402Payment(
     payload.signature ?? payload.authorization?.signature;
   if (!sig) throw new Error("No signature found in X-PAYMENT payload");
 
-  // Split the 65-byte signature into v, r, s
-  const sigBytes = ethers.getBytes(sig);
-  if (sigBytes.length !== 65) {
-    throw new Error(`Invalid signature length: expected 65 bytes, got ${sigBytes.length}`);
-  }
-  const r = ethers.hexlify(sigBytes.slice(0, 32));
-  const s = ethers.hexlify(sigBytes.slice(32, 64));
-  const v = sigBytes[64];
-
   const amount = BigInt(payload.amount);
   const nonce = BigInt(payload.nonce);
   const deadline = BigInt(payload.deadline);
 
-  const result = await executePaymentBySigOnChain(
+  const result = await executePaymentOnChain(
+    BigInt(payload.agentId ?? "0"),
     payload.sessionKey,
     payload.recipient,
     payload.token,
     amount,
     nonce,
     deadline,
-    v,
-    r,
-    s
+    sig
   );
 
   return {

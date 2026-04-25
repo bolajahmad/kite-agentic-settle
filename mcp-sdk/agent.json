@@ -1,19 +1,17 @@
 {
   "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
-  "name": "My Agent",
-  "description": "Describe what your agent does",
+  "name": "Kings Agent",
+  "description": "Makes money like your majesty!",
   "image": "",
   "services": [
     {
       "name": "MCP",
-      "endpoint": "http://localhost:3000",
+      "endpoint": "http://localhost:4000",
       "version": "v1"
     }
   ],
   "x402Support": true,
   "x402ChannelSupport": true,
   "active": true,
-  "supportedTrust": [
-    "crypto-economic"
-  ]
+  "supportedTrust": ["crypto-economic"]
 }
