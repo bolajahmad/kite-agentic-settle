@@ -6,16 +6,25 @@ import {
   ReceiptSubmitted as ReceiptSubmittedEvent,
   SettlementInitiated as SettlementInitiatedEvent,
 } from "../generated/PaymentChannel/PaymentChannel";
-import { Channel, Payment, Receipt } from "../generated/schema";
+import { Channel, Payment, Receipt, Session } from "../generated/schema";
 
 export function handleChannelOpened(event: ChannelOpenedEvent): void {
   const id = event.params.channelId.toHex();
   let channel = new Channel(id);
 
+  let sessionId = event.params.consumer.toHex();
+  let session = Session.load(sessionId);
+  if (!session) {
+    session = new Session(sessionId);
+    session.sessionKey = event.params.consumer;
+
+    session.save();
+  }
+
   channel.channelId = event.params.channelId;
 
-  channel.user = event.params.user.toHex();
-  channel.agent = event.params.consumer.toHex();
+  channel.user = session.user;
+  channel.agent = session.agent;
   channel.provider = event.params.provider;
 
   channel.walletContract = event.params.walletContract;
@@ -95,7 +104,6 @@ export function handleChannelFinalized(event: ChannelFinalizedEvent): void {
   channel.refundAmount = refundAmount;
   channel.save();
 
-  // 🔥 PAYMENT (to provider)
   if (paymentAmount.gt(BigInt.zero())) {
     let payment = new Payment(event.transaction.hash.toHex() + "-pay");
 
@@ -107,25 +115,9 @@ export function handleChannelFinalized(event: ChannelFinalizedEvent): void {
     payment.amount = paymentAmount;
     payment.timestamp = event.block.timestamp;
     payment.txHash = event.transaction.hash;
-    payment.type = "CHANNEL_FINAL";
+    payment.change = refundAmount;
+    payment.type = "CHANNEL";
 
     payment.save();
-  }
-
-  // 🔥 REFUND (back to user)
-  if (refundAmount.gt(BigInt.zero())) {
-    let refund = new Payment(event.transaction.hash.toHex() + "-refund");
-
-    refund.channel = channel.id;
-    refund.user = channel.user;
-    refund.agent = channel.agent;
-    refund.recipient = channel.provider;
-    refund.token = channel.token;
-    refund.amount = refundAmount;
-    refund.timestamp = event.block.timestamp;
-    refund.txHash = event.transaction.hash;
-    refund.type = "CHANNEL_REFUND";
-
-    refund.save();
   }
 }

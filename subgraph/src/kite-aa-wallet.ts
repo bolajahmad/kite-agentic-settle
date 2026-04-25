@@ -1,4 +1,4 @@
-import { BigInt } from "@graphprotocol/graph-ts";
+import { BigInt, Bytes } from "@graphprotocol/graph-ts";
 import {
   ChannelFundsRefunded as ChannelFundsRefundedEvent,
   ChannelFundsWithdrawn as ChannelFundsWithdrawnEvent,
@@ -154,6 +154,9 @@ export function handleUserRegistered(event: UserRegisteredEvent): void {
     user.lockedInChannels = BigInt.fromI32(0);
     user.createdAt = event.block.timestamp;
     user.updatedAt = event.block.timestamp;
+    user.wallet = Bytes.fromHexString(
+      "0x0DB3Ad9b0182BdBB8fa8B32C609946D0C05079d8",
+    );
     user.save();
   }
 }
