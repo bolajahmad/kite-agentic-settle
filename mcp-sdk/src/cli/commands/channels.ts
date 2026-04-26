@@ -38,24 +38,19 @@ function channelStatusLabel(status: number): string {
   }
 }
 
-/** Build an agent-derived KiteSettleClient from the EOA PRIVATE_KEY. */
+/** Build an EOA-level KiteSettleClient for channel management operations. */
 async function buildAgentClient(
   credential: string,
-  agentIndex: number,
-  mode: "perCall" | "channel" | "batch" | "auto" | "session" = "channel",
 ): Promise<{
   client: KiteSettleClient;
-  agentAddress: string;
   eoaAddress: string;
 }> {
   const settle = await KiteSettleClient.create({
     credential,
-    defaultPaymentMode: mode as any,
-    agentIndex,
+    defaultPaymentMode: "channel",
   });
   return {
     client: settle,
-    agentAddress: settle.agentAddress ?? settle.eoaAddress,
     eoaAddress: settle.eoaAddress,
   };
 }
@@ -80,16 +75,13 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   const token = parseToken(tokenFlag ?? "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
 
-  const { client, agentAddress, eoaAddress } = await buildAgentClient(
+  const { client, eoaAddress } = await buildAgentClient(
     credential,
-    agentIndex,
-    "channel",
   );
 
   console.log("");
   console.log("── Opening Payment Channel ───────────────────────────────");
   console.log(`  EOA:      ${eoaAddress}`);
-  console.log(`  Agent:    ${agentAddress} (index ${agentIndex})`);
   console.log(`  Target:   ${url}`);
   console.log("");
 
@@ -160,8 +152,8 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
     provider: offer.payTo,
     token: offer.asset,
     openUrl: url,
-    agentAddress,
-    agentIndex,
+    agentAddress: eoaAddress,
+    agentIndex: 0,
     maxPerCall: maxPerCall.toString(),
     deposit: deposit.toString(),
     maxSpend: deposit.toString(),
@@ -229,11 +221,8 @@ async function cmdChannelStatus(args: string[]): Promise<void> {
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const channelFlag = findFlag(args, "--channel") as `0x${string}` | undefined;
-  const agentIndex = Number(
-    findFlag(args, "--agent-id") ?? findFlag(args, "--agent") ?? "0",
-  );
 
-  const { client } = await buildAgentClient(credential, agentIndex);
+  const { client } = await buildAgentClient(credential);
 
   // If a specific channel was requested but it's not in local store,
   // still try to look it up on-chain.
@@ -329,28 +318,17 @@ async function cmdChannelClose(args: string[]): Promise<void> {
   );
   const skipWithdraw = args.includes("--no-withdraw");
 
-  const { client, agentAddress } = await buildAgentClient(
-    credential,
-    agentIndex,
-    "channel",
-  );
+  const { client, eoaAddress } = await buildAgentClient(credential);
 
   console.log("");
   console.log("── Closing Payment Channel ───────────────────────────────");
   console.log(`  Channel ID:  ${channelId}`);
-  console.log(`  Agent:       ${agentAddress} (index ${agentIndex})`);
+  console.log(`  EOA:         ${eoaAddress}`);
   console.log("");
 
-  // ── 1. Fetch on-chain channel state and verify ownership ─────────────────
+  // ── 1. Fetch on-chain channel state ──────────────────────────────────────
   console.log("  Fetching on-chain channel state...");
   const ch = await client.getChannel(channelId);
-
-  if (ch.consumer.toLowerCase() !== agentAddress.toLowerCase()) {
-    throw new Error(
-      `Access denied: channel consumer is ${ch.consumer} but agent address is ${agentAddress}. ` +
-        `Use --agent-id <n> to select the correct agent index.`,
-    );
-  }
 
   if (ch.status === ChannelStatus.Closed) {
     console.log("  Channel is already Closed.");
@@ -494,20 +472,13 @@ async function cmdChannelList(args: string[]): Promise<void> {
   // --filter active|all  (default: all)
   const filter = (findFlag(args, "--filter") ?? "all").toLowerCase();
 
-  const { agentAddress } = await buildAgentClient(credential, agentIndex);
-  // Build a read-only client for on-chain lookups
-  const { client } = await buildAgentClient(credential, agentIndex);
+  const { client, eoaAddress } = await buildAgentClient(credential);
 
-  const entries = listChannels().filter(
-    (s) => s.agentAddress.toLowerCase() === agentAddress.toLowerCase(),
-  );
+  const entries = listChannels();
 
   if (entries.length === 0) {
     console.log("");
-    console.log(
-      `  No channels found for agent ${agentAddress} (index ${agentIndex}).`,
-    );
-    console.log("  Open one with: npx kite channel open --url <api>");
+    console.log("  No channels found. Open one with: npx kite channel open --url <api>");
     return;
   }
 
@@ -537,12 +508,12 @@ async function cmdChannelList(args: string[]): Promise<void> {
 
   if (visible.length === 0) {
     console.log("");
-    console.log(`  No ${filter} channels found for agent ${agentAddress}.`);
+    console.log(`  No ${filter} channels found.`);
     return;
   }
 
   console.log("");
-  console.log(`  Channels for agent ${agentAddress} (index ${agentIndex})`);
+  console.log(`  Channels for EOA ${eoaAddress}`);
   if (filter === "active") console.log("  Filter: active only");
   console.log("");
 
@@ -573,15 +544,11 @@ async function cmdChannelResume(args: string[]): Promise<void> {
     findFlag(args, "--agent-id") ?? findFlag(args, "--agent") ?? "0",
   );
 
-  const { client, agentAddress } = await buildAgentClient(
-    credential,
-    agentIndex,
-    "channel",
-  );
+  const { client, eoaAddress } = await buildAgentClient(credential);
 
   const all = listChannels();
 
-  // Resolve channel: explicit flag → first active channel for this agent
+  // Resolve channel: explicit flag → first active channel
   let stored: StoredChannel | null = null;
   if (channelRaw) {
     stored = loadChannel(channelRaw);
@@ -592,11 +559,8 @@ async function cmdChannelResume(args: string[]): Promise<void> {
       );
     }
   } else {
-    // Pick the most recent Active session belonging to this agent
+    // Pick the most recent Active channel
     const agentSessions = all
-      .filter(
-        (s) => s.agentAddress.toLowerCase() === agentAddress.toLowerCase(),
-      )
       .sort((a, b) => b.openedAt - a.openedAt);
 
     for (const s of agentSessions) {
@@ -624,19 +588,13 @@ async function cmdChannelResume(args: string[]): Promise<void> {
   console.log("");
   console.log("── Resuming Channel ──────────────────────────────────────");
   console.log(`  Channel ID:  ${channelId}`);
-  console.log(`  Agent:       ${agentAddress} (index ${agentIndex})`);
+  console.log(`  EOA:         ${eoaAddress}`);
   console.log(`  Provider:    ${stored.provider}`);
   console.log(`  URL:         ${stored.openTxHash}`);
   console.log("");
 
   // Verify ownership
   const ch = await client.getChannel(channelId);
-  if (ch.consumer.toLowerCase() !== agentAddress.toLowerCase()) {
-    throw new Error(
-      `Channel consumer is ${ch.consumer} — does not match agent ${agentAddress}. ` +
-        "Use --agent-id to select the correct agent.",
-    );
-  }
 
   if (ch.status === ChannelStatus.Closed) {
     console.log("  Channel is Closed — cannot resume. Open a new one with:");

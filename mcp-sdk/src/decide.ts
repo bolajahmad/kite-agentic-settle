@@ -11,7 +11,7 @@ export type DecisionMode = "auto" | "rules" | "ai" | "cli";
 export interface SessionRules {
   maxPerCall: string; // max per-call spend (wei string)
   maxPerSession: string; // max per-session spend (wei string)
-  blockedProviders: string[]; // blocked provider addresses
+  blockedAgents: string[]; // blocked agent addresses
   requireApprovalAbove: string; // auto-approve threshold (wei string)
 }
 
@@ -60,13 +60,13 @@ export function checkRules(ctx: DecisionContext): {
     };
   }
 
-  // Check blocked providers
-  if (rules.blockedProviders?.length > 0) {
+  // Check blocked agents
+  if (rules.blockedAgents?.length > 0) {
     const payToLower = request.payTo.toLowerCase();
-    if (rules.blockedProviders.some((p) => p.toLowerCase() === payToLower)) {
+    if (rules.blockedAgents.some((p) => p.toLowerCase() === payToLower)) {
       return {
         decision: "reject",
-        reason: `Provider ${request.payTo} is blocked`,
+        reason: `Agent ${request.payTo} is blocked`,
       };
     }
   }

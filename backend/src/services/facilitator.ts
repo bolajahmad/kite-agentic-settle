@@ -60,7 +60,7 @@ export function decodeX402Header(header: string): X402PaymentPayload {
 
   if (payload.scheme !== "kite-programmable") {
     throw new Error(
-      `Unsupported payment scheme: ${payload.scheme}. Expected kite-programmable`
+      `Unsupported payment scheme: ${payload.scheme}. Expected kite-programmable`,
     );
   }
 
@@ -87,7 +87,7 @@ export async function validatePaymentPayload(
   payload: X402PaymentPayload,
   expectedRecipient: string,
   expectedToken: string,
-  expectedMinAmount: bigint
+  expectedMinAmount: bigint,
 ): Promise<void> {
   const amount = BigInt(payload.amount);
   const deadline = BigInt(payload.deadline);
@@ -101,35 +101,40 @@ export async function validatePaymentPayload(
   // Amount check — reject before touching the chain
   if (amount < expectedMinAmount) {
     throw new Error(
-      `Insufficient payment: sent ${amount} base units but ${expectedMinAmount} required`
+      `Insufficient payment: sent ${amount} base units but ${expectedMinAmount} required`,
     );
   }
 
   // Recipient check (case-insensitive)
   if (payload.recipient.toLowerCase() !== expectedRecipient.toLowerCase()) {
     throw new Error(
-      `Payment recipient ${payload.recipient} does not match expected ${expectedRecipient}`
+      `Payment recipient ${payload.recipient} does not match expected ${expectedRecipient}`,
     );
   }
 
   // Token check
   if (payload.token.toLowerCase() !== expectedToken.toLowerCase()) {
     throw new Error(
-      `Payment token ${payload.token} does not match expected ${expectedToken}`
+      `Payment token ${payload.token} does not match expected ${expectedToken}`,
     );
   }
 
   // On-chain nonce check — reject replays before touching the chain
-  const nonceUsed = await isNonceUsedOnChain(payload.sessionKey, BigInt(payload.nonce));
+  const nonceUsed = await isNonceUsedOnChain(
+    payload.sessionKey,
+    BigInt(payload.nonce),
+  );
   if (nonceUsed) {
-    throw new Error(`Nonce ${payload.nonce} has already been used for session key ${payload.sessionKey}`);
+    throw new Error(
+      `Nonce ${payload.nonce} has already been used for session key ${payload.sessionKey}`,
+    );
   }
 }
 
 // ─── Settle on-chain ─────────────────────────────────────────────────
 
 export async function settleX402Payment(
-  payload: X402PaymentPayload
+  payload: X402PaymentPayload,
 ): Promise<SettlementResult> {
   // Support flat signature (from interceptor) or nested authorization shape
   const sig: `0x${string}` =
@@ -148,7 +153,7 @@ export async function settleX402Payment(
     amount,
     nonce,
     deadline,
-    sig
+    sig,
   );
 
   return {
@@ -166,14 +171,15 @@ export async function processX402Payment(
   xPaymentHeader: string,
   expectedRecipient: string,
   expectedToken: string,
-  expectedMinAmount: bigint
+  expectedMinAmount: bigint,
 ): Promise<SettlementResult> {
   const payload = decodeX402Header(xPaymentHeader);
+  console.log({ payload });
   await validatePaymentPayload(
     payload,
     expectedRecipient,
     expectedToken,
-    expectedMinAmount
+    expectedMinAmount,
   );
   return settleX402Payment(payload);
 }

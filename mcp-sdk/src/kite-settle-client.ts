@@ -23,11 +23,9 @@
 
 import { formatUnits, parseUnits } from "viem";
 import type { BatchEndReason, BatchLimits } from "./batch.js";
+import type { KiteClientOptions } from "./client.js";
+import { KitePaymentClient } from "./client.js";
 import { KITE_TESTNET, TOKENS } from "./config.js";
-import {
-  checkRules,
-  decide,
-} from "./decide.js";
 import type {
   Decision,
   DecisionContext,
@@ -35,6 +33,7 @@ import type {
   DecisionResult,
   SessionRules,
 } from "./decide.js";
+import { checkRules, decide } from "./decide.js";
 import type {
   IndexedAgent,
   IndexedPayment,
@@ -70,34 +69,29 @@ import {
   resolveVar,
   setVar,
 } from "./vars.js";
-import {
-  deriveAgentAccount,
-  deriveSessionAccount,
-} from "./wallet.js";
-import { KitePaymentClient } from "./client.js";
-import type { KiteClientOptions } from "./client.js";
+import { decryptSessionKey, deriveSessionAccount } from "./wallet.js";
 
 // ── Re-export supporting types so consumers need only this module ──
 
 export type {
-  KiteConfig,
+  BatchSession,
   ChannelConfig,
   ChannelState,
-  Receipt,
-  BatchSession,
-  PaymentResult,
-  PaymentRequest,
-  InterceptorOptions,
-  UsageLog,
+  DecisionContext,
   DecisionMode,
   DecisionResult,
-  DecisionContext,
-  SessionRules,
+  IndexedAgent,
+  IndexedPayment,
+  IndexedSession,
+  InterceptorOptions,
+  KiteConfig,
   OnboardOptions,
   OnboardResult,
-  IndexedAgent,
-  IndexedSession,
-  IndexedPayment,
+  PaymentRequest,
+  PaymentResult,
+  Receipt,
+  SessionRules,
+  UsageLog,
 };
 
 export { KITE_TESTNET, TOKENS };
@@ -105,8 +99,27 @@ export { KITE_TESTNET, TOKENS };
 // ── CreateOptions ──────────────────────────────────────────────────
 
 export interface KiteSettleClientOptions {
-  /** EOA seed phrase or private key. */
-  credential: string;
+  /**
+   * EOA seed phrase or private key. Required for onboarding and EOA-level
+   * operations. Must be omitted (or ignored) when `agentId` is provided.
+   */
+  credential?: string;
+  /**
+   * On-chain agentId (NFT tokenId from IdentityRegistry).
+   * When provided, the SDK loads the pre-created session key from the vars
+   * store. Agents are NFTs — they have no address or private key of their
+   * own. All signing is done via a session key registered by the EOA.
+   */
+  agentId?: bigint | string | number;
+  /**
+   * Session key index to load from the vars store. Default: 0.
+   */
+  sessionIndex?: number;
+  /**
+   * Password used to decrypt the stored session key blob produced by
+   * `kite onboard`. Falls back to the `AGENT_SEED` var if not supplied.
+   */
+  sessionSeed?: string;
   /** Optional network config override. Defaults to Kite testnet. */
   config?: Partial<KiteConfig>;
   /**
@@ -117,16 +130,6 @@ export interface KiteSettleClientOptions {
    * - `"auto"`    — SDK picks the best available mode
    */
   defaultPaymentMode?: KiteClientOptions["defaultPaymentMode"];
-  /**
-   * Agent derivation index for the `perCall` (x402) flow.
-   * When set, the SDK derives the agent and session keys automatically.
-   * Default: 0
-   */
-  agentIndex?: number;
-  /**
-   * Session key derivation index (within the agent). Default: 0.
-   */
-  sessionIndex?: number;
 }
 
 // ── KiteSettleClient ───────────────────────────────────────────────
@@ -141,52 +144,93 @@ export class KiteSettleClient {
   /** Full network config in use. */
   readonly config: KiteConfig;
 
-  /** EOA address (the top-level wallet owner). */
+  /** EOA address (the top-level wallet owner). Never exposes a private key. */
   readonly eoaAddress: string;
 
-  /** Active address used for signing payments. */
+  /**
+   * Active address used for signing payments.
+   * In agent mode this is the session key address. In EOA-only mode it is
+   * the EOA address.
+   */
   readonly address: string;
 
-  /** Derived agent address (index `agentIndex`). */
-  readonly agentAddress: string | undefined;
-
-  /** Derived session key address (for x402 mode). */
+  /**
+   * Session key address pre-registered on KiteAAWallet by the EOA.
+   * Agents sign all transactions using this address — not a derived
+   * "agent address". Agents are NFTs (IdentityRegistry tokenIds).
+   */
   readonly sessionKeyAddress: string | undefined;
+
+  /**
+   * Decrypted session key private key.
+   * Available only in agent mode (client built via stored session).
+   * Keep this in the signing layer — never log or transmit it.
+   */
+  readonly sessionKeyPrivateKey: `0x${string}` | undefined;
 
   private constructor(
     eoaClient: KitePaymentClient,
     paymentClient: KitePaymentClient,
-    agentAddress: string | undefined,
+    eoaAddress: string,
     sessionKeyAddress: string | undefined,
+    sessionKeyPrivateKey: `0x${string}` | undefined,
   ) {
     this.eoaClient = eoaClient;
     this.paymentClient = paymentClient;
     this.config = eoaClient.config;
-    this.eoaAddress = eoaClient.address;
-    this.address = paymentClient.address;
-    this.agentAddress = agentAddress;
+    this.eoaAddress = eoaAddress;
+    this.address = sessionKeyAddress ?? eoaAddress;
     this.sessionKeyAddress = sessionKeyAddress;
+    this.sessionKeyPrivateKey = sessionKeyPrivateKey;
   }
 
   // ── Factories ──────────────────────────────────────────────────
 
   /**
-   * Create a KiteSettleClient from a credential (seed phrase or private key).
+   * Create a KiteSettleClient.
    *
-   * For `perCall` mode the SDK automatically derives the session key and
-   * initialises the internal payment client with it, so `fetchWithPayment`
-   * works out of the box.
+   * Two modes:
+   *
+   * **Agent mode** (`agentId` provided) — loads the session key that was
+   * created by the EOA during `kite onboard` and stored encrypted in the
+   * vars store. The agent has no EOA private key; it signs transactions
+   * exclusively with the pre-registered session key.
+   *
+   * **EOA mode** (`credential` provided) — uses the EOA seed/private key
+   * directly. Suitable for onboarding and wallet-management operations.
    */
   static async create(
     options: KiteSettleClientOptions,
   ): Promise<KiteSettleClient> {
     const {
+      agentId,
       credential,
+      sessionIndex = 0,
+      sessionSeed,
       config,
       defaultPaymentMode = "auto",
-      agentIndex = 0,
-      sessionIndex = 0,
     } = options;
+
+    // ── Agent mode ─────────────────────────────────────────────────────
+    if (agentId !== undefined) {
+      console.log("Creating from session");
+      return KiteSettleClient._createFromStoredSession(
+        BigInt(agentId),
+        sessionIndex,
+        sessionSeed,
+        config,
+        defaultPaymentMode,
+      );
+    }
+
+    // ── EOA mode ────────────────────────────────────────────────────────
+    if (!credential) {
+      throw new Error(
+        "Either 'agentId' or 'credential' (EOA seed/private key) must be provided.\n" +
+          "  For agent-mode payments: KiteSettleClient.create({ agentId, sessionSeed })\n" +
+          "  For onboarding / EOA ops: KiteSettleClient.create({ credential })",
+      );
+    }
 
     const eoaClient = await KitePaymentClient.create({
       seedPhrase: credential,
@@ -194,68 +238,129 @@ export class KiteSettleClient {
       defaultPaymentMode: "auto",
     });
 
-    let paymentClient: KitePaymentClient;
-    let agentAddress: string | undefined;
-    let sessionKeyAddress: string | undefined;
-
-    if (defaultPaymentMode === "perCall") {
-      // Derive both the agent and session key deterministically.
-      const { address: agentAddr } = await deriveAgentAccount(
-        eoaClient.getPrivateKey(),
-        agentIndex,
-      );
-      const { privateKey: sessionPrivKey, address: sessionAddr } =
-        await deriveSessionAccount(
-          eoaClient.getPrivateKey(),
-          agentIndex,
-          sessionIndex,
-        );
-      agentAddress = agentAddr;
-      sessionKeyAddress = sessionAddr;
-
-      paymentClient = await KitePaymentClient.create({
-        seedPhrase: sessionPrivKey,
-        config,
-        defaultPaymentMode: "perCall",
-        sessionKey: sessionAddr,
-        walletAddress: agentAddr,
-        eoaAddress: eoaClient.address,  // funds live under the EOA
-      });
-    } else if (defaultPaymentMode === "channel" || defaultPaymentMode === "batch") {
-      const { privateKey: agentPrivKey, address: agentAddr } =
-        await deriveAgentAccount(eoaClient.getPrivateKey(), agentIndex);
-      agentAddress = agentAddr;
-      paymentClient = await KitePaymentClient.create({
-        seedPhrase: agentPrivKey,
-        config,
-        defaultPaymentMode,
-        eoaAddress: eoaClient.address,  // funds live under the EOA, not the agent
-      });
-    } else {
-      // auto — use EOA-level client
-      paymentClient = eoaClient;
-    }
-
     return new KiteSettleClient(
       eoaClient,
-      paymentClient,
-      agentAddress,
-      sessionKeyAddress,
+      eoaClient,
+      eoaClient.address,
+      undefined,
+      undefined,
     );
   }
 
   /**
-   * Create a client from the credential stored in the local vars store
+   * Load a session key from the vars store and build an agent-mode client.
+   *
+   * Agents are NFTs (IdentityRegistry tokenIds). They have no address or
+   * private key. All on-chain signing is done by a session key that the EOA
+   * registered on KiteAAWallet during `kite onboard`.
+   *
+   * Throws with a clear message if the session key is missing (not yet
+   * created, or previously revoked).
+   */
+  private static async _createFromStoredSession(
+    agentId: bigint,
+    sessionIndex: number,
+    sessionSeed: string | undefined,
+    config: Partial<KiteConfig> | undefined,
+    defaultPaymentMode: KiteClientOptions["defaultPaymentMode"],
+  ): Promise<KiteSettleClient> {
+    const addrVar = `SESSION_${agentId}_${sessionIndex}_ADDRESS`;
+    const encVar = `SESSION_${agentId}_${sessionIndex}_ENCRYPTED`;
+    const ownerVar = `AGENT_${agentId}_OWNER`;
+
+    console.log({ addrVar });
+
+    const sessionKeyAddress = getVar(addrVar);
+    if (!sessionKeyAddress) {
+      throw new Error(
+        `Session key not found for agentId=${agentId}, sessionIndex=${sessionIndex}.\n` +
+          `  Expected var: ${addrVar}\n` +
+          `  The session does not exist or has been revoked.\n` +
+          `  Run: npx kite onboard to create a session key for this agent.`,
+      );
+    }
+
+    const encryptedBlob = getVar(encVar);
+    if (!encryptedBlob) {
+      throw new Error(
+        `Encrypted session key blob not found for agentId=${agentId}, sessionIndex=${sessionIndex}.\n` +
+          `  Expected var: ${encVar}\n` +
+          `  Run: npx kite onboard to recreate the session key.`,
+      );
+    }
+
+    const seed = "54041552";
+    if (!seed) {
+      throw new Error(
+        `No session decryption seed available for agentId=${agentId}.\n` +
+          `  Provide the 'sessionSeed' option, or store the decryption password:\n` +
+          `    npx kite vars set AGENT_SEED`,
+      );
+    }
+
+    const sessionPrivateKey = decryptSessionKey(
+      encryptedBlob,
+      seed,
+    ) as `0x${string}`;
+
+    // EOA address: stored by `kite onboard` as AGENT_{agentId}_OWNER.
+    // Used for deposited-balance queries — never for signing.
+    const eoaAddress = getVar(ownerVar) ?? sessionKeyAddress;
+
+    const paymentClient = await KitePaymentClient.create({
+      seedPhrase: sessionPrivateKey,
+      config,
+      defaultPaymentMode,
+      sessionKey: sessionKeyAddress,
+      eoaAddress,
+    });
+
+    return new KiteSettleClient(
+      paymentClient,
+      paymentClient,
+      eoaAddress,
+      sessionKeyAddress,
+      sessionPrivateKey,
+    );
+  }
+
+  /**
+   * Build an agent-mode client from the vars store.
+   *
+   * Convenience wrapper around `create({ agentId, sessionIndex, sessionSeed })`.
+   *
+   * @param agentId      On-chain agentId (NFT tokenId from IdentityRegistry).
+   * @param sessionIndex Session key index (default: 0).
+   * @param sessionSeed  Decryption password. Falls back to the AGENT_SEED var.
+   * @param options      Optional config / mode overrides.
+   */
+  static async fromAgent(
+    agentId: bigint | string | number,
+    sessionIndex = 0,
+    sessionSeed?: string,
+    options: Pick<
+      KiteSettleClientOptions,
+      "config" | "defaultPaymentMode"
+    > = {},
+  ): Promise<KiteSettleClient> {
+    return KiteSettleClient.create({
+      agentId,
+      sessionIndex,
+      sessionSeed,
+      ...options,
+    });
+  }
+
+  /**
+   * Create a client from the EOA credential stored in the local vars store
    * (set by `kite init` / `kite vars set PRIVATE_KEY`).
    */
   static async fromStoredCredential(
-    options: Omit<KiteSettleClientOptions, "credential"> = {},
+    options: Omit<KiteSettleClientOptions, "credential" | "agentId"> = {},
   ): Promise<KiteSettleClient> {
     const credential = getVar("PRIVATE_KEY");
     if (!credential) {
-      throw new Error(
-        "No credential found in vars store. Run: npx kite init",
-      );
+      throw new Error("No credential found in vars store. Run: npx kite init");
     }
     return KiteSettleClient.create({ ...options, credential });
   }
@@ -267,18 +372,22 @@ export class KiteSettleClient {
 
   // ── Identity ───────────────────────────────────────────────────
 
-  /** Derive the agent account at a given index without changing the client. */
-  async deriveAgent(
-    agentIndex: number,
-  ): Promise<{ address: string; privateKey: `0x${string}` }> {
-    return deriveAgentAccount(this.eoaClient.getPrivateKey(), agentIndex);
-  }
-
-  /** Derive a session key at a given agent + session index. */
+  /**
+   * Derive a session key from the EOA credential.
+   * This is an EOA-only operation used during onboarding to generate a key
+   * before registering it on-chain. Agents (who have no EOA credential)
+   * should never call this — they load the pre-created session from vars.
+   */
   async deriveSession(
     agentIndex: number,
     sessionIndex: number,
   ): Promise<{ address: string; privateKey: `0x${string}` }> {
+    if (this.sessionKeyPrivateKey !== undefined) {
+      throw new Error(
+        "deriveSession() is an EOA-only operation. " +
+          "In agent mode, session keys are loaded from the vars store.",
+      );
+    }
     return deriveSessionAccount(
       this.eoaClient.getPrivateKey(),
       agentIndex,
@@ -311,11 +420,15 @@ export class KiteSettleClient {
   /**
    * Deposited (KiteAAWallet) balance for the EOA.
    * These are the funds used for x402 (perCall) payments.
+   * Always queries against the EOA address regardless of which key is signing.
    */
   async getDepositedBalance(token?: string): Promise<bigint> {
-    return this.eoaClient.getDepositedTokenBalance(
-      token ?? this.config.token,
-    );
+    return this.eoaClient
+      .getContractService()
+      .getDepositedTokenBalance(
+        (token ?? this.config.token) as `0x${string}`,
+        this.eoaAddress as `0x${string}`,
+      );
   }
 
   /**
@@ -368,7 +481,9 @@ export class KiteSettleClient {
     agentIndex = 0,
     walletContract?: string,
   ): Promise<{ txHash: string; agentId: bigint }> {
-    return this.eoaClient.getContractService().registerAgentOnRegistry(metadata);
+    return this.eoaClient
+      .getContractService()
+      .registerAgentOnRegistry(metadata);
   }
 
   /** Register a session key for an agent on KiteAAWallet. */
@@ -378,17 +493,25 @@ export class KiteSettleClient {
     sessionIndex: number,
     validUntil: number,
   ): Promise<string> {
-    return this.eoaClient.getContractService().addSessionKeyRule(
-      agentId,
-      sessionKey,
-      BigInt(0), BigInt(0), BigInt(validUntil), [],
-    );
+    return this.eoaClient
+      .getContractService()
+      .addSessionKeyRule(
+        agentId,
+        sessionKey,
+        BigInt(0),
+        BigInt(0),
+        BigInt(validUntil),
+        [],
+      );
   }
 
   /** Resolve an agent by its on-chain ID → owner address. */
   async resolveAgent(agentId: bigint | string) {
     const id = typeof agentId === "string" ? BigInt(agentId) : agentId;
-    return this.eoaClient.getContractService().getAgentOwner(id).catch(() => null);
+    return this.eoaClient
+      .getContractService()
+      .getAgentOwner(id)
+      .catch(() => null);
   }
 
   /** Look up an agent by its on-chain ID (agentId = bigint tokenId). */
@@ -513,10 +636,7 @@ export class KiteSettleClient {
   }
 
   /** End a batch payment session. */
-  endBatchSession(
-    sessionId: string,
-    reason?: BatchEndReason,
-  ) {
+  endBatchSession(sessionId: string, reason?: BatchEndReason) {
     return this.paymentClient.endBatchSession(sessionId, reason);
   }
 
@@ -555,9 +675,10 @@ export class KiteSettleClient {
   }
 
   /** Run only the rule-based tier of the decision engine. */
-  checkPaymentRules(
-    ctx: DecisionContext,
-  ): { decision: Decision; reason?: string } {
+  checkPaymentRules(ctx: DecisionContext): {
+    decision: Decision;
+    reason?: string;
+  } {
     return checkRules(ctx);
   }
 
@@ -673,8 +794,7 @@ export class KiteSettleClient {
     return (
       TOKENS.find(
         (t) =>
-          t.symbol.toLowerCase() === lower ||
-          t.address.toLowerCase() === lower,
+          t.symbol.toLowerCase() === lower || t.address.toLowerCase() === lower,
       ) ?? null
     );
   }

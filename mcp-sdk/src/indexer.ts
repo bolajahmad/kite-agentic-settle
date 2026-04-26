@@ -50,10 +50,9 @@ export interface IndexedSession {
   validUntil: string;
   blockTimestamp: string;
   transactionHash: string;
-  blockedProviders: string[];
-  dailyLimit: string;
+  blockedAgents: string[];
+  maxLimit: string;
   metadataHash: string;
-  sessionIndex: string;
   valueLimit: string;
 }
 
@@ -130,26 +129,26 @@ export async function getAgentById(
 export async function getSessionsByAgent(
   agentId: string,
 ): Promise<IndexedSession[]> {
+  console.log({ agentId });
   const data = await query(
     `
     query($agentId: String!) {
       sessions(
         where: { agent: $agentId }
-        orderBy: sessionIndex
         orderDirection: desc
       ) {
         id
-        blockedProviders
-        dailyLimit
+        blockedAgents
+        maxLimit
         metadataHash
-        sessionIndex
         sessionKey
         valueLimit
+        status
         validUntil
       }
     }
   `,
-    { agentId: agentId.toLowerCase() },
+    { agentId },
   );
   return data.sessions || [];
 }

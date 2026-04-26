@@ -709,13 +709,10 @@ async function runStreamCallsFlow(opts: ChannelFlowOpts) {
 }
 
 export async function callApi(args: string[]) {
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
-
   // Parse all CLI arguments
   let decide = findFlag(args, "--decide") as DecisionMode | undefined;
   const tokenFlag = findFlag(args, "--token");
-  const agentIndex = findFlag(args, "--agent") || "0";
+  const agentIdStr = findFlag(args, "--agent");
   const maxCalls = Number.parseInt(findFlag(args, "--max-calls") || "100", 10);
   const durationSecs = Number.parseInt(
     findFlag(args, "--duration") || "60",
@@ -733,35 +730,54 @@ export async function callApi(args: string[]) {
     | "batch"
     | "stream"
     | "auto";
+  const sessionIndex = Number(findFlag(args, "--session") || "0");
 
   const token = parseToken(tokenFlag || "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
 
-  // Build a KiteSettleClient — it derives EOA, agent, and session keys
-  // deterministically from the stored credential.
-  const sessionIndex = Number(findFlag(args, "--session") || "0");
-  const settle = await KiteSettleClient.create({
-    credential,
-    defaultPaymentMode: (mode === "perCall"
-      ? "perCall"
-      : mode === "stream"
-        ? "channel"
-        : mode) as "perCall" | "channel" | "batch",
-    agentIndex: Number(agentIndex),
-    sessionIndex: mode === "perCall" ? sessionIndex : 0,
-  });
+  const paymentMode =
+    mode === "perCall" ? "perCall" : mode === "stream" ? "channel" : mode;
 
-  const agentAddress = settle.agentAddress ?? settle.eoaAddress;
+  // Build a KiteSettleClient.
+  //
+  // Agent mode (--agent <agentId>): loads the session key pre-created by the
+  // EOA during `kite onboard` from the encrypted vars store. The agent is an
+  // NFT (IdentityRegistry tokenId) — it has no address or private key of its
+  // own. No EOA credential is required.
+  //
+  // EOA mode (no --agent): falls back to PRIVATE_KEY from vars. Only needed
+  // for wallet-management operations (deposit, withdraw, onboard).
+  console.log("Kite client creating...");
+  let settle: KiteSettleClient;
+  if (agentIdStr) {
+    settle = await KiteSettleClient.create({
+      agentId: BigInt(agentIdStr),
+      sessionIndex,
+      defaultPaymentMode: paymentMode,
+    });
+  } else {
+    const credential = getVar("PRIVATE_KEY");
+    if (!credential)
+      throw new Error(
+        "No credential found. Run: npx kite init\n" +
+          "  Or specify an agent: npx kite call --agent <agentId> --url <url>",
+      );
+    settle = await KiteSettleClient.create({
+      credential,
+      defaultPaymentMode: paymentMode,
+    });
+  }
+
   const sessionKeyAddress = settle.sessionKeyAddress;
-  // The underlying payment client (session-key scoped for perCall mode).
+  // The underlying payment client (signed with the session key in agent mode).
   const client = settle.getPaymentClient();
 
-  // Show the KiteAAWallet deposited balance for all modes — funds always
-  // live in the wallet contract, not in the agent/session-key address.
+  // Deposited balance always queried against the EOA address — funds live in
+  // KiteAAWallet under the EOA, not under the session key.
   const balance = await settle.getDepositedBalance(token?.address);
 
   console.log(`  EOA:      ${settle.eoaAddress}`);
-  console.log(`  Agent:    ${agentAddress} (index ${agentIndex})`);
+  if (agentIdStr) console.log(`  Agent ID: ${agentIdStr}`);
   if (sessionKeyAddress) console.log(`  Session:  ${sessionKeyAddress}`);
   console.log(`  Target:   ${url}`);
   console.log(`  Mode:     ${mode}`);
@@ -775,7 +791,7 @@ export async function callApi(args: string[]) {
     console.log(`  Deposit override:   ${depositFlag} ${token?.symbol}`);
   console.log("");
 
-  // Optional overrides for channel deposit sizing (fixes issue #4).
+  // Optional overrides for channel deposit sizing.
   const ratePerCallOverride = ratePerCallFlag
     ? parseUnits(ratePerCallFlag, tokenDecimals)
     : undefined;
@@ -784,25 +800,34 @@ export async function callApi(args: string[]) {
     : undefined;
 
   // Resolve on-chain session rules to power the decision engine.
-  const resolvedOwner = await settle.resolveAgent(BigInt(agentAddress));
-  const agentId = resolvedOwner ?? agentAddress;
-  const sessions = await getSessionsByAgent(agentId);
+  // Gracefully fall back to conservative defaults if the subgraph has no data.
+  const sessions = agentIdStr
+    ? await getSessionsByAgent(agentIdStr).catch(() => [])
+    : [];
 
-  const defaultRule: SessionRules = {
-    maxPerCall: formatUnits(
-      BigInt(sessions[0].valueLimit),
-      token?.decimals ?? 18,
-    ).toString(),
-    maxPerSession: formatUnits(
-      BigInt(sessions[0].valueLimit),
-      token?.decimals ?? 18,
-    ).toString(),
-    blockedProviders: sessions[0].blockedProviders,
-    requireApprovalAbove: formatUnits(
-      BigInt(sessions[0].dailyLimit),
-      token?.decimals ?? 18,
-    ).toString(),
-  };
+  const defaultRule: SessionRules =
+    sessions.length > 0
+      ? {
+          maxPerCall: formatUnits(
+            BigInt(sessions[0].valueLimit),
+            token?.decimals ?? 18,
+          ).toString(),
+          maxPerSession: formatUnits(
+            BigInt(sessions[0].maxLimit ?? sessions[0].valueLimit),
+            token?.decimals ?? 18,
+          ).toString(),
+          blockedAgents: sessions[0].blockedAgents ?? [],
+          requireApprovalAbove: formatUnits(
+            BigInt(sessions[0].maxLimit ?? sessions[0].valueLimit),
+            token?.decimals ?? 18,
+          ).toString(),
+        }
+      : {
+          maxPerCall: "10",
+          maxPerSession: "100",
+          blockedAgents: [],
+          requireApprovalAbove: "50",
+        };
 
   let lastPaymentResult: PaymentResult | undefined;
   const onPayment = (result: PaymentResult) => {
@@ -845,7 +870,6 @@ export async function callApi(args: string[]) {
       paymentMode: "perCall" as const,
       onPayment,
       sessionKey: sessionKeyAddress,
-      walletAddress: agentAddress,
     };
 
     if (decide === "cli") {
@@ -857,9 +881,10 @@ export async function callApi(args: string[]) {
         const ctx = {
           request: req,
           rules: defaultRule,
+          // Use the EOA deposited balance, not the session-key wallet balance.
           balance: Number(
             formatUnits(
-              await client.getTokenBalance(token?.address),
+              await settle.getDepositedBalance(token?.address),
               tokenDecimals,
             ),
           ),

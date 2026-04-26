@@ -277,36 +277,30 @@ async function cmdWhoami(args: string[]) {
         `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
       );
     } else {
-      let agentIndex = Number.parseInt(agentIndexStr, 10);
-      if (Number.isNaN(agentIndex) || agentIndex < 0) {
-        die("Invalid --agent-index value. Must be a non-negative integer.");
+      const agentId = Number.parseInt(agentIndexStr, 10);
+      if (Number.isNaN(agentId) || agentId < 0) {
+        die("Invalid --agent value. Must be a non-negative integer (on-chain agentId).");
       }
-      // Derive agent address at the given index
-      const agent = await client.deriveAgent(agentIndex);
 
-      info(`  EOA Address:    ${client.eoaAddress}`);
+      // Agents are NFTs (IdentityRegistry tokenIds) — they have no derived
+      // address. Show the session key info stored during `kite onboard`.
+      const sessionAddr = getVar(`SESSION_${agentId}_0_ADDRESS`);
+      const ownerAddr   = getVar(`AGENT_${agentId}_OWNER`);
+
+      info(`  EOA Address:    ${ownerAddr ?? client.eoaAddress}`);
       info(
         `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
       );
       info("\n");
-      info(`    Agent ${agentIndex}'s Address:  ${agent.address}`);
-
-      // Check agent's on-chain registration status
-      try {
-        const resolved = await client.resolveAgent(agent.address);
-        const agentId = (resolved as any)[0] ?? (resolved as any).agentId;
-        if (agentId && agentId !== zeroAddress) {
-          info(`    Agent ID:       ${agentId}`);
-          info(`    Status:         Registered on-chain`);
-        } else {
-          info(`    Status:         Not registered on-chain`);
-        }
-
-        console.log("");
-      } catch (error: any) {
-        info(`      Status:         Not registered on-chain`);
-        die(error.message);
+      info(`    Agent ID:       ${agentId}  (NFT on IdentityRegistry)`);
+      if (sessionAddr) {
+        info(`    Session Key:    ${sessionAddr}`);
+        info(`    Session Status: Stored (run onboard to renew)`);
+      } else {
+        info(`    Session Key:    Not found — run: npx kite onboard`);
       }
+
+      console.log("");
     }
   } catch (err: any) {
     die(err.message);

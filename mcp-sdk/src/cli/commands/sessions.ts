@@ -33,8 +33,6 @@ async function cmdSessionStart(args: string[]): Promise<void> {
   const client = await buildEoaClient(credential);
   const cs = client.getEoaClient().getContractService();
 
-  // Derive agent key for agentId lookup
-  const agent = await client.deriveAgent(agentIndex);
   const session = await client.deriveSession(agentIndex, sessionIndex);
 
   // agentId in IdentityRegistry = ERC-721 tokenId = agentIndex + 1
@@ -52,7 +50,7 @@ async function cmdSessionStart(args: string[]): Promise<void> {
   console.log("");
   console.log("── Creating Session Key ───────────────────────────────────");
   console.log(`  EOA:             ${client.eoaAddress}`);
-  console.log(`  Agent index:     ${agentIndex}  (agent ID: ${agentId})`);
+  console.log(`  Agent ID:        ${agentId}  (index ${agentIndex})`);
   console.log(`  Session key:     ${session.address}`);
   console.log(`  Value limit:     ${valueLimitStr ?? "1"} per tx`);
   console.log(`  Max spend:       ${dailyLimitStr ?? "10"} lifetime cap`);
@@ -103,8 +101,6 @@ async function cmdSessionList(args: string[]): Promise<void> {
   const client = await buildEoaClient(credential);
   const cs = client.getEoaClient().getContractService();
 
-  const agent = await client.deriveAgent(agentIndex);
-
   // In IdentityRegistry, agentId = ERC-721 tokenId = agentIndex + 1
   const agentTokenId = BigInt(agentIndex + 1);
   const sessionKeys = await cs.getAgentSessionsFromRegistry(agentTokenId);
@@ -112,7 +108,7 @@ async function cmdSessionList(args: string[]): Promise<void> {
   if (sessionKeys.length === 0) {
     console.log("");
     console.log(
-      `  No session keys found for agent ${agent.address} (index ${agentIndex}).`,
+      `  No session keys found for agent ID ${agentTokenId} (index ${agentIndex}).`,
     );
     console.log("  Create one with: npx kite session start");
     return;
@@ -120,9 +116,9 @@ async function cmdSessionList(args: string[]): Promise<void> {
 
   console.log("");
   console.log(
-    `  Session keys for agent ${agent.address} (index ${agentIndex})`,
+    `  Session keys for agent ID ${agentTokenId} (index ${agentIndex})`,
   );
-  console.log(`  Agent ID: ${agentTokenId}`);
+  console.log(`  EOA:      ${client.eoaAddress}`);
   console.log("");
 
   for (const sk of sessionKeys) {
