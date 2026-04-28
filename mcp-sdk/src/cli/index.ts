@@ -20,7 +20,6 @@
  */
 
 import readline from "node:readline";
-import { zeroAddress } from "viem";
 import { KiteSettleClient } from "../kite-settle-client.js";
 import {
   deleteVar,
@@ -77,8 +76,7 @@ export async function prompt(
           return;
         }
 
-        // 🔥 HANDLE NORMAL INPUT + PASTE
-        // Remove any newline chars inside paste
+        // Handle pasted input
         const clean = str.replace(/[\r\n]/g, "");
 
         if (!clean) return;
@@ -86,8 +84,6 @@ export async function prompt(
         // Append full chunk
         value += clean;
 
-        // 🔥 CRITICAL: overwrite what terminal already printed
-        // Move cursor back by length of pasted string
         process.stdout.write("\b".repeat(clean.length));
 
         // Replace with masked output
@@ -123,8 +119,6 @@ function die(msg: string): never {
   console.error(`\n  Error: ${msg}\n`);
   process.exit(1);
 }
-
-// ── Args ───────────────────────────────────────────────────────────
 
 function getCliArgs(): string[] {
   return process.argv.slice(2);
@@ -249,7 +243,7 @@ async function cmdInit() {
   if (!credential) die("Credential cannot be empty");
 
   setVar("PRIVATE_KEY", credential);
-  info(`✓ Stored PRIVATE_KEY in ${getVarsPath()}`);
+  info(`  Stored PRIVATE_KEY in ${getVarsPath()}`);
 
   info("");
   info("Next steps:");
@@ -279,13 +273,15 @@ async function cmdWhoami(args: string[]) {
     } else {
       const agentId = Number.parseInt(agentIndexStr, 10);
       if (Number.isNaN(agentId) || agentId < 0) {
-        die("Invalid --agent value. Must be a non-negative integer (on-chain agentId).");
+        die(
+          "Invalid --agent value. Must be a non-negative integer (on-chain agentId).",
+        );
       }
 
       // Agents are NFTs (IdentityRegistry tokenIds) — they have no derived
       // address. Show the session key info stored during `kite onboard`.
       const sessionAddr = getVar(`SESSION_${agentId}_0_ADDRESS`);
-      const ownerAddr   = getVar(`AGENT_${agentId}_OWNER`);
+      const ownerAddr = getVar(`AGENT_${agentId}_OWNER`);
 
       info(`  EOA Address:    ${ownerAddr ?? client.eoaAddress}`);
       info(
@@ -322,9 +318,18 @@ function showHelp() {
     kite vars path            Show vars file path
 
   Setup:
-    kite init                 Interactive first-time onboarding
-    kite onboard              One-step agent onboarding (register + session key)
+    kite init                 Interactive first-time onboarding (EOA only)
+    kite onboard              One-step agent onboarding (register + session key) (EOA only)
     kite whoami               Show current agent identity
+    kite clean                Delete stored config/credentials (prompts for confirmation)
+    kite clean --agent <id>   Delete data for a specific agent only
+    kite clean --session      Delete all session keys only
+
+  EOA commands (require PRIVATE_KEY — run by the wallet owner):
+    kite init, kite onboard, kite session start|revoke, kite agent register
+
+  Agent commands (use session keys — can run autonomously):
+    kite call, kite balance, kite channel *, kite usage, kite simulate
 
   Commands:
     kite call                 Call a paid API endpoint
@@ -406,6 +411,12 @@ async function main() {
       case "session": {
         const { cmdSessions } = await import("./commands/sessions.js");
         await cmdSessions(args.slice(1));
+        break;
+      }
+
+      case "clean": {
+        const { cmdClean } = await import("./commands/clean.js");
+        await cmdClean(args.slice(1));
         break;
       }
 

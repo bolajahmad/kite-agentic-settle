@@ -13,18 +13,14 @@ import { formatUnits, parseUnits } from "viem";
 import type { ContractService } from "./contracts.js";
 import type { KiteConfig } from "./types.js";
 import { setVar } from "./vars.js";
-import {
-  deriveSessionForAgent,
-  encryptSessionKey,
-  generateSeedPhrase,
-} from "./wallet.js";
+import { deriveSessionForAgent } from "./wallet.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
 export interface OnboardOptions {
   /** EIP-8004 agent URI (IPFS/base64) string. Optional. */
   agentURI?: string;
-  /** Seed phrase for encrypting the session key. Generated if omitted. */
+  /** @deprecated No longer used — session keys are stored in plain text. */
   sessionSeed?: string;
   /** Per-transaction spending limit (human-readable token amount). Default: "1". */
   valueLimit?: string;
@@ -44,9 +40,9 @@ export interface OnboardResult {
   agentId: bigint;
   agentURI?: string;
   sessionKeyAddress: string;
-  /** Encrypted session key blob (store privately; decrypt with sessionSeed). */
+  /** @deprecated Always empty string — encryption removed. */
   encryptedSessionKey: string;
-  /** The seed phrase used for encryption. MUST be stored securely by the user. */
+  /** @deprecated Always empty string — encryption removed. */
   sessionSeed: string;
   txHashes: { step: string; hash: string }[];
   wasAlreadyRegistered: boolean;
@@ -115,12 +111,11 @@ export async function onboardAgent(
   );
   log(`Session key: ${session.address}`);
 
-  // ── Step 4: Encrypt session key ──────────────────────────────────
-  const sessionSeed = options.sessionSeed ?? generateSeedPhrase();
-  const encryptedSessionKey = encryptSessionKey(
-    session.privateKey,
-    sessionSeed,
-  );
+  // ── Step 4: Store session private key (plain) ──────────────────
+  // Encryption was removed — storing the seed alongside the encrypted blob
+  // was equivalent to storing the key in plain text anyway.
+  const encryptedSessionKey = ""; // deprecated field, kept for API compat
+  const sessionSeed = ""; // deprecated field, kept for API compat
 
   // ── Step 5: Register session key rule ───────────────────────────
   const valueLimit = parseUnits(options.valueLimit ?? "1", 18);
@@ -151,7 +146,7 @@ export async function onboardAgent(
     setVar(`AGENT_${agentId}_ID`, agentId.toString());
     if (options.agentURI) setVar(`AGENT_${agentId}_URI`, options.agentURI);
     setVar(`SESSION_${agentId}_${sessionIndex}_ADDRESS`, session.address);
-    setVar(`SESSION_${agentId}_${sessionIndex}_ENCRYPTED`, encryptedSessionKey);
+    setVar(`SESSION_${agentId}_${sessionIndex}_PRIVATE_KEY`, session.privateKey);
   } catch {
     log("Warning: Could not persist credentials to vars.");
   }

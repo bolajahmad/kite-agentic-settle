@@ -21,7 +21,7 @@ async function cmdSessionStart(args: string[]): Promise<void> {
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const agentIndex = Number(
-    findFlag(args, "--agent-index") ?? findFlag(args, "--agent") ?? "0",
+    findFlag(args, "--agent") ?? findFlag(args, "-aid") ?? "0",
   );
   const sessionIndex = Number(findFlag(args, "--session-index") ?? "0");
   const valueLimitStr = findFlag(args, "--value-limit");
@@ -126,9 +126,12 @@ async function cmdSessionList(args: string[]): Promise<void> {
     let sessionValid = false;
 
     try {
-      const [active, , , , , , validUntil] = (await cs.validateSession(sk)) as any;
+      const [active, , , , , , validUntil] = (await cs.validateSession(
+        sk,
+      )) as any;
       sessionData = { active, validUntil: Number(validUntil) };
-      sessionValid = active && sessionData.validUntil > Math.floor(Date.now() / 1000);
+      sessionValid =
+        active && sessionData.validUntil > Math.floor(Date.now() / 1000);
     } catch {
       // partial failure — still show what we can
     }
@@ -142,7 +145,9 @@ async function cmdSessionList(args: string[]): Promise<void> {
       : "Unknown";
     console.log(`  ${sk}  [${statusBadge}]`);
     if (sessionData) {
-      const rule = (await cs.getSessionFromRegistry(sk).catch(() => null)) as any;
+      const rule = (await cs
+        .getSessionFromRegistry(sk)
+        .catch(() => null)) as any;
       if (rule) {
         console.log(
           `    Limits:   ${formatUnits(rule.valueLimit, 18)} per-tx / ${formatUnits(rule.maxValueAllowed, 18)} total`,
@@ -194,21 +199,34 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
   console.log("");
 
   try {
-    const [active, agentId, user, , valueLimit, maxValueAllowed, validUntilBig] =
-      (await cs.validateSession(sessionKey)) as any;
+    const [
+      active,
+      agentId,
+      user,
+      ,
+      valueLimit,
+      maxValueAllowed,
+      validUntilBig,
+    ] = (await cs.validateSession(sessionKey)) as any;
     const rule = (await cs.getSessionFromRegistry(sessionKey)) as any;
 
     const validUntil = Number(validUntilBig);
     const now = Math.floor(Date.now() / 1000);
     const secsRemaining = validUntil - now;
     const sessionValid = active && secsRemaining > 0;
-    const statusLabel = active ? (sessionValid ? "Active" : "Expired") : "Revoked";
+    const statusLabel = active
+      ? sessionValid
+        ? "Active"
+        : "Expired"
+      : "Revoked";
 
     console.log(`  Status:       ${statusLabel}`);
     console.log(`  Owner (EOA):  ${user}`);
     console.log(`  Agent ID:     ${agentId}`);
     console.log(`  Value limit:  ${formatUnits(valueLimit, 18)} per tx`);
-    console.log(`  Max spend:    ${formatUnits(maxValueAllowed, 18)} lifetime cap`);
+    console.log(
+      `  Max spend:    ${formatUnits(maxValueAllowed, 18)} lifetime cap`,
+    );
     console.log(`  Valid until:  ${new Date(validUntil * 1000).toISOString()}`);
     if (secsRemaining > 0) {
       const days = Math.floor(secsRemaining / 86400);
@@ -337,9 +355,9 @@ async function cmdSessionBlock(args: string[]): Promise<void> {
   // new one with the provider in the blockedProviders list.
   throw new Error(
     "Dynamic provider blocking is not supported. " +
-    "Revoke this session and create a new one with the provider blocked:\n" +
-    `  npx kite session revoke --session-key ${sessionKey}\n` +
-    `  npx kite session start --block ${provider}`,
+      "Revoke this session and create a new one with the provider blocked:\n" +
+      `  npx kite session revoke --session-key ${sessionKey}\n` +
+      `  npx kite session start --block ${provider}`,
   );
 }
 
@@ -386,8 +404,8 @@ async function cmdSessionUnblock(args: string[]): Promise<void> {
   // without that provider in the blockedProviders list.
   throw new Error(
     "Dynamic provider unblocking is not supported. " +
-    "Revoke this session and create a new one without the blocked provider:\n" +
-    `  npx kite session revoke --session-key ${sessionKey}`,
+      "Revoke this session and create a new one without the blocked provider:\n" +
+      `  npx kite session revoke --session-key ${sessionKey}`,
   );
 }
 

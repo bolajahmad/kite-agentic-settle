@@ -40,12 +40,14 @@ import type {
   IndexedSession,
 } from "./indexer.js";
 import {
+  getActiveSessionsForAgent,
   getAgentById,
   getAgentsByOwner,
   getPaymentsByAgent,
   getRecentPayments,
   getSessionKeyAdded,
   getSessionsByAgent,
+  getUserAgentsWithActiveSessions,
 } from "./indexer.js";
 import type { OnboardOptions, OnboardResult } from "./onboard.js";
 import type {
@@ -69,7 +71,7 @@ import {
   resolveVar,
   setVar,
 } from "./vars.js";
-import { decryptSessionKey, deriveSessionAccount } from "./wallet.js";
+import { deriveSessionAccount, deriveSessionForAgent } from "./wallet.js";
 
 // ── Re-export supporting types so consumers need only this module ──
 
@@ -213,13 +215,12 @@ export class KiteSettleClient {
 
     // ── Agent mode ─────────────────────────────────────────────────────
     if (agentId !== undefined) {
-      console.log("Creating from session");
       return KiteSettleClient._createFromStoredSession(
         BigInt(agentId),
         sessionIndex,
+        defaultPaymentMode,
         sessionSeed,
         config,
-        defaultPaymentMode,
       );
     }
 
@@ -237,6 +238,17 @@ export class KiteSettleClient {
       config,
       defaultPaymentMode: "auto",
     });
+    const agents = await getUserAgentsWithActiveSessions(eoaClient.address);
+    const getAgent = agents?.agents?.[0];
+    if (getAgent) {
+      return KiteSettleClient._createFromStoredSession(
+        BigInt(getAgent.agentId),
+        sessionIndex,
+        defaultPaymentMode,
+        sessionSeed,
+        config,
+      );
+    }
 
     return new KiteSettleClient(
       eoaClient,
@@ -260,66 +272,81 @@ export class KiteSettleClient {
   private static async _createFromStoredSession(
     agentId: bigint,
     sessionIndex: number,
-    sessionSeed: string | undefined,
-    config: Partial<KiteConfig> | undefined,
     defaultPaymentMode: KiteClientOptions["defaultPaymentMode"],
+    _sessionSeed?: string | undefined,
+    config?: Partial<KiteConfig> | undefined,
   ): Promise<KiteSettleClient> {
-    const addrVar = `SESSION_${agentId}_${sessionIndex}_ADDRESS`;
-    const encVar = `SESSION_${agentId}_${sessionIndex}_ENCRYPTED`;
-    const ownerVar = `AGENT_${agentId}_OWNER`;
+    console.log("Creting from session!");
+    const pkVar = `SESSION_${agentId}_${sessionIndex}_PRIVATE_KEY`;
+    const sessionKeys = await getActiveSessionsForAgent(`0x${agentId}`);
+    const agent = await getAgentById(`0x${agentId}`);
 
-    console.log({ addrVar });
-
-    const sessionKeyAddress = getVar(addrVar);
-    if (!sessionKeyAddress) {
+    const session = sessionKeys[0];
+    if (!session) {
       throw new Error(
-        `Session key not found for agentId=${agentId}, sessionIndex=${sessionIndex}.\n` +
-          `  Expected var: ${addrVar}\n` +
-          `  The session does not exist or has been revoked.\n` +
-          `  Run: npx kite onboard to create a session key for this agent.`,
+        `No active session key found for agentId=${agentId}.\n` +
+          `  Run: npx kite onboard  to register an agent and create a session key.`,
       );
     }
 
-    const encryptedBlob = getVar(encVar);
-    if (!encryptedBlob) {
-      throw new Error(
-        `Encrypted session key blob not found for agentId=${agentId}, sessionIndex=${sessionIndex}.\n` +
-          `  Expected var: ${encVar}\n` +
-          `  Run: npx kite onboard to recreate the session key.`,
-      );
+    // ── Resolve session private key (plain — no encryption) ──────────
+    let sessionPrivateKey: `0x${string}` | undefined = getVar(pkVar) as
+      | `0x${string}`
+      | undefined;
+
+    if (!sessionPrivateKey) {
+      // Fallback: re-derive deterministically from a stored EOA private key.
+      // Useful for agents onboarded before the plain-key migration, or when
+      // the session private key var was manually deleted.
+      const eoaKeyCandidates = [
+        getVar("PRIVATE_KEY"),
+        getVar("DEPLOYER_KEY"),
+      ].filter(Boolean) as string[];
+
+      outer: for (const eoaKeyHex of eoaKeyCandidates) {
+        const eoaKeyBytes = new Uint8Array(
+          Buffer.from(eoaKeyHex.replace(/^0x/, ""), "hex"),
+        );
+        for (const attempt of [
+          () => deriveSessionForAgent(eoaKeyBytes, agentId, sessionIndex),
+          () =>
+            deriveSessionAccount(eoaKeyBytes, Number(agentId), sessionIndex),
+        ]) {
+          const derived = await attempt();
+          if (
+            derived.address.toLowerCase() === session.sessionKey.toLowerCase()
+          ) {
+            sessionPrivateKey = derived.privateKey;
+            // Persist for next time so derivation isn't needed again
+            setVar(pkVar, derived.privateKey);
+            break outer;
+          }
+        }
+      }
     }
 
-    const seed = "54041552";
-    if (!seed) {
+    if (!sessionPrivateKey) {
       throw new Error(
-        `No session decryption seed available for agentId=${agentId}.\n` +
-          `  Provide the 'sessionSeed' option, or store the decryption password:\n` +
-          `    npx kite vars set AGENT_SEED`,
+        `Session private key not found for agentId=${agentId}.\n` +
+          `  Expected var: ${pkVar}\n` +
+          `  Run: npx kite onboard  to recreate the session key.`,
       );
     }
-
-    const sessionPrivateKey = decryptSessionKey(
-      encryptedBlob,
-      seed,
-    ) as `0x${string}`;
-
-    // EOA address: stored by `kite onboard` as AGENT_{agentId}_OWNER.
-    // Used for deposited-balance queries — never for signing.
-    const eoaAddress = getVar(ownerVar) ?? sessionKeyAddress;
 
     const paymentClient = await KitePaymentClient.create({
       seedPhrase: sessionPrivateKey,
       config,
+      agentId: agentId.toString(),
       defaultPaymentMode,
-      sessionKey: sessionKeyAddress,
-      eoaAddress,
+      sessionKey: session.sessionKey,
+      eoaAddress: agent?.owner.id,
     });
 
     return new KiteSettleClient(
       paymentClient,
       paymentClient,
-      eoaAddress,
-      sessionKeyAddress,
+      agent?.owner.address || "",
+      session.sessionKey,
       sessionPrivateKey,
     );
   }

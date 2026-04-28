@@ -34,13 +34,12 @@ async function query(
 export interface IndexedAgent {
   id: string;
   agentId: string;
-  agentAddress: string;
-  walletContract: string;
-  ownerAddress: string;
+  wallet: string;
+  owner: IndexedUserRegistered;
   metadata: string;
-  blockNumber: string;
-  blockTimestamp: string;
-  transactionHash: string;
+  createdAt: string;
+  updatedAt: string;
+  active: boolean;
 }
 
 export interface IndexedSession {
@@ -68,10 +67,14 @@ export interface IndexedPayment {
 }
 
 export interface IndexedUserRegistered {
+  address: string;
+  wallet: string;
   id: string;
-  user: string;
   blockTimestamp: string;
   transactionHash: string;
+  agents: IndexedAgent[];
+  sessions: IndexedSession[];
+  blockedProviders: string[];
 }
 
 // ── Queries ────────────────────────────────────────────────────────
@@ -102,28 +105,33 @@ export async function getAgentsByOwner(owner: string): Promise<IndexedAgent[]> {
   return data.agentRegistereds || [];
 }
 
-export async function getAgentById(
-  agentId: string,
-): Promise<IndexedAgent | null> {
+export async function getAgentById(id: string): Promise<IndexedAgent | null> {
   const data = await query(
     `
-    query($agentId: Bytes!) {
-      agentRegistereds(where: { agentId: $agentId }, first: 1) {
+    query($id: Bytes!) {
+      agent(id: $id) {
         id
         agentId
-        agentAddress
-        walletContract
-        ownerAddress
+        active
+        wallet
+        owner {
+          id
+          address
+          blockedProviders
+        }
+        sessions {
+          sessionKey
+          id
+        }
         metadata
-        blockNumber
-        blockTimestamp
-        transactionHash
+        createdAt
+        updatedAt
       }
     }
   `,
-    { agentId },
+    { id },
   );
-  return data.agentRegistereds?.[0] || null;
+  return data.agent || null;
 }
 
 export async function getSessionsByAgent(
@@ -229,4 +237,61 @@ export async function getSessionKeyAdded(
     { sessionKey: sessionKey.toLowerCase() },
   );
   return data.sessionKeyAddeds?.[0] || null;
+}
+
+export async function getActiveSessionsForAgent(
+  agentId: string,
+): Promise<IndexedSession[]> {
+  console.log({ agentId });
+  const data = await query(
+    `
+    query($agentId: String!) {
+      sessions(
+        where: { agent: $agentId, status: "ACTIVE" }
+        orderDirection: desc
+      ) {
+        id
+        blockedAgents
+        maxLimit
+        metadataHash
+        sessionKey
+        valueLimit
+        status
+        validUntil
+        agent {
+          agentId
+          metadata
+          id
+        }
+      }
+    }
+  `,
+    { agentId },
+  );
+  return data.sessions || [];
+}
+
+export async function getUserAgentsWithActiveSessions(
+  userId: string,
+): Promise<IndexedUserRegistered | null> {
+  const data = await query(
+    `
+    query($userId: String!) {
+      user(id: $userId) {
+        address
+        agents(where: { sessions_: { status: "ACTIVE" } }) {
+          id
+          metadata
+          sessions {
+            sessionKey
+            status
+          }
+        }
+        wallet
+      }
+    }
+  `,
+    { userId: userId.toLowerCase() },
+  );
+  return data.user || null;
 }

@@ -88,6 +88,31 @@ export function getKiteDir(): string {
   return KITE_DIR;
 }
 
+/** Delete all stored variables. Returns the number of keys deleted. */
+export function clearAllVars(): number {
+  const vars = load();
+  const count = Object.keys(vars).length;
+  save({});
+  return count;
+}
+
+/**
+ * Delete all variables whose keys match a predicate.
+ * Returns the list of deleted keys.
+ */
+export function clearVarsWhere(predicate: (key: string) => boolean): string[] {
+  const vars = load();
+  const deleted: string[] = [];
+  for (const key of Object.keys(vars)) {
+    if (predicate(key)) {
+      deleted.push(key);
+      delete vars[key];
+    }
+  }
+  save(vars);
+  return deleted;
+}
+
 /**
  * Resolve a value that may reference a stored variable.
  *

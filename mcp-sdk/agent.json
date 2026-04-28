@@ -1,7 +1,7 @@
 {
   "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
-  "name": "Kings Agent",
-  "description": "Makes money like your majesty!",
+  "name": "All Knowing Agent",
+  "description": "My Claude Desktop AI Agent",
   "image": "",
   "services": [
     {

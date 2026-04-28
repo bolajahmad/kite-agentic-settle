@@ -8,9 +8,9 @@ dataSources:
     name: IdentityRegistry
     network: kite-ai-testnet
     source:
-      address: "0xc2a94C26987A0c480d0da82f2cB6675AE0fc50fb"
+      address: "0x46A6cbc0Fd15936F4F67aABBc554f4CAf80281F9"
       abi: IdentityRegistry
-      startBlock: 21038800
+      startBlock: 21096127
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -42,9 +42,9 @@ dataSources:
     name: KiteAAWallet
     network: kite-ai-testnet
     source:
-      address: "0x0DB3Ad9b0182BdBB8fa8B32C609946D0C05079d8"
+      address: "0xBfdbA4E11De8B3b82F910Dd3AE8e517Ce60b0bB2"
       abi: KiteAAWallet
-      startBlock: 21038800
+      startBlock: 21096127
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -81,9 +81,9 @@ dataSources:
     name: PaymentChannel
     network: kite-ai-testnet
     source:
-      address: "0x96e213Ed967402174C8c9180eAD2c219Ee419053"
+      address: "0x4791Ea0134eA66b40371A6Daf22d43e02bbB39f8"
       abi: PaymentChannel
-      startBlock: 21038800
+      startBlock: 21096127
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9

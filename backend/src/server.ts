@@ -1,17 +1,26 @@
-import "dotenv/config";
-import express from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
-import agentRoutes from "./routes/agent";
-import serviceRoutes from "./routes/service";
-import paymentRoutes from "./routes/payment";
-import walletRoutes from "./routes/wallet";
-import registryRoutes from "./routes/registry";
-import channelRoutes from "./routes/channel";
-import dataRoutes from "./routes/data";
-import streamRoutes from "./routes/channel-data.js";
+import "dotenv/config";
+import express from "express";
 import { errorHandler } from "./middlewares/error-handler";
-import { isContractsConfigured, startChannelWatcher } from "./services/contract-service";
+import agentRoutes from "./routes/agent";
+import channelRoutes from "./routes/channel";
+import streamRoutes from "./routes/channel-data.js";
+import dataRoutes from "./routes/data";
+import paymentRoutes from "./routes/payment";
+import registryRoutes from "./routes/registry";
+import serviceRoutes from "./routes/service";
+import toolsRoutes from "./routes/tools.js";
+import walletRoutes from "./routes/wallet";
+import {
+  isContractsConfigured,
+  startChannelWatcher,
+} from "./services/contract-service";
+import {
+  handleMcp,
+  handleMcpMessage,
+  handleMcpSse,
+} from "./services/mcp-server.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -52,6 +61,16 @@ app.use("/api/data", dataRoutes);
 // channel metadata; subsequent calls carry X-Channel-Id and accumulate cost
 // via provider-signed receipts that anchor to the PaymentChannel contract.
 app.use("/api/stream", streamRoutes);
+
+// ─── MCP + Function-calling + HTTP proxy tool API ─────────────────────
+// Three-fold AI agent integration surface:
+//   1. MCP SSE          →  GET  /mcp/sse   +  POST /mcp/messages
+//   2. Schema endpoints →  GET  /api/tools/schema/{openai,anthropic,langchain}
+//   3. HTTP proxies     →  POST /api/tools/invoke  +  per-tool REST routes
+app.use("/api/tools", toolsRoutes);
+app.get("/mcp/sse", handleMcpSse);
+app.post("/mcp/messages", handleMcpMessage);
+app.post("/mcp", handleMcp);
 
 app.use(errorHandler);
 

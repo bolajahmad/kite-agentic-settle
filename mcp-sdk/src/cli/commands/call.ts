@@ -747,26 +747,19 @@ export async function callApi(args: string[]) {
   //
   // EOA mode (no --agent): falls back to PRIVATE_KEY from vars. Only needed
   // for wallet-management operations (deposit, withdraw, onboard).
-  console.log("Kite client creating...");
   let settle: KiteSettleClient;
-  if (agentIdStr) {
-    settle = await KiteSettleClient.create({
-      agentId: BigInt(agentIdStr),
-      sessionIndex,
-      defaultPaymentMode: paymentMode,
-    });
-  } else {
-    const credential = getVar("PRIVATE_KEY");
-    if (!credential)
-      throw new Error(
-        "No credential found. Run: npx kite init\n" +
-          "  Or specify an agent: npx kite call --agent <agentId> --url <url>",
-      );
-    settle = await KiteSettleClient.create({
-      credential,
-      defaultPaymentMode: paymentMode,
-    });
-  }
+  const credential = getVar("PRIVATE_KEY");
+  if (!credential)
+    throw new Error(
+      "No credential found. Run: npx kite init\n" +
+        "  Or specify an agent: npx kite call --agent <agentId> --url <url>",
+    );
+  settle = await KiteSettleClient.create({
+    agentId: agentIdStr ? BigInt(agentIdStr) : undefined,
+    sessionIndex,
+    credential,
+    defaultPaymentMode: paymentMode,
+  });
 
   const sessionKeyAddress = settle.sessionKeyAddress;
   // The underlying payment client (signed with the session key in agent mode).

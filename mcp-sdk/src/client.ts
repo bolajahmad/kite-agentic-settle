@@ -109,7 +109,7 @@ export class KitePaymentClient {
     );
     const batchManager = new BatchManager();
     const usage = new UsageTracker();
-    const agentId = options.agentId || address;
+    const agentId = options.agentId || "";
 
     const interceptor = new PaymentInterceptor(
       channelManager,
