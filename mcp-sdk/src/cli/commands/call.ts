@@ -14,7 +14,7 @@ import {
 import { getSessionsByAgent } from "../../indexer.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { ChannelStatus, PaymentRequest, PaymentResult } from "../../types.js";
-import { parseToken } from "../../utils/index.js";
+import { resolveTokenMetadata, type TokenMetadata } from "../../utils/index.js";
 import { getVar } from "../../vars.js";
 import { findFlag, prompt } from "../index.js";
 
@@ -35,7 +35,7 @@ interface PayOffer {
 interface ChannelFlowOpts {
   client: KitePaymentClient;
   url: string;
-  token: ReturnType<typeof parseToken>;
+  token: TokenMetadata | null;
   decide: DecisionMode | undefined;
   defaultRules: SessionRules;
   onPayment: (r: PaymentResult) => void;
@@ -732,7 +732,7 @@ export async function callApi(args: string[]) {
     | "auto";
   const sessionIndex = Number(findFlag(args, "--session") || "0");
 
-  const token = parseToken(tokenFlag || "DmUSDT");
+  const token = await resolveTokenMetadata(tokenFlag || "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
 
   const paymentMode =

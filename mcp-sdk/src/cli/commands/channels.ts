@@ -17,7 +17,7 @@ import {
 } from "../../channel-store.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { ChannelStatus } from "../../types.js";
-import { parseToken } from "../../utils/index.js";
+import { resolveTokenMetadata } from "../../utils/index.js";
 import { getVar } from "../../vars.js";
 import { findFlag, prompt } from "../index.js";
 
@@ -72,7 +72,7 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   const ratePerCallFlag = findFlag(args, "--rate-per-call");
   const tokenFlag = findFlag(args, "--token");
 
-  const token = parseToken(tokenFlag ?? "DmUSDT");
+  const token = await resolveTokenMetadata(tokenFlag ?? "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
 
   const { client, eoaAddress } = await buildAgentClient(

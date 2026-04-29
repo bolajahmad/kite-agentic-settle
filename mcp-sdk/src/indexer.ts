@@ -295,3 +295,119 @@ export async function getUserAgentsWithActiveSessions(
   );
   return data.user || null;
 }
+
+// ── Rich Payment queries (uses the Payment entity with full relations) ──────
+
+const PAYMENT_FULL_FRAGMENT = `
+  id
+  type
+  amount
+  token
+  recipient
+  timestamp
+  txHash
+  nonce
+  change
+  session { id sessionKey }
+  agent { agentId }
+  channel { id channelId }
+`;
+
+/** Richer payment record returned by the payments entity. */
+export interface IndexedPaymentFull {
+  id: string;
+  /** "PerCall" | "BatchCall" | "BatchTime" */
+  type: string;
+  amount: string;
+  token: string;
+  recipient: string;
+  timestamp: string;
+  txHash: string;
+  nonce?: string;
+  change?: string;
+  session: { id: string; sessionKey: string };
+  agent: { agentId: string };
+  channel?: { id: string; channelId: string } | null;
+}
+
+/**
+ * All payments made by a given agent (by agent entity ID, e.g. "0x01" for agentId=1).
+ * Use `BigInt(numericId).toString(16)` prefixed with "0x" to form the entity ID.
+ */
+export async function getPaymentsByAgentFull(
+  agentEntityId: string,
+  limit: number = 20,
+  offset: number = 0,
+): Promise<IndexedPaymentFull[]> {
+  const data = await query(
+    `
+    query($agentId: String!, $first: Int!, $skip: Int!) {
+      payments(
+        where: { agent: $agentId }
+        orderBy: timestamp
+        orderDirection: desc
+        first: $first
+        skip: $skip
+      ) {
+        ${PAYMENT_FULL_FRAGMENT}
+      }
+    }
+  `,
+    { agentId: agentEntityId.toLowerCase(), first: limit, skip: offset },
+  );
+  return data.payments || [];
+}
+
+/**
+ * All payments for a given session (by session entity ID = sessionKey address hex).
+ */
+export async function getPaymentsBySession(
+  sessionKey: string,
+  limit: number = 20,
+  offset: number = 0,
+): Promise<IndexedPaymentFull[]> {
+  const data = await query(
+    `
+    query($sessionId: String!, $first: Int!, $skip: Int!) {
+      payments(
+        where: { session: $sessionId }
+        orderBy: timestamp
+        orderDirection: desc
+        first: $first
+        skip: $skip
+      ) {
+        ${PAYMENT_FULL_FRAGMENT}
+      }
+    }
+  `,
+    { sessionId: sessionKey.toLowerCase(), first: limit, skip: offset },
+  );
+  return data.payments || [];
+}
+
+/**
+ * All payments made by a given owner/user (by EOA address, lowercase).
+ */
+export async function getPaymentsByOwnerFull(
+  ownerAddress: string,
+  limit: number = 20,
+  offset: number = 0,
+): Promise<IndexedPaymentFull[]> {
+  const data = await query(
+    `
+    query($userId: String!, $first: Int!, $skip: Int!) {
+      payments(
+        where: { user: $userId }
+        orderBy: timestamp
+        orderDirection: desc
+        first: $first
+        skip: $skip
+      ) {
+        ${PAYMENT_FULL_FRAGMENT}
+      }
+    }
+  `,
+    { userId: ownerAddress.toLowerCase(), first: limit, skip: offset },
+  );
+  return data.payments || [];
+}

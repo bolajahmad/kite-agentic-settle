@@ -3,72 +3,75 @@
 export { KiteSettleClient } from "./kite-settle-client.js";
 export type { KiteSettleClientOptions } from "./kite-settle-client.js";
 
-// ── Lower-level building blocks (advanced use) ─────────────────────
-export { KitePaymentClient } from "./client.js";
-export type { KiteClientOptions } from "./client.js";
-
-export { ContractService } from "./contracts.js";
-export { ChannelManager } from "./channel.js";
-export { BatchManager } from "./batch.js";
-export type { BatchLimits, BatchEndReason } from "./batch.js";
-export { PaymentInterceptor } from "./interceptor.js";
-export { UsageTracker } from "./usage.js";
+export type { BatchEndReason, BatchLimits } from "./batch.js";
 
 export {
+  computeReceiptHash,
+  createSignedReceipt,
+  RECEIPT_DOMAIN,
+  RECEIPT_TYPES,
+  signReceipt,
+  validateReceipt,
+  verifyReceipt,
+} from "./receipt.js";
+export {
   createKiteWallet,
+  deriveAgentAccount,
+  deriveSessionAccount,
   generateSeedPhrase,
   isPrivateKey,
   isSeedPhrase,
-  deriveAgentAccount,
-  deriveSessionAccount,
 } from "./wallet.js";
-export { computeReceiptHash, signReceipt, createSignedReceipt, verifyReceipt, validateReceipt, RECEIPT_DOMAIN, RECEIPT_TYPES } from "./receipt.js";
-export { TOOLS, handleTool } from "./tools.js";
-export type { McpToolDefinition } from "./tools.js";
 
 export { KITE_TESTNET } from "./config.js";
-export { decide, checkRules, checkCostModel, askLLM } from "./decide.js";
-export type { Decision, DecisionMode, DecisionContext, DecisionResult, SessionRules } from "./decide.js";
+export { askLLM, checkCostModel, checkRules, decide } from "./decide.js";
+export type {
+  Decision,
+  DecisionContext,
+  DecisionMode,
+  DecisionResult,
+  SessionRules,
+} from "./decide.js";
 
 export { onboardAgent } from "./onboard.js";
 export type { OnboardOptions, OnboardResult } from "./onboard.js";
 
 export {
-  getAgentsByOwner,
   getAgentById,
-  getSessionsByAgent,
+  getAgentsByOwner,
   getPaymentsByAgent,
   getRecentPayments,
   getSessionKeyAdded,
+  getSessionsByAgent,
 } from "./indexer.js";
 
 export {
-  getVar,
-  setVar,
-  deleteVar,
-  listVars,
-  hasVar,
-  getVarsPath,
-  getKiteDir,
-  resolveVar,
-} from "./vars.js";
-export {
-  paymentChannelAbi,
   agentRegistryAbi,
-  kiteAAWalletAbi,
-  walletFactoryAbi,
   erc20Abi,
+  kiteAAWalletAbi,
+  paymentChannelAbi,
+  walletFactoryAbi,
 } from "./abis.js";
+export {
+  deleteVar,
+  getKiteDir,
+  getVar,
+  getVarsPath,
+  hasVar,
+  listVars,
+  resolveVar,
+  setVar,
+} from "./vars.js";
 
-export type {
-  KiteConfig,
-  ChannelConfig,
-  Receipt,
-  BatchSession,
-  ChannelState,
-  UsageLog,
-  PaymentResult,
-  PaymentRequest,
-  InterceptorOptions,
-} from "./types.js";
 export { ChannelStatus, PaymentMode } from "./types.js";
+export type {
+  BatchSession,
+  ChannelConfig,
+  ChannelState,
+  InterceptorOptions,
+  KiteConfig,
+  PaymentRequest,
+  PaymentResult,
+  Receipt,
+  UsageLog,
+} from "./types.js";

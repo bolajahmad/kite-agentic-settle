@@ -137,11 +137,18 @@ export interface KiteSettleClientOptions {
 // ── KiteSettleClient ───────────────────────────────────────────────
 
 export class KiteSettleClient {
-  /** EOA-level payment client (used for wallet ops and deriving keys). */
-  private readonly eoaClient: KitePaymentClient;
+  /**
+   * EOA-level payment client (used for wallet ops and deriving keys).
+   * Null in agent-only mode (session key loaded from vars, no EOA key available)
+   * and in read-only mode (no credential supplied).
+   */
+  private readonly eoaClient: KitePaymentClient | null;
 
-  /** Active payment client (session key for x402, agent key for channels). */
-  private readonly paymentClient: KitePaymentClient;
+  /**
+   * Active payment client (session key for x402, agent key for channels).
+   * Null only in read-only mode — subgraph / static methods still work.
+   */
+  private readonly paymentClient: KitePaymentClient | null;
 
   /** Full network config in use. */
   readonly config: KiteConfig;
@@ -171,19 +178,52 @@ export class KiteSettleClient {
   readonly sessionKeyPrivateKey: `0x${string}` | undefined;
 
   private constructor(
-    eoaClient: KitePaymentClient,
-    paymentClient: KitePaymentClient,
+    config: KiteConfig,
+    eoaClient: KitePaymentClient | null,
+    paymentClient: KitePaymentClient | null,
     eoaAddress: string,
     sessionKeyAddress: string | undefined,
     sessionKeyPrivateKey: `0x${string}` | undefined,
   ) {
+    this.config = config;
     this.eoaClient = eoaClient;
     this.paymentClient = paymentClient;
-    this.config = eoaClient.config;
     this.eoaAddress = eoaAddress;
     this.address = sessionKeyAddress ?? eoaAddress;
     this.sessionKeyAddress = sessionKeyAddress;
     this.sessionKeyPrivateKey = sessionKeyPrivateKey;
+  }
+
+  // ── Private guards ─────────────────────────────────────────────
+
+  /**
+   * Returns the EOA-level client, or throws if unavailable.
+   * Required for write operations that must be signed by the wallet owner:
+   * deposit, withdraw, onboard, registerAgent, registerSessionKey, updateAgentURI.
+   */
+  private requireEoaClient(): KitePaymentClient {
+    if (!this.eoaClient) {
+      throw new Error(
+        "This operation requires an EOA credential (wallet owner key).\n" +
+          "  Run: npx kite init  to store your seed phrase or private key.",
+      );
+    }
+    return this.eoaClient;
+  }
+
+  /**
+   * Returns the active payment client (session key or EOA), or throws if
+   * none is available (read-only mode). Required for any on-chain call or
+   * signed payment.
+   */
+  private requirePaymentClient(): KitePaymentClient {
+    if (!this.paymentClient) {
+      throw new Error(
+        "This operation requires a wallet credential.\n" +
+          "  Run: npx kite init  to store your seed phrase or private key.",
+      );
+    }
+    return this.paymentClient;
   }
 
   // ── Factories ──────────────────────────────────────────────────
@@ -241,22 +281,52 @@ export class KiteSettleClient {
     const agents = await getUserAgentsWithActiveSessions(eoaClient.address);
     const getAgent = agents?.agents?.[0];
     if (getAgent) {
-      return KiteSettleClient._createFromStoredSession(
-        BigInt(getAgent.agentId),
-        sessionIndex,
-        defaultPaymentMode,
-        sessionSeed,
-        config,
-      );
+      try {
+        return await KiteSettleClient._createFromStoredSession(
+          BigInt(getAgent.agentId),
+          sessionIndex,
+          defaultPaymentMode,
+          sessionSeed,
+          config,
+        );
+      } catch {
+        // Session key not yet stored in vars (agent registered on-chain but
+        // `kite onboard` not completed, or session key was deleted).
+        // Fall through to EOA-only mode so read and wallet operations still work.
+      }
     }
 
     return new KiteSettleClient(
+      eoaClient.config,
       eoaClient,
       eoaClient,
       eoaClient.address,
       undefined,
       undefined,
     );
+  }
+
+  /**
+   * Create a read-only client with no signing capability.
+   *
+   * Suitable for subgraph queries, static utilities, and any operation that
+   * does NOT require message signing or on-chain writes. Calling a method
+   * that requires a credential on a read-only client throws a clear error.
+   *
+   * @example
+   * const client = KiteSettleClient.createReadOnly();
+   * const agents = await client.getAgentsByOwner("0xabc...");
+   */
+  static createReadOnly(config?: Partial<KiteConfig>): KiteSettleClient {
+    const fullConfig: KiteConfig = {
+      ...KITE_TESTNET,
+      ...config,
+      contracts: {
+        ...KITE_TESTNET.contracts,
+        ...config?.contracts,
+      },
+    };
+    return new KiteSettleClient(fullConfig, null, null, "", undefined, undefined);
   }
 
   /**
@@ -276,7 +346,6 @@ export class KiteSettleClient {
     _sessionSeed?: string | undefined,
     config?: Partial<KiteConfig> | undefined,
   ): Promise<KiteSettleClient> {
-    console.log("Creting from session!");
     const pkVar = `SESSION_${agentId}_${sessionIndex}_PRIVATE_KEY`;
     const sessionKeys = await getActiveSessionsForAgent(`0x${agentId}`);
     const agent = await getAgentById(`0x${agentId}`);
@@ -333,19 +402,27 @@ export class KiteSettleClient {
       );
     }
 
+    // The EOA address is the agent's registered owner — the true wallet owner.
+    // agent.owner.id is the entity identifier in The Graph (= Ethereum address).
+    const eoaAddress = agent?.owner.id || agent?.owner.address || "";
+
     const paymentClient = await KitePaymentClient.create({
       seedPhrase: sessionPrivateKey,
       config,
       agentId: agentId.toString(),
       defaultPaymentMode,
       sessionKey: session.sessionKey,
-      eoaAddress: agent?.owner.id,
+      eoaAddress,
     });
 
+    // In agent-only mode we do NOT have the EOA private key — eoaClient is null.
+    // Write operations that require the wallet owner (deposit, withdraw, onboard)
+    // will throw with a clear message. Read-only ops and payment signing work fine.
     return new KiteSettleClient(
+      paymentClient.config,
+      null,
       paymentClient,
-      paymentClient,
-      agent?.owner.address || "",
+      eoaAddress,
       session.sessionKey,
       sessionPrivateKey,
     );
@@ -416,7 +493,7 @@ export class KiteSettleClient {
       );
     }
     return deriveSessionAccount(
-      this.eoaClient.getPrivateKey(),
+      this.requireEoaClient().getPrivateKey(),
       agentIndex,
       sessionIndex,
     );
@@ -439,40 +516,65 @@ export class KiteSettleClient {
     init?: RequestInit,
     options?: InterceptorOptions,
   ): Promise<Response> {
-    return this.paymentClient.fetch(url, init, options);
+    return this.requirePaymentClient().fetch(url, init, options);
   }
 
   // ── Wallet ────────────────────────────────────────────────────
 
   /**
-   * Deposited (KiteAAWallet) balance for the EOA.
-   * These are the funds used for x402 (perCall) payments.
-   * Always queries against the EOA address regardless of which key is signing.
+   * Deposited (KiteAAWallet) balance.
+   * @param token   Token address (defaults to the configured token).
+   * @param address Target address to query (defaults to `this.eoaAddress`).
+   *
+   * Read-only — works in agent mode and EOA mode; not available in read-only mode.
    */
-  async getDepositedBalance(token?: string): Promise<bigint> {
-    return this.eoaClient
+  async getDepositedBalance(token?: string, address?: string): Promise<bigint> {
+    return this.requirePaymentClient()
       .getContractService()
       .getDepositedTokenBalance(
         (token ?? this.config.token) as `0x${string}`,
-        this.eoaAddress as `0x${string}`,
+        (address ?? this.eoaAddress) as `0x${string}`,
       );
   }
 
   /**
-   * Raw ERC-20 balance in the EOA wallet (not deposited).
+   * Raw ERC-20 wallet balance (not deposited into KiteAAWallet).
+   * @param token   Token address (defaults to the configured token).
+   * @param address Target address to query (defaults to `this.eoaAddress`).
+   *
+   * Read-only — works in agent mode and EOA mode; not available in read-only mode.
    */
-  async getWalletBalance(token?: string): Promise<bigint> {
-    return this.eoaClient.getTokenBalance(token ?? this.config.token);
+  async getWalletBalance(token?: string, address?: string): Promise<bigint> {
+    return this.requirePaymentClient()
+      .getContractService()
+      .getTokenBalance(
+        (token ?? this.config.token) as `0x${string}`,
+        (address ?? this.eoaAddress) as `0x${string}`,
+      );
   }
 
-  /** Deposit tokens into KiteAAWallet. */
+  /**
+   * Native (gas token) balance for an address.
+   * @param address Target address (defaults to `this.eoaAddress`).
+   */
+  async getNativeBalance(address?: string): Promise<bigint> {
+    return this.requirePaymentClient()
+      .getContractService()
+      .getNativeBalance((address ?? this.eoaAddress) as `0x${string}`)
+      .catch(() => 0n);
+  }
+
+  /** Deposit tokens into KiteAAWallet. Requires EOA credential (wallet owner). */
   async deposit(amount: bigint, token?: string): Promise<string> {
-    return this.eoaClient.depositToWallet(amount, token ?? this.config.token);
+    return this.requireEoaClient().depositToWallet(
+      amount,
+      token ?? this.config.token,
+    );
   }
 
-  /** Withdraw tokens from KiteAAWallet back to the EOA. */
+  /** Withdraw tokens from KiteAAWallet back to the EOA. Requires EOA credential. */
   async withdraw(amount: bigint, token?: string): Promise<string> {
-    return this.eoaClient.withdrawFromWallet(
+    return this.requireEoaClient().withdrawFromWallet(
       amount,
       token ?? this.config.token,
     );
@@ -482,9 +584,10 @@ export class KiteSettleClient {
 
   /**
    * Check whether an address (default: EOA) is registered on-chain.
+   * Read-only — works in agent mode and EOA mode; not available in read-only mode.
    */
   async isRegistered(address?: string): Promise<boolean> {
-    return this.eoaClient
+    return this.requirePaymentClient()
       .getContractService()
       .isUserRegistered(address ?? this.eoaAddress);
   }
@@ -493,34 +596,34 @@ export class KiteSettleClient {
 
   /**
    * Full one-step onboarding: register EOA → create agent → register
-   * session key → optionally fund wallet.
+   * session key → optionally fund wallet. Requires EOA credential.
    */
   async onboard(
     options: OnboardOptions,
     onStep?: (step: string) => void,
   ): Promise<OnboardResult> {
-    return this.eoaClient.onboard(options, onStep);
+    return this.requireEoaClient().onboard(options, onStep);
   }
 
-  /** Register an agent on-chain at a specific index. */
+  /** Register an agent on-chain at a specific index. Requires EOA credential. */
   async registerAgent(
     metadata: `0x${string}`,
     agentIndex = 0,
     walletContract?: string,
   ): Promise<{ txHash: string; agentId: bigint }> {
-    return this.eoaClient
+    return this.requireEoaClient()
       .getContractService()
       .registerAgentOnRegistry(metadata);
   }
 
-  /** Register a session key for an agent on KiteAAWallet. */
+  /** Register a session key for an agent on KiteAAWallet. Requires EOA credential. */
   async registerSessionKey(
     agentId: bigint,
     sessionKey: string,
     sessionIndex: number,
     validUntil: number,
   ): Promise<string> {
-    return this.eoaClient
+    return this.requireEoaClient()
       .getContractService()
       .addSessionKeyRule(
         agentId,
@@ -535,7 +638,7 @@ export class KiteSettleClient {
   /** Resolve an agent by its on-chain ID → owner address. */
   async resolveAgent(agentId: bigint | string) {
     const id = typeof agentId === "string" ? BigInt(agentId) : agentId;
-    return this.eoaClient
+    return this.requirePaymentClient()
       .getContractService()
       .getAgentOwner(id)
       .catch(() => null);
@@ -543,12 +646,12 @@ export class KiteSettleClient {
 
   /** Look up an agent by its on-chain ID (agentId = bigint tokenId). */
   async getAgent(agentId: bigint) {
-    return this.eoaClient.getContractService().getAgentURI(agentId);
+    return this.requirePaymentClient().getContractService().getAgentURI(agentId);
   }
 
-  /** Update the agentURI stored on IdentityRegistry for an agent the caller owns. */
+  /** Update the agentURI stored on IdentityRegistry. Requires EOA credential. */
   async updateAgentURI(agentId: bigint, newURI: string): Promise<string> {
-    return this.eoaClient.getContractService().setAgentURI(agentId, newURI);
+    return this.requireEoaClient().getContractService().setAgentURI(agentId, newURI);
   }
 
   // ── Payment Channels ─────────────────────────────────────────
@@ -557,12 +660,12 @@ export class KiteSettleClient {
   async openChannel(
     channelConfig: ChannelConfig,
   ): Promise<{ txHash: string; channelId: `0x${string}` }> {
-    return this.paymentClient.openChannel(channelConfig);
+    return this.requirePaymentClient().openChannel(channelConfig);
   }
 
   /** Activate a payment channel (provider-side confirmation). */
   async activateChannel(channelId: `0x${string}`): Promise<string> {
-    return this.paymentClient.activateChannel(channelId);
+    return this.requirePaymentClient().activateChannel(channelId);
   }
 
   /** Initiate settlement of a payment channel. */
@@ -570,7 +673,7 @@ export class KiteSettleClient {
     channelId: `0x${string}`,
     merkleRoot?: `0x${string}`,
   ): Promise<string> {
-    return this.paymentClient.initiateSettlement(channelId, merkleRoot);
+    return this.requirePaymentClient().initiateSettlement(channelId, merkleRoot);
   }
 
   /** Finalize (close) a payment channel. */
@@ -578,12 +681,12 @@ export class KiteSettleClient {
     channelId: `0x${string}`,
     merkleRoot?: `0x${string}`,
   ): Promise<string> {
-    return this.paymentClient.finalize(channelId, merkleRoot);
+    return this.requirePaymentClient().finalize(channelId, merkleRoot);
   }
 
   /** Force-close an expired channel. */
   async forceCloseChannel(channelId: `0x${string}`): Promise<string> {
-    return this.paymentClient.forceCloseExpired(channelId);
+    return this.requirePaymentClient().forceCloseExpired(channelId);
   }
 
   /**
@@ -591,17 +694,17 @@ export class KiteSettleClient {
    * through it automatically (channel payment mode).
    */
   setChannelForProvider(provider: string, channelId: `0x${string}`): void {
-    this.paymentClient.setChannelForProvider(provider, channelId);
+    this.requirePaymentClient().setChannelForProvider(provider, channelId);
   }
 
   /** Get the on-chain state of a channel. */
   async getChannel(channelId: `0x${string}`): Promise<ChannelState> {
-    return this.paymentClient.getChannel(channelId);
+    return this.requirePaymentClient().getChannel(channelId);
   }
 
   /** Get settlement state of a channel. */
   async getSettlementState(channelId: `0x${string}`) {
-    return this.paymentClient.getSettlementState(channelId);
+    return this.requirePaymentClient().getSettlementState(channelId);
   }
 
   /** Submit a receipt to the channel (provider-side). */
@@ -609,7 +712,7 @@ export class KiteSettleClient {
     channelId: `0x${string}`,
     receipt: Receipt,
   ): Promise<string> {
-    return this.paymentClient.submitReceipt(channelId, receipt);
+    return this.requirePaymentClient().submitReceipt(channelId, receipt);
   }
 
   // ── Receipts ─────────────────────────────────────────────────
@@ -622,7 +725,7 @@ export class KiteSettleClient {
     requestHash?: string,
     responseHash?: string,
   ): Promise<Receipt> {
-    return this.paymentClient.signReceiptAsProvider(
+    return this.requirePaymentClient().signReceiptAsProvider(
       channelId,
       callCost,
       consumerAddress,
@@ -638,7 +741,7 @@ export class KiteSettleClient {
     providerAddress: string,
     ratePerCall: bigint,
   ): Promise<{ valid: boolean; reason?: string }> {
-    return this.paymentClient.verifyAndStoreReceipt(
+    return this.requirePaymentClient().verifyAndStoreReceipt(
       channelId,
       receipt,
       providerAddress,
@@ -648,7 +751,7 @@ export class KiteSettleClient {
 
   /** Get all stored receipts for a channel. */
   getChannelReceipts(channelId: `0x${string}`): Receipt[] {
-    return this.paymentClient.getReceipts(channelId);
+    return this.requirePaymentClient().getReceipts(channelId);
   }
 
   // ── Batch Sessions ────────────────────────────────────────────
@@ -659,27 +762,27 @@ export class KiteSettleClient {
     deposit: bigint,
     limits?: BatchLimits,
   ): BatchSession {
-    return this.paymentClient.startBatchSession(provider, deposit, limits);
+    return this.requirePaymentClient().startBatchSession(provider, deposit, limits);
   }
 
   /** End a batch payment session. */
   endBatchSession(sessionId: string, reason?: BatchEndReason) {
-    return this.paymentClient.endBatchSession(sessionId, reason);
+    return this.requirePaymentClient().endBatchSession(sessionId, reason);
   }
 
   /** Get a batch session by ID. */
   getBatchSession(sessionId: string): BatchSession | null {
-    return this.paymentClient.getBatchSession(sessionId);
+    return this.requirePaymentClient().getBatchSession(sessionId);
   }
 
   /** Get all active batch sessions. */
   getActiveBatchSessions(): BatchSession[] {
-    return this.paymentClient.getActiveBatchSessions();
+    return this.requirePaymentClient().getActiveBatchSessions();
   }
 
   /** Check if a batch session can afford a call. */
   canAffordBatchCall(sessionId: string, callCost: bigint): boolean {
-    return this.paymentClient.canAffordBatchCall(sessionId, callCost);
+    return this.requirePaymentClient().canAffordBatchCall(sessionId, callCost);
   }
 
   // ── Payment Decision Engine ───────────────────────────────────
@@ -713,12 +816,12 @@ export class KiteSettleClient {
 
   /** Get all payment usage logs for this session. */
   getUsageLogs(): UsageLog[] {
-    return this.paymentClient.getUsageLogs();
+    return this.requirePaymentClient().getUsageLogs();
   }
 
   /** Get the total amount spent in this session. */
   getTotalSpent(): bigint {
-    return this.paymentClient.getTotalSpent();
+    return this.requirePaymentClient().getTotalSpent();
   }
 
   // ── Subgraph Indexer ─────────────────────────────────────────
@@ -831,13 +934,17 @@ export class KiteSettleClient {
   /**
    * Access the underlying KitePaymentClient for advanced use cases.
    * Prefer the KiteSettleClient methods when possible.
+   * Throws if the client is in read-only mode (no credential).
    */
   getPaymentClient(): KitePaymentClient {
-    return this.paymentClient;
+    return this.requirePaymentClient();
   }
 
-  /** Access the EOA-level KitePaymentClient. */
+  /**
+   * Access the EOA-level KitePaymentClient.
+   * Throws if the client was created in agent-only or read-only mode.
+   */
   getEoaClient(): KitePaymentClient {
-    return this.eoaClient;
+    return this.requireEoaClient();
   }
 }

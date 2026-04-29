@@ -374,7 +374,6 @@ export async function cmdOnboardAgent(args: string[]): Promise<void> {
     info(`  EOA Address:     ${result.eoaAddress}`);
     info(`  Agent ID:        ${result.agentId}`);
     info(`  Session key:     ${result.sessionKeyAddress}`);
-    info(`  Session seed:    ${result.sessionSeed}`);
     info(`  Wallet balance:  ${result.walletUSDTBalance} USDT`);
     info("");
     for (const tx of result.txHashes) {

@@ -9,6 +9,10 @@ import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { TOKENS } from "../../config.js";
 import type { DecisionMode } from "../../decide.js";
 import { KITE_TESTNET, KiteSettleClient } from "../../index.js";
+import {
+  _tokenMetadataCache,
+  resolveTokenMetadata,
+} from "../../utils/index.js";
 import { getVar } from "../../vars.js";
 import { findFlag } from "../index.js";
 import { callApi } from "./call.js";
@@ -22,74 +26,86 @@ interface CmdOpts {
   fundAmount?: string;
 }
 
-function parseOpts(args: string[], command: string): CmdOpts {
-  let decideMode: DecisionMode = "auto";
-  let agentIndex: string | undefined;
-  let url: string | undefined;
-  let fundAddress: string | undefined;
-  let fundAmount: string | undefined;
-
-  if (command === "fund") {
-    // Positional: fund <address> [amount] (skip flags)
-    const positional = args.filter((a) => !a.startsWith("--"));
-    fundAddress = positional[0];
-    fundAmount = positional[1];
-  }
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--decide" && args[i + 1]) {
-      decideMode = args[++i] as DecisionMode;
-    } else if (args[i] === "--agent" && args[i + 1]) {
-      agentIndex = args[++i];
-    } else if (args[i] === "--url" && args[i + 1]) {
-      url = args[++i];
-    }
-  }
-
-  return { decide: decideMode, agentIndex, url, fundAddress, fundAmount };
-}
-
 // ── Formatting ─────────────────────────────────────────────────────
 function fmt(wei: bigint): string {
   return formatUnits(wei, 18);
 }
 
 async function showBalance(args: string[]) {
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
+  // ── Resolve target address (priority: --agent > --address > credential) ──
+  const agentFlag = findFlag(args, "--agent");
+  const addressFlag = findFlag(args, "--address");
 
+  let targetAddress: string;
+  let displayLabel: string;
+
+  if (agentFlag !== undefined) {
+    // Agent always wins — resolve owner from subgraph
+    const { getAgentById } = await import("../../indexer.js");
+    const agent = await getAgentById(`0x${BigInt(agentFlag).toString(16)}`);
+    if (!agent) {
+      throw new Error(`Agent ${agentFlag} not found on-chain.`);
+    }
+    targetAddress = agent.owner.id || agent.owner.address;
+    displayLabel = `Agent ${agentFlag} (owner: ${targetAddress})`;
+  } else if (addressFlag) {
+    targetAddress = addressFlag;
+    displayLabel = targetAddress;
+  } else {
+    const credential = getVar("PRIVATE_KEY");
+    if (!credential) {
+      throw new Error(
+        "No address to check. Pass --address <addr>, --agent <id>, or run: npx kite init",
+      );
+    }
+    // Derive address from credential without paying for a full session lookup
+    const client = await KiteSettleClient.create({ credential });
+    targetAddress = client.eoaAddress;
+    displayLabel = targetAddress;
+  }
+
+  // ── Build a client for RPC calls (credential optional) ─────────────
+  const credential = getVar("PRIVATE_KEY");
+  const client = credential
+    ? await KiteSettleClient.create({ credential })
+    : KiteSettleClient.createReadOnly();
+
+  // ── Resolve token list ──────────────────────────────────────────────
   let tokens: string[] = [];
   const tokenFlag = findFlag(args, "--token");
   if (tokenFlag) {
     const isMultiple =
       tokenFlag.includes(",") && tokenFlag.split(",").length > 1;
-    if (isMultiple) {
-      tokens = tokenFlag
-        .trim()
-        .split(",")
-        .map((t) => t.trim());
-    } else {
-      tokens = [tokenFlag.trim()];
-    }
+    tokens = isMultiple
+      ? tokenFlag
+          .trim()
+          .split(",")
+          .map((t) => t.trim())
+      : [tokenFlag.trim()];
   }
+  tokens.unshift(zeroAddress); // always include default token
 
-  tokens.unshift(zeroAddress); // Ensure default token is included
+  const showNativeBalance = findFlag(args, "--show-native") || true;
 
-  const client = await KiteSettleClient.create({ credential });
+  console.log(`  Address:  ${displayLabel}`);
+  console.log("");
 
   const agentBalance = await Promise.all(
     tokens.map(async (t) => {
       const token = TOKENS.find(
         ({ address, symbol }) =>
           address.toLowerCase() === t.toLowerCase() ||
-          symbol.toLowerCase() == t.toLowerCase(),
+          symbol.toLowerCase() === t.toLowerCase(),
       );
 
-      const depBalance = await client.getDepositedBalance(token?.address);
+      const depBalance = await client.getDepositedBalance(
+        token?.address,
+        targetAddress,
+      );
       const balance =
-        token?.address == zeroAddress
+        token?.address === zeroAddress
           ? undefined
-          : await client.getWalletBalance(token?.address);
+          : await client.getWalletBalance(token?.address, targetAddress);
       return {
         ...token,
         balance: formatUnits(depBalance, token?.decimals || 18),
@@ -99,8 +115,6 @@ async function showBalance(args: string[]) {
       };
     }),
   );
-
-  const showNativeBalance = findFlag(args, "--show-native");
 
   function displayBalance(tkn: (typeof agentBalance)[0], symbol: string) {
     console.log(`  Token:    ${symbol}`);
@@ -115,27 +129,240 @@ async function showBalance(args: string[]) {
   agentBalance.forEach((tkn) => displayBalance(tkn, tkn.symbol || "KITE"));
 }
 
-async function showUsage(opts: CmdOpts) {
-  const credential = getVar("AGENT_SEED") || getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
+async function getIndexedPayments(
+  agent: number,
+  session?: string,
+  limit = 20,
+  offset = 0,
+) {
+  const {
+    getPaymentsByAgentFull,
+    getPaymentsBySession,
+    getPaymentsByOwnerFull,
+  } = await import("../../indexer.js");
 
-  const client = await KiteSettleClient.create({ credential });
+  type Payment = Awaited<ReturnType<typeof getPaymentsByAgentFull>>[number];
+  let payments: Payment[];
+  let label: string;
 
-  const logs = client.getUsageLogs();
-  const total = client.getTotalSpent();
-
-  console.log(`  Address:     ${client.eoaAddress}`);
-  console.log(`  Total spent: ${fmt(total)} KITE`);
-  console.log(`  Calls:       ${logs.length}`);
-
-  if (logs.length > 0) {
-    console.log("");
-    for (const log of logs) {
-      console.log(
-        `    ${new Date(log.timestamp).toISOString()} | ${log.serviceUrl} | ${fmt(log.amount)} KITE | ${log.txHash || "channel"}`,
+  if (session) {
+    // Session entity ID in the subgraph = sessionKey.toHex() (the session key address)
+    const sessionId = session.startsWith("0x")
+      ? session.toLowerCase()
+      : `0x${session.toLowerCase()}`;
+    payments = await getPaymentsBySession(sessionId, limit, offset);
+    label = `Session ${sessionId}`;
+  } else if (agent) {
+    // Agent entity ID = agentId uint256 .toHex() e.g. "0x1" for agentId 1
+    const agentEntityId = `0x${BigInt(agent).toString(16)}`;
+    payments = await getPaymentsByAgentFull(agentEntityId, limit, offset);
+    label = `Agent #${agent}`;
+  } else {
+    // Fallback: derive EOA address from stored credential
+    const credential = getVar("PRIVATE_KEY");
+    if (!credential) {
+      throw new Error(
+        "No address to query. Pass --agent <id>, --session <key>, or run: npx kite init",
       );
     }
+    const client = await KiteSettleClient.create({ credential });
+    payments = await getPaymentsByOwnerFull(
+      client.eoaAddress.toLowerCase(),
+      limit,
+      offset,
+    );
+    label = `Owner ${client.eoaAddress}`;
+    return { label, payments, eoaAddress: client.eoaAddress };
   }
+
+  return { label, payments, eoaAddress: undefined };
+}
+
+// ── Local channel filter + display ─────────────────────────────────
+
+interface ChannelFilter {
+  /** Session key address (0x…). Looks up the owning agent via subgraph. */
+  sessionKey?: string;
+  /** Agent NFT tokenId. Matches channels by agentIndex. */
+  agentId?: number;
+  /** Owner EOA address. Matches channels by agentAddress. */
+  eoaAddress?: string;
+}
+
+/**
+ * Filters the given local channels to only those matching the supplied
+ * criteria, then prints them.  If none of the three discriminators are
+ * provided every channel is shown (shouldn't happen in practice).
+ */
+async function showLocalChannels(
+  channels: Awaited<
+    ReturnType<typeof import("../../channel-store.js").listChannels>
+  >,
+  filter: ChannelFilter,
+): Promise<void> {
+  let filtered = channels;
+
+  if (filter.sessionKey) {
+    // Resolve the session key → agent index via subgraph, then filter by agentIndex.
+    const { getSessionKeyAdded } = await import("../../indexer.js");
+    const session = await getSessionKeyAdded(filter.sessionKey);
+    if (session?.agentId !== undefined) {
+      const agentIdx = Number(BigInt(session.agentId));
+      filtered = channels.filter((ch) => ch.agentIndex === agentIdx);
+    }
+    // If the subgraph lookup fails, fall through and show all channels.
+  } else if (filter.agentId !== undefined) {
+    filtered = channels.filter((ch) => ch.agentIndex === filter.agentId);
+  } else if (filter.eoaAddress) {
+    const eoa = filter.eoaAddress.toLowerCase();
+    filtered = channels.filter((ch) => ch.agentAddress.toLowerCase() === eoa);
+  }
+
+  if (filtered.length === 0) return;
+
+  console.log("");
+  console.log(
+    "  ── Local Channels (disk-persisted; unsettled spend not yet on-chain) ──",
+  );
+
+  for (const ch of filtered) {
+    const cumCost = BigInt(ch.cumulativeCost);
+    const deposit = BigInt(ch.deposit);
+    const chMeta = await resolveTokenMetadata(ch.token);
+    const chSym = chMeta?.symbol ?? `${ch.token.slice(0, 6)}…`;
+    const chDec = chMeta?.decimals ?? 18;
+    const openedDate = new Date(ch.openedAt)
+      .toISOString()
+      .slice(0, 19)
+      .replace("T", " ");
+    console.log(`    ${ch.channelId}`);
+    console.log(`      Provider:   ${ch.provider}`);
+    console.log(`      Token:      ${chSym}`);
+    console.log(`      Calls:      ${ch.callCount}`);
+    console.log(
+      `      Cumulative: ${formatUnits(cumCost, chDec)} ${chSym}  (of ${formatUnits(deposit, chDec)} ${chSym} deposited)`,
+    );
+    console.log(`      Opened:     ${openedDate}`);
+    if (ch.openUrl) console.log(`      URL:        ${ch.openUrl}`);
+    console.log("");
+  }
+}
+
+async function showUsage(args: string[]) {
+  const sessionFlag = findFlag(args, "--session");
+  const agentFlag = findFlag(args, "--agent");
+
+  // Session takes priority over agent; notify the user if both were passed
+  if (sessionFlag && agentFlag) {
+    console.log("  Note: --agent ignored; filtering by --session instead.");
+  }
+
+  // Pagination flags
+  const limitFlag = findFlag(args, "--limit");
+  const offsetFlag = findFlag(args, "--offset");
+  const limit = limitFlag ? Math.max(1, Number.parseInt(limitFlag, 10)) : 20;
+  const offset = offsetFlag ? Math.max(0, Number.parseInt(offsetFlag, 10)) : 0;
+
+  const { payments, label, eoaAddress } = await getIndexedPayments(
+    Number(agentFlag),
+    sessionFlag,
+    limit,
+    offset,
+  );
+
+  // Local channels persisted to disk — always shown (covers unsettled channel spend)
+  const { listChannels } = await import("../../channel-store.js");
+  const localChannels = listChannels();
+
+  console.log(`  Usage for: ${label}`);
+  const pageInfo =
+    payments.length < limit
+      ? `${offset + 1}-${offset + payments.length} (all results)`
+      : `${offset + 1}-${offset + payments.length}  (pass --offset ${offset + limit} for next page)`;
+  if (payments.length > 0) console.log(`  Showing:   ${pageInfo}`);
+  console.log("");
+
+  if (payments.length === 0) {
+    console.log("  No on-chain payments found in the subgraph.");
+  } else {
+    // Pre-warm cache for all unique tokens in this page
+    const tokenAddresses = [
+      ...new Set(payments.map((p) => p.token.toLowerCase())),
+    ];
+    await Promise.all(tokenAddresses.map((a) => resolveTokenMetadata(a)));
+
+    // Synchronous helpers — safe after the pre-warm above
+    function metaFor(tokenAddr: string) {
+      return _tokenMetadataCache.get(tokenAddr.toLowerCase());
+    }
+    function symFor(tokenAddr: string): string {
+      return metaFor(tokenAddr)?.symbol ?? `${tokenAddr.slice(0, 6)}…`;
+    }
+    function decFor(tokenAddr: string): number {
+      return metaFor(tokenAddr)?.decimals ?? 18;
+    }
+
+    const totalSpent = payments.reduce((sum, p) => sum + BigInt(p.amount), 0n);
+    const primaryToken = payments[0].token;
+    const allSameToken = payments.every(
+      (p) => p.token.toLowerCase() === primaryToken.toLowerCase(),
+    );
+    const totalLabel = allSameToken
+      ? `${formatUnits(totalSpent, decFor(primaryToken))} ${symFor(primaryToken)}`
+      : `mixed tokens`;
+
+    // Group by payment type
+    const byType = new Map<string, typeof payments>();
+    for (const p of payments) {
+      const list = byType.get(p.type) ?? [];
+      list.push(p);
+      byType.set(p.type, list);
+    }
+
+    for (const [type, ps] of byType) {
+      // Summarise per-type totals, grouping by token in case of mixed
+      const typeTotals = new Map<string, bigint>();
+      for (const p of ps)
+        typeTotals.set(
+          p.token,
+          (typeTotals.get(p.token) ?? 0n) + BigInt(p.amount),
+        );
+      const typeSummary = [...typeTotals.entries()]
+        .map(([tok, amt]) => `${formatUnits(amt, decFor(tok))} ${symFor(tok)}`)
+        .join(" + ");
+      console.log(
+        `  ── ${type} — ${ps.length} call${ps.length > 1 ? "s" : ""}, ${typeSummary} ──────`,
+      );
+      for (const p of ps) {
+        const date = new Date(Number(p.timestamp) * 1000)
+          .toISOString()
+          .replace("T", " ")
+          .slice(0, 19);
+        const agentPart = p.agent?.agentId
+          ? `  Agent #${BigInt(p.agent.agentId)}`
+          : "";
+        const chanPart = p.channel?.channelId
+          ? `  Chan ${p.channel.channelId.slice(0, 10)}…`
+          : "";
+        const tx = p.txHash ? `${p.txHash.slice(0, 12)}…` : "pending";
+        console.log(
+          `    ${date}  ${formatUnits(BigInt(p.amount), decFor(p.token)).padStart(12)} ${symFor(p.token)}  → ${p.recipient.slice(0, 10)}…  ${tx}${agentPart}${chanPart}`,
+        );
+      }
+      console.log("");
+    }
+
+    console.log(
+      `  Total on-chain: ${payments.length} payment${payments.length > 1 ? "s" : ""}, ${totalLabel} spent`,
+    );
+  }
+
+  // ── Local channels (persisted to disk; may include unsettled spend) ──────
+  await showLocalChannels(localChannels, {
+    sessionKey: sessionFlag,
+    agentId: agentFlag ? Number(agentFlag) : undefined,
+    eoaAddress,
+  });
 }
 
 async function fundWallet(args: string[]) {
@@ -150,18 +377,8 @@ async function fundWallet(args: string[]) {
     );
   }
 
-  let token = TOKENS.find(
-    ({ address, symbol }) =>
-      address.toLowerCase() === tokenFlag?.toLowerCase() ||
-      symbol.toLowerCase() === tokenFlag?.toLowerCase(),
-  );
+  let token = await resolveTokenMetadata(tokenFlag || zeroAddress);
 
-  if (!token) {
-    token = TOKENS.find(({ address }) => address === zeroAddress);
-    console.warn(
-      `Token "${tokenFlag}" not found. Defaulting to ${token?.symbol || "KITE"}.`,
-    );
-  }
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
   const client = await KiteSettleClient.create({ credential });
 
@@ -173,11 +390,7 @@ async function fundWallet(args: string[]) {
 
   const balance =
     token?.address === zeroAddress
-      ? await client
-          .getEoaClient()
-          .getContractService()
-          .getNativeBalance(client.eoaAddress as `0x${string}`)
-          .catch(() => 0n)
+      ? await client.getNativeBalance(client.eoaAddress)
       : await client.getWalletBalance(token?.address);
 
   if (balance < amount) {
@@ -203,20 +416,15 @@ async function withdrawFunds(args: string[]) {
     );
   }
 
-  let token = TOKENS.find(
-    ({ address, symbol }) =>
-      address.toLowerCase() === tokenFlag?.toLowerCase() ||
-      symbol.toLowerCase() === tokenFlag?.toLowerCase(),
-  );
+  let token = await resolveTokenMetadata(tokenFlag || zeroAddress);
   if (!token) {
-    token = TOKENS.find(({ address }) => address === zeroAddress);
+    token = TOKENS.find(({ address }) => address === zeroAddress) || null;
     console.warn(
       `Token "${tokenFlag}" not found. Defaulting to ${token?.symbol || "KITE"}.`,
     );
   }
 
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
-
   const client = await KiteSettleClient.create({ credential });
 
   console.log(
@@ -235,8 +443,6 @@ async function withdrawFunds(args: string[]) {
 // ── Entry point (called from cli.ts) ───────────────────────────────
 
 export async function runAppCommand(command: string, args: string[]) {
-  const opts = parseOpts(args, command);
-
   console.log("  ──────────────────────────────────────────────────────");
 
   switch (command) {
@@ -247,7 +453,7 @@ export async function runAppCommand(command: string, args: string[]) {
       await showBalance(args);
       break;
     case "usage":
-      await showUsage(opts);
+      await showUsage(args);
       break;
     case "fund":
       await fundWallet(args);
