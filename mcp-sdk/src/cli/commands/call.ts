@@ -14,9 +14,13 @@ import {
 import { getSessionsByAgent } from "../../indexer.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { ChannelStatus, PaymentRequest, PaymentResult } from "../../types.js";
-import { resolveTokenMetadata, type TokenMetadata } from "../../utils/index.js";
+import {
+  prompt,
+  resolveTokenMetadata,
+  type TokenMetadata,
+} from "../../utils/index.js";
 import { getVar } from "../../vars.js";
-import { findFlag, prompt } from "../index.js";
+import { findFlag } from "../index.js";
 
 /** First offer extracted from a 402 response's `accepts[]` array. */
 interface PayOffer {
@@ -713,6 +717,11 @@ export async function callApi(args: string[]) {
   let decide = findFlag(args, "--decide") as DecisionMode | undefined;
   const tokenFlag = findFlag(args, "--token");
   const agentIdStr = findFlag(args, "--agent");
+  const sessionKeyFlag =
+    findFlag(args, "--session") ??
+    findFlag(args, "--session-key") ??
+    findFlag(args, "--key");
+
   const maxCalls = Number.parseInt(findFlag(args, "--max-calls") || "100", 10);
   const durationSecs = Number.parseInt(
     findFlag(args, "--duration") || "60",
@@ -730,7 +739,6 @@ export async function callApi(args: string[]) {
     | "batch"
     | "stream"
     | "auto";
-  const sessionIndex = Number(findFlag(args, "--session") || "0");
 
   const token = await resolveTokenMetadata(tokenFlag || "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
@@ -738,53 +746,6 @@ export async function callApi(args: string[]) {
   const paymentMode =
     mode === "perCall" ? "perCall" : mode === "stream" ? "channel" : mode;
 
-  // Build a KiteSettleClient.
-  //
-  // Agent mode (--agent <agentId>): loads the session key pre-created by the
-  // EOA during `kite onboard` from the encrypted vars store. The agent is an
-  // NFT (IdentityRegistry tokenId) — it has no address or private key of its
-  // own. No EOA credential is required.
-  //
-  // EOA mode (no --agent): falls back to PRIVATE_KEY from vars. Only needed
-  // for wallet-management operations (deposit, withdraw, onboard).
-  let settle: KiteSettleClient;
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential)
-    throw new Error(
-      "No credential found. Run: npx kite init\n" +
-        "  Or specify an agent: npx kite call --agent <agentId> --url <url>",
-    );
-  settle = await KiteSettleClient.create({
-    agentId: agentIdStr ? BigInt(agentIdStr) : undefined,
-    sessionIndex,
-    credential,
-    defaultPaymentMode: paymentMode,
-  });
-
-  const sessionKeyAddress = settle.sessionKeyAddress;
-  // The underlying payment client (signed with the session key in agent mode).
-  const client = settle.getPaymentClient();
-
-  // Deposited balance always queried against the EOA address — funds live in
-  // KiteAAWallet under the EOA, not under the session key.
-  const balance = await settle.getDepositedBalance(token?.address);
-
-  console.log(`  EOA:      ${settle.eoaAddress}`);
-  if (agentIdStr) console.log(`  Agent ID: ${agentIdStr}`);
-  if (sessionKeyAddress) console.log(`  Session:  ${sessionKeyAddress}`);
-  console.log(`  Target:   ${url}`);
-  console.log(`  Mode:     ${mode}`);
-  console.log(`  Decide:   ${decide ?? "auto"}`);
-  console.log(
-    `  Balance:  ${formatUnits(balance, tokenDecimals)} ${token?.symbol} (KiteAAWallet)`,
-  );
-  if (ratePerCallFlag)
-    console.log(`  Rate/call override: ${ratePerCallFlag} ${token?.symbol}`);
-  if (depositFlag)
-    console.log(`  Deposit override:   ${depositFlag} ${token?.symbol}`);
-  console.log("");
-
-  // Optional overrides for channel deposit sizing.
   const ratePerCallOverride = ratePerCallFlag
     ? parseUnits(ratePerCallFlag, tokenDecimals)
     : undefined;
@@ -792,45 +753,119 @@ export async function callApi(args: string[]) {
     ? parseUnits(depositFlag, tokenDecimals)
     : undefined;
 
-  // Resolve on-chain session rules to power the decision engine.
-  // Gracefully fall back to conservative defaults if the subgraph has no data.
-  const sessions = agentIdStr
-    ? await getSessionsByAgent(agentIdStr).catch(() => [])
+  const indexedSessions = agentIdStr
+    ? await getSessionsByAgent(`0x${BigInt(agentIdStr)}`).catch(() => [])
     : [];
 
-  const defaultRule: SessionRules =
-    sessions.length > 0
-      ? {
-          maxPerCall: formatUnits(
-            BigInt(sessions[0].valueLimit),
-            token?.decimals ?? 18,
-          ).toString(),
-          maxPerSession: formatUnits(
-            BigInt(sessions[0].maxLimit ?? sessions[0].valueLimit),
-            token?.decimals ?? 18,
-          ).toString(),
-          blockedAgents: sessions[0].blockedAgents ?? [],
-          requireApprovalAbove: formatUnits(
-            BigInt(sessions[0].maxLimit ?? sessions[0].valueLimit),
-            token?.decimals ?? 18,
-          ).toString(),
-        }
-      : {
-          maxPerCall: "10",
-          maxPerSession: "100",
-          blockedAgents: [],
-          requireApprovalAbove: "50",
-        };
+  const normalizeSession = (raw: string) =>
+    raw.startsWith("0x") ? raw.toLowerCase() : `0x${raw.toLowerCase()}`;
 
-  let lastPaymentResult: PaymentResult | undefined;
-  const onPayment = (result: PaymentResult) => {
-    lastPaymentResult = result;
-  };
+  const explicitSessionKey = sessionKeyFlag
+    ? normalizeSession(sessionKeyFlag)
+    : undefined;
 
-  // Dispatch the actual calls
-  if (mode === "batch") {
-    await runBatchApiCallsFlow(
-      {
+  const now = Math.floor(Date.now() / 1000);
+  const autoCandidates = indexedSessions
+    .filter(
+      (session) =>
+        session.status.toUpperCase() === "ACTIVE" && Number(session.validUntil) > now,
+    )
+    .map((session) => session.sessionKey.toLowerCase());
+
+  const localCandidates = agentIdStr
+    ? Array.from({ length: 64 })
+        .map((_, i) => getVar(`SESSION_${agentIdStr}_${i}_ADDRESS`))
+        .filter((v): v is string => Boolean(v))
+        .map((v) => normalizeSession(v))
+    : [];
+
+  const mergedCandidates = Array.from(
+    new Set([...autoCandidates, ...localCandidates]),
+  );
+
+  const sessionsToTry = explicitSessionKey
+    ? [explicitSessionKey]
+    : mergedCandidates.length > 0
+      ? mergedCandidates
+      : [undefined];
+
+  const runWithSettle = async (settle: KiteSettleClient): Promise<void> => {
+    const sessionKeyAddress = settle.sessionKeyAddress;
+    const client = settle.getPaymentClient();
+    const balance = await settle.getDepositedBalance(token?.address);
+
+    console.log(`  EOA:      ${settle.eoaAddress}`);
+    if (agentIdStr) console.log(`  Agent ID: ${agentIdStr}`);
+    if (sessionKeyAddress) console.log(`  Session:  ${sessionKeyAddress}`);
+    console.log(`  Target:   ${url}`);
+    console.log(`  Mode:     ${mode}`);
+    console.log(`  Decide:   ${decide ?? "auto"}`);
+    console.log(
+      `  Balance:  ${formatUnits(balance, tokenDecimals)} ${token?.symbol} (KiteAAWallet)`,
+    );
+    if (ratePerCallFlag)
+      console.log(`  Rate/call override: ${ratePerCallFlag} ${token?.symbol}`);
+    if (depositFlag)
+      console.log(`  Deposit override:   ${depositFlag} ${token?.symbol}`);
+    console.log("");
+
+    const selectedSession = sessionKeyAddress
+      ? indexedSessions.find(
+          (session) =>
+            session.sessionKey.toLowerCase() === sessionKeyAddress.toLowerCase(),
+        )
+      : indexedSessions[0];
+
+    const defaultRule: SessionRules =
+      selectedSession
+        ? {
+            maxPerCall: formatUnits(
+              BigInt(selectedSession.valueLimit),
+              token?.decimals ?? 18,
+            ).toString(),
+            maxPerSession: formatUnits(
+              BigInt(selectedSession.maxLimit ?? selectedSession.valueLimit),
+              token?.decimals ?? 18,
+            ).toString(),
+            blockedAgents: selectedSession.blockedAgents ?? [],
+            requireApprovalAbove: formatUnits(
+              BigInt(selectedSession.maxLimit ?? selectedSession.valueLimit),
+              token?.decimals ?? 18,
+            ).toString(),
+          }
+        : {
+            maxPerCall: "10",
+            maxPerSession: "100",
+            blockedAgents: [],
+            requireApprovalAbove: "50",
+          };
+
+    let lastPaymentResult: PaymentResult | undefined;
+    const onPayment = (result: PaymentResult) => {
+      lastPaymentResult = result;
+    };
+
+    if (mode === "batch") {
+      await runBatchApiCallsFlow(
+        {
+          client,
+          url,
+          token,
+          decide,
+          defaultRules: defaultRule,
+          onPayment,
+          maxCalls,
+          durationSecs,
+          ratePerCallOverride,
+          depositOverride,
+        },
+        channelIdFlag,
+      );
+      return;
+    }
+
+    if (mode === "stream") {
+      await runStreamCallsFlow({
         client,
         url,
         token,
@@ -841,23 +876,10 @@ export async function callApi(args: string[]) {
         durationSecs,
         ratePerCallOverride,
         depositOverride,
-      },
-      channelIdFlag,
-    );
-  } else if (mode === "stream") {
-    await runStreamCallsFlow({
-      client,
-      url,
-      token,
-      decide,
-      defaultRules: defaultRule,
-      onPayment,
-      maxCalls,
-      durationSecs,
-      ratePerCallOverride,
-      depositOverride,
-    });
-  } else {
+      });
+      return;
+    }
+
     console.log(`  Per-call mode: making a single call with each request.`);
     const fetchOpts: any = {
       paymentMode: "perCall" as const,
@@ -874,7 +896,6 @@ export async function callApi(args: string[]) {
         const ctx = {
           request: req,
           rules: defaultRule,
-          // Use the EOA deposited balance, not the session-key wallet balance.
           balance: Number(
             formatUnits(
               await settle.getDepositedBalance(token?.address),
@@ -905,20 +926,64 @@ export async function callApi(args: string[]) {
       const errBody: any = await response.json().catch(() => null);
       console.log(`  Status: ${response.status} Payment Required`);
       console.log(`  The agent was not charged.`);
-      if (errBody?.error) {
-        console.log(`  Reason: ${errBody.error}`);
-      } else {
-        console.log(`  Reason: payment was declined`);
-      }
-    } else {
-      const body = await response.json();
-      console.log(`  Status:  ${response.status} OK`);
-      console.log(`  Data:    ${JSON.stringify(body, null, 2)}`);
-      console.log(`  Time:    ${elapsed}ms`);
+      const reason = errBody?.error || "payment was declined";
+      console.log(`  Reason: ${reason}`);
+      throw new Error(String(reason));
+    }
 
-      if (lastPaymentResult) {
-        console.log(formatReceipt(lastPaymentResult, url, body));
+    const body = await response.json();
+    console.log(`  Status:  ${response.status} OK`);
+    console.log(`  Data:    ${JSON.stringify(body, null, 2)}`);
+    console.log(`  Time:    ${elapsed}ms`);
+
+    if (lastPaymentResult) {
+      console.log(formatReceipt(lastPaymentResult, url, body));
+    }
+  };
+
+  let lastErr: unknown;
+  for (const sessionKeyToTry of sessionsToTry) {
+    try {
+      const settle = agentIdStr
+        ? await KiteSettleClient.create({
+            agentId: BigInt(agentIdStr),
+            sessionKey: sessionKeyToTry,
+            defaultPaymentMode: paymentMode,
+          })
+        : await (async () => {
+            const credential = getVar("PRIVATE_KEY");
+            if (!credential) {
+              throw new Error(
+                "No credential found. Run: npx kite init\n" +
+                  "  Or specify an agent: npx kite call --agent <agentId> --url <url>",
+              );
+            }
+            return KiteSettleClient.create({
+              credential,
+              defaultPaymentMode: paymentMode,
+            });
+          })();
+
+      await runWithSettle(settle);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+
+      if (!agentIdStr || explicitSessionKey) throw err;
+
+      if (
+        msg.toLowerCase().includes("session key not active") ||
+        msg.toLowerCase().includes("session private key not found") ||
+        msg.toLowerCase().includes("unavailable for payments") ||
+        msg.toLowerCase().includes(" is expired")
+      ) {
+        continue;
       }
+      throw err;
     }
   }
+
+  if (lastErr instanceof Error) throw lastErr;
+  throw new Error("No usable session found for this call.");
 }

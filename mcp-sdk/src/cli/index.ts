@@ -19,8 +19,8 @@
  * npx kite simulate             Run payment simulation
  */
 
-import readline from "node:readline";
 import { KiteSettleClient } from "../kite-settle-client.js";
+import { prompt } from "../utils/index.js";
 import {
   deleteVar,
   getVar,
@@ -31,79 +31,6 @@ import {
 } from "../vars.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
-
-export async function prompt(
-  question: string,
-  hidden = false,
-): Promise<string> {
-  return new Promise((res) => {
-    if (hidden && process.stdin.isTTY) {
-      const stdin = process.stdin;
-
-      process.stdout.write(question);
-
-      const wasRaw = stdin.isRaw;
-
-      stdin.setRawMode(true);
-      stdin.resume();
-      stdin.setEncoding("utf-8");
-
-      let value = "";
-
-      const onData = (chunk: string) => {
-        const str = chunk.toString();
-
-        // ENTER / RETURN
-        if (str === "\n" || str === "\r" || str === "\u0004") {
-          stdin.setRawMode(wasRaw ?? false);
-          stdin.pause();
-          stdin.removeListener("data", onData);
-          process.stdout.write("\n");
-          return res(value);
-        }
-
-        // CTRL + C
-        if (str === "\u0003") {
-          process.exit(1);
-        }
-
-        // BACKSPACE (can come as multiple chars too)
-        if (str === "\u007F" || str === "\b") {
-          if (value.length > 0) {
-            value = value.slice(0, -1);
-            process.stdout.write("\b \b");
-          }
-          return;
-        }
-
-        // Handle pasted input
-        const clean = str.replace(/[\r\n]/g, "");
-
-        if (!clean) return;
-
-        // Append full chunk
-        value += clean;
-
-        process.stdout.write("\b".repeat(clean.length));
-
-        // Replace with masked output
-        process.stdout.write("*".repeat(clean.length));
-      };
-
-      stdin.on("data", onData);
-    } else {
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-
-      rl.question(question, (answer) => {
-        rl.close();
-        res(answer.trim());
-      });
-    }
-  });
-}
 
 function info(msg: string) {
   console.log(`  ${msg}`);
@@ -144,7 +71,7 @@ async function cmdVars(args: string[]) {
       if (!value) die("Value cannot be empty");
 
       setVar(key, value);
-      info(`✓ Stored "${key}" in ${getVarsPath()}`);
+      info(`  Stored "${key}" in ${getVarsPath()}`);
       break;
     }
 
@@ -176,7 +103,7 @@ async function cmdVars(args: string[]) {
       const key = args[1];
       if (!key) die("Usage: kite vars delete <key>");
       if (deleteVar(key)) {
-        info(`✓ Deleted "${key}"`);
+        info(`  Deleted "${key}"`);
       } else {
         die(`Variable "${key}" does not exist`);
       }
@@ -190,11 +117,11 @@ async function cmdVars(args: string[]) {
 
     case "setup": {
       // Show which essential vars are missing
-      const essential = ["PRIVATE_KEY", "AGENT_SEED"];
+      const essential = ["PRIVATE_KEY"];
       const missing = essential.filter((k) => !hasVar(k) && !process.env[k]);
 
       if (missing.length === 0) {
-        info("All essential variables are set. ✓");
+        info("All essential variables are set.");
       } else {
         header("Missing Variables");
         for (const k of missing) {

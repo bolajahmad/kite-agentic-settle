@@ -47,12 +47,13 @@ export interface IndexedSession {
   agentId: string;
   sessionKey: string;
   validUntil: string;
-  blockTimestamp: string;
-  transactionHash: string;
   blockedAgents: string[];
   maxLimit: string;
   metadataHash: string;
   valueLimit: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface IndexedPayment {
@@ -62,6 +63,18 @@ export interface IndexedPayment {
   recipient: string;
   token: string;
   amount: string;
+  blockTimestamp: string;
+  transactionHash: string;
+}
+
+export interface IndexedSessionKeyAdded {
+  id: string;
+  sessionKey: string;
+  user: string;
+  agentId: string;
+  valueLimit: string;
+  dailyLimit: string;
+  validUntil: string;
   blockTimestamp: string;
   transactionHash: string;
 }
@@ -136,29 +149,69 @@ export async function getAgentById(id: string): Promise<IndexedAgent | null> {
 
 export async function getSessionsByAgent(
   agentId: string,
+  limit: number = 10,
+  offset: number = 0,
 ): Promise<IndexedSession[]> {
-  console.log({ agentId });
   const data = await query(
     `
-    query($agentId: String!) {
+    query($agentId: String!, $first: Int!, $skip: Int!) {
       sessions(
         where: { agent: $agentId }
+        orderBy: createdAt
         orderDirection: desc
+        first: $first
+        skip: $skip
       ) {
         id
         blockedAgents
+        createdAt
         maxLimit
         metadataHash
         sessionKey
+        updatedAt
         valueLimit
         status
         validUntil
       }
     }
   `,
-    { agentId },
+    { agentId, first: limit, skip: offset },
   );
   return data.sessions || [];
+}
+
+export async function getSessionByKey(
+  sessionKey: string,
+): Promise<IndexedSession | null> {
+  const data = await query(
+    `
+    query($id: String!) {
+      session(id: $id) {
+        id
+        blockedAgents
+        createdAt
+        maxLimit
+        metadataHash
+        sessionKey
+        updatedAt
+        valueLimit
+        status
+        validUntil
+        agent {
+          agentId
+        }
+      }
+    }
+  `,
+    { id: sessionKey.toLowerCase() },
+  );
+
+  if (!data.session) return null;
+
+  return {
+    ...data.session,
+    agentId: data.session.agent?.agentId ?? "",
+  };
 }
 
 export async function getPaymentsByAgent(
@@ -217,7 +270,7 @@ export async function getRecentPayments(
 
 export async function getSessionKeyAdded(
   sessionKey: string,
-): Promise<any | null> {
+): Promise<IndexedSessionKeyAdded | null> {
   const data = await query(
     `
     query($sessionKey: String!) {
@@ -383,6 +436,28 @@ export async function getPaymentsBySession(
     { sessionId: sessionKey.toLowerCase(), first: limit, skip: offset },
   );
   return data.payments || [];
+}
+
+export async function getSessionSpentFromIndexer(
+  sessionKey: string,
+  pageSize: number = 100,
+): Promise<bigint> {
+  let offset = 0;
+  let total = 0n;
+
+  while (true) {
+    const payments = await getPaymentsBySession(sessionKey, pageSize, offset);
+    if (payments.length === 0) break;
+
+    for (const payment of payments) {
+      total += BigInt(payment.amount);
+    }
+
+    if (payments.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return total;
 }
 
 /**

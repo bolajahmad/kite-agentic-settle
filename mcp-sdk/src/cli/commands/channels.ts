@@ -17,9 +17,9 @@ import {
 } from "../../channel-store.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { ChannelStatus } from "../../types.js";
-import { resolveTokenMetadata } from "../../utils/index.js";
+import { prompt, resolveTokenMetadata } from "../../utils/index.js";
 import { getVar } from "../../vars.js";
-import { findFlag, prompt } from "../index.js";
+import { findFlag } from "../index.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -39,9 +39,7 @@ function channelStatusLabel(status: number): string {
 }
 
 /** Build an EOA-level KiteSettleClient for channel management operations. */
-async function buildAgentClient(
-  credential: string,
-): Promise<{
+async function buildAgentClient(credential: string): Promise<{
   client: KiteSettleClient;
   eoaAddress: string;
 }> {
@@ -64,7 +62,7 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   const urlFlag = findFlag(args, "--url");
   const url = urlFlag || (await prompt("Enter API URL: "));
   const agentIndex = Number(
-    findFlag(args, "--agent-id") ?? findFlag(args, "--agent") ?? "0",
+    findFlag(args, "--agent") ?? findFlag(args, "-aid") ?? "0",
   );
   const maxCalls = Number(findFlag(args, "--max-calls") ?? "100");
   const durationSecs = Number(findFlag(args, "--duration") ?? "3600");
@@ -75,9 +73,7 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   const token = await resolveTokenMetadata(tokenFlag ?? "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
 
-  const { client, eoaAddress } = await buildAgentClient(
-    credential,
-  );
+  const { client, eoaAddress } = await buildAgentClient(credential);
 
   console.log("");
   console.log("── Opening Payment Channel ───────────────────────────────");
@@ -478,7 +474,9 @@ async function cmdChannelList(args: string[]): Promise<void> {
 
   if (entries.length === 0) {
     console.log("");
-    console.log("  No channels found. Open one with: npx kite channel open --url <api>");
+    console.log(
+      "  No channels found. Open one with: npx kite channel open --url <api>",
+    );
     return;
   }
 
@@ -560,8 +558,7 @@ async function cmdChannelResume(args: string[]): Promise<void> {
     }
   } else {
     // Pick the most recent Active channel
-    const agentSessions = all
-      .sort((a, b) => b.openedAt - a.openedAt);
+    const agentSessions = all.sort((a, b) => b.openedAt - a.openedAt);
 
     for (const s of agentSessions) {
       try {

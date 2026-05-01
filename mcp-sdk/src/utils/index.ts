@@ -1,5 +1,5 @@
 // ── Utils ──────────────────────────────────────────────────────────
-
+import readline from "node:readline";
 import { zeroAddress } from "viem";
 import { KITE_TESTNET, TOKENS } from "../config.js";
 
@@ -33,7 +33,11 @@ export async function resolveTokenMetadata(
 
   // Native KITE token — zero address or "kite" symbol, no on-chain lookup needed
   if (input === zeroAddress || input === "kite") {
-    const meta: TokenMetadata = { address: zeroAddress, symbol: "KITE", decimals: 18 };
+    const meta: TokenMetadata = {
+      address: zeroAddress,
+      symbol: "KITE",
+      decimals: 18,
+    };
     _tokenMetadataCache.set(zeroAddress, meta);
     return meta;
   }
@@ -113,4 +117,77 @@ export async function resolveTokenMetadata(
   };
   _tokenMetadataCache.set(input, fallback);
   return fallback;
+}
+
+export async function prompt(
+  question: string,
+  hidden = false,
+): Promise<string> {
+  return new Promise((res) => {
+    if (hidden && process.stdin.isTTY) {
+      const stdin = process.stdin;
+
+      process.stdout.write(question);
+
+      const wasRaw = stdin.isRaw;
+
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.setEncoding("utf-8");
+
+      let value = "";
+
+      const onData = (chunk: string) => {
+        const str = chunk.toString();
+
+        // ENTER / RETURN
+        if (str === "\n" || str === "\r" || str === "\u0004") {
+          stdin.setRawMode(wasRaw ?? false);
+          stdin.pause();
+          stdin.removeListener("data", onData);
+          process.stdout.write("\n");
+          return res(value);
+        }
+
+        // CTRL + C
+        if (str === "\u0003") {
+          process.exit(1);
+        }
+
+        // BACKSPACE (can come as multiple chars too)
+        if (str === "\u007F" || str === "\b") {
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            process.stdout.write("\b \b");
+          }
+          return;
+        }
+
+        // Handle pasted input
+        const clean = str.replace(/[\r\n]/g, "");
+
+        if (!clean) return;
+
+        // Append full chunk
+        value += clean;
+
+        process.stdout.write("\b".repeat(clean.length));
+
+        // Replace with masked output
+        process.stdout.write("*".repeat(clean.length));
+      };
+
+      stdin.on("data", onData);
+    } else {
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
+      rl.question(question, (answer) => {
+        rl.close();
+        res(answer.trim());
+      });
+    }
+  });
 }

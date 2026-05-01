@@ -2,8 +2,9 @@ import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { KiteSettleClient } from "../../kite-settle-client.js";
+import { prompt } from "../../utils/index.js";
 import { getVar } from "../../vars.js";
-import { findFlag, prompt } from "../index.js";
+import { findFlag } from "../index.js";
 
 function header(title: string) {
   console.log("");

@@ -17,7 +17,7 @@
  *     AGENT_<id>_SEED (legacy encrypted-blob passphrase, no longer generated)
  */
 
-import { prompt } from "../index.js";
+import { prompt } from "../../utils/index.js";
 import { clearAllVars, clearVarsWhere, listVars } from "../../vars.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -46,10 +46,7 @@ function isAgentKey(key: string, agentId: string): boolean {
 
 /** Keys that are session-related across all agents. */
 function isSessionKey(key: string): boolean {
-  return (
-    /^SESSION_\d+_\d+_/.test(key) ||
-    /^AGENT_\d+_SEED$/.test(key)
-  );
+  return /^SESSION_\d+_\d+_/.test(key) || /^AGENT_\d+_SEED$/.test(key);
 }
 
 // ── Password confirmation ──────────────────────────────────────────
@@ -57,7 +54,9 @@ function isSessionKey(key: string): boolean {
 async function confirmWithPassword(action: string): Promise<boolean> {
   console.log("");
   info(`⚠️  WARNING: ${action}`);
-  info("This will make affected CLI/SDK operations unusable until you re-onboard.");
+  info(
+    "This will make affected CLI/SDK operations unusable until you re-onboard.",
+  );
   console.log("");
 
   const pw1 = await prompt("  Type DELETE to confirm: ", false);
@@ -83,7 +82,9 @@ async function cleanAll() {
     info(`  • ${k}`);
   }
 
-  const ok = await confirmWithPassword("This will delete ALL stored credentials and session data.");
+  const ok = await confirmWithPassword(
+    "This will delete ALL stored credentials and session data.",
+  );
   if (!ok) return;
 
   const count = clearAllVars();
@@ -95,7 +96,9 @@ async function cleanAll() {
 
 async function cleanAgent(agentId: string) {
   if (!/^\d+$/.test(agentId)) {
-    console.error(`  Error: --agent must be a numeric agentId (e.g. --agent 1)`);
+    console.error(
+      `  Error: --agent must be a numeric agentId (e.g. --agent 1)`,
+    );
     process.exit(1);
   }
 
@@ -187,7 +190,9 @@ export async function cmdClean(args: string[]) {
   if (agentIdx !== -1) {
     const agentId = args[agentIdx + 1];
     if (!agentId || agentId.startsWith("--")) {
-      console.error("  Error: --agent requires a numeric agentId  (e.g. --agent 1)");
+      console.error(
+        "  Error: --agent requires a numeric agentId  (e.g. --agent 1)",
+      );
       process.exit(1);
     }
     await cleanAgent(agentId);

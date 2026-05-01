@@ -196,7 +196,7 @@ export class ContractService {
     });
   }
 
-  /** Full session rule including blockedProviders array. */
+  /** Full session rule*/
   async getSessionFromRegistry(sessionKey: string) {
     return await this.client.readContract({
       address: this.config.contracts.identityRegistry as `0x${string}`,

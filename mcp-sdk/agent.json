@@ -1,17 +1,17 @@
 {
   "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
-  "name": "All Knowing Agent",
-  "description": "My Claude Desktop AI Agent",
+  "name": "Basic Agent",
+  "description": "My Copilot AI Agent",
   "image": "",
   "services": [
     {
       "name": "MCP",
-      "endpoint": "http://localhost:4000",
+      "endpoint": "http://localhost:4001",
       "version": "v1"
     }
   ],
   "x402Support": true,
   "x402ChannelSupport": true,
   "active": true,
-  "supportedTrust": ["crypto-economic"]
+  "supportedTrust": ["sports"]
 }

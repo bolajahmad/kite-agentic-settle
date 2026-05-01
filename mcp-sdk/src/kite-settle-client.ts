@@ -22,10 +22,12 @@
  */
 
 import { formatUnits, parseUnits } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import type { BatchEndReason, BatchLimits } from "./batch.js";
 import type { KiteClientOptions } from "./client.js";
 import { KitePaymentClient } from "./client.js";
 import { KITE_TESTNET, TOKENS } from "./config.js";
+import { ContractService } from "./contracts.js";
 import type {
   Decision,
   DecisionContext,
@@ -40,7 +42,6 @@ import type {
   IndexedSession,
 } from "./indexer.js";
 import {
-  getActiveSessionsForAgent,
   getAgentById,
   getAgentsByOwner,
   getPaymentsByAgent,
@@ -114,7 +115,16 @@ export interface KiteSettleClientOptions {
    */
   agentId?: bigint | string | number;
   /**
-   * Session key index to load from the vars store. Default: 0.
+    * Session key address to load in agent mode.
+    *
+    * If omitted, the SDK auto-selects the first on-chain session for the
+    * agent that is currently active, not expired, and has remaining capacity.
+    */
+    sessionKey?: string;
+    /**
+      * Legacy session index (optional). This is no longer required by callers.
+      * When provided with no `sessionKey`, it is ignored and an available
+      * on-chain session is auto-selected.
    */
   sessionIndex?: number;
   /**
@@ -247,7 +257,7 @@ export class KiteSettleClient {
     const {
       agentId,
       credential,
-      sessionIndex = 0,
+      sessionKey,
       sessionSeed,
       config,
       defaultPaymentMode = "auto",
@@ -257,7 +267,7 @@ export class KiteSettleClient {
     if (agentId !== undefined) {
       return KiteSettleClient._createFromStoredSession(
         BigInt(agentId),
-        sessionIndex,
+        sessionKey,
         defaultPaymentMode,
         sessionSeed,
         config,
@@ -284,7 +294,7 @@ export class KiteSettleClient {
       try {
         return await KiteSettleClient._createFromStoredSession(
           BigInt(getAgent.agentId),
-          sessionIndex,
+          undefined,
           defaultPaymentMode,
           sessionSeed,
           config,
@@ -341,27 +351,165 @@ export class KiteSettleClient {
    */
   private static async _createFromStoredSession(
     agentId: bigint,
-    sessionIndex: number,
+    sessionKey: string | undefined,
     defaultPaymentMode: KiteClientOptions["defaultPaymentMode"],
     _sessionSeed?: string | undefined,
     config?: Partial<KiteConfig> | undefined,
   ): Promise<KiteSettleClient> {
-    const pkVar = `SESSION_${agentId}_${sessionIndex}_PRIVATE_KEY`;
-    const sessionKeys = await getActiveSessionsForAgent(`0x${agentId}`);
-    const agent = await getAgentById(`0x${agentId}`);
+    const fullConfig: KiteConfig = {
+      ...KITE_TESTNET,
+      ...config,
+      contracts: {
+        ...KITE_TESTNET.contracts,
+        ...config?.contracts,
+      },
+    };
+    const readCs = new ContractService(fullConfig, null, "");
 
-    const session = sessionKeys[0];
-    if (!session) {
+    const onchainSessions = await readCs.getAgentSessionsFromRegistry(agentId);
+    if (onchainSessions.length === 0) {
       throw new Error(
-        `No active session key found for agentId=${agentId}.\n` +
+        `No session key found for agentId=${agentId}.\n` +
           `  Run: npx kite onboard  to register an agent and create a session key.`,
       );
     }
+
+    const indexedSessions = await getSessionsByAgent(
+      `0x${agentId}`,
+      onchainSessions.length,
+      0,
+    ).catch(() => [] as IndexedSession[]);
+    const indexedByKey = new Map(
+      indexedSessions.map((s) => [s.sessionKey.toLowerCase(), s]),
+    );
+
+    const now = Math.floor(Date.now() / 1000);
+    const selectedSessionKey = sessionKey
+      ? (sessionKey.startsWith("0x")
+          ? sessionKey.toLowerCase()
+          : `0x${sessionKey.toLowerCase()}`) as `0x${string}`
+      : undefined;
+
+    let selectedIndex = -1;
+
+    if (selectedSessionKey) {
+      selectedIndex = onchainSessions.findIndex(
+        (key) => key.toLowerCase() === selectedSessionKey,
+      );
+      if (selectedIndex === -1) {
+        throw new Error(
+          `Session key ${selectedSessionKey} not found for agentId=${agentId}.`,
+        );
+      }
+
+      const indexed = indexedByKey.get(selectedSessionKey.toLowerCase());
+      if (!indexed) {
+        throw new Error(
+          `Session key ${selectedSessionKey} was not found in the indexer for agentId=${agentId}.`,
+        );
+      }
+      if (indexed.status.toUpperCase() !== "ACTIVE") {
+        throw new Error(
+          `Session key ${selectedSessionKey} is ${indexed.status.toLowerCase()} in the indexer.`,
+        );
+      }
+      if (Number(indexed.validUntil) <= now) {
+        throw new Error(`Session key ${selectedSessionKey} is expired.`);
+      }
+
+      const [active, , , , , maxValueAllowed, validUntil] =
+        (await readCs.validateSession(selectedSessionKey)) as any;
+      const spent = await readCs.getSessionSpent(selectedSessionKey).catch(() => 0n);
+      if (!active) {
+        throw new Error(`Session key ${selectedSessionKey} is not active.`);
+      }
+      if (Number(validUntil) <= now) {
+        throw new Error(`Session key ${selectedSessionKey} is expired.`);
+      }
+      if (spent >= maxValueAllowed) {
+        throw new Error(
+          `Session key ${selectedSessionKey} has no remaining capacity.`,
+        );
+      }
+    } else {
+      for (let i = 0; i < onchainSessions.length; i++) {
+        const key = onchainSessions[i];
+        try {
+          const indexed = indexedByKey.get(key.toLowerCase());
+          if (!indexed) continue;
+          if (indexed.status.toUpperCase() !== "ACTIVE") continue;
+          if (Number(indexed.validUntil) <= now) continue;
+
+          const [active, , , , , maxValueAllowed, validUntil] =
+            (await readCs.validateSession(key)) as any;
+          if (!active || Number(validUntil) <= now) continue;
+          const spent = await readCs.getSessionSpent(key).catch(() => 0n);
+          if (spent < maxValueAllowed) {
+            selectedIndex = i;
+            break;
+          }
+        } catch {
+          // Skip invalid / partially indexed sessions and continue scanning.
+        }
+      }
+    }
+
+    if (selectedIndex === -1) {
+      if (selectedSessionKey) {
+        throw new Error(
+          `Session key ${selectedSessionKey} is unavailable for payments (inactive, expired, or exhausted).`,
+        );
+      }
+      throw new Error(
+        `No available active session key with remaining capacity found for agentId=${agentId}.`,
+      );
+    }
+
+    const resolvedSessionKey = onchainSessions[selectedIndex].toLowerCase();
+    const resolvedSessionIndex = selectedIndex;
+    const pkVar = `SESSION_${agentId}_${resolvedSessionIndex}_PRIVATE_KEY`;
 
     // ── Resolve session private key (plain — no encryption) ──────────
     let sessionPrivateKey: `0x${string}` | undefined = getVar(pkVar) as
       | `0x${string}`
       | undefined;
+
+    if (!sessionPrivateKey) {
+      for (let i = 0; i < onchainSessions.length; i++) {
+        const maybeAddress = getVar(`SESSION_${agentId}_${i}_ADDRESS`);
+        if (maybeAddress?.toLowerCase() === resolvedSessionKey) {
+          const maybePk = getVar(`SESSION_${agentId}_${i}_PRIVATE_KEY`) as
+            | `0x${string}`
+            | undefined;
+          if (maybePk) {
+            sessionPrivateKey = maybePk;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!sessionPrivateKey) {
+      const keyPrefix = `SESSION_${agentId}_`;
+      const keySuffix = `_PRIVATE_KEY`;
+      for (const keyName of listVars()) {
+        if (!keyName.startsWith(keyPrefix) || !keyName.endsWith(keySuffix)) {
+          continue;
+        }
+        const maybePk = getVar(keyName) as `0x${string}` | undefined;
+        if (!maybePk) continue;
+        try {
+          const addr = privateKeyToAccount(maybePk).address.toLowerCase();
+          if (addr === resolvedSessionKey) {
+            sessionPrivateKey = maybePk;
+            setVar(pkVar, maybePk);
+            break;
+          }
+        } catch {
+          // Ignore malformed private key entries and continue scanning.
+        }
+      }
+    }
 
     if (!sessionPrivateKey) {
       // Fallback: re-derive deterministically from a stored EOA private key.
@@ -377,17 +525,25 @@ export class KiteSettleClient {
           Buffer.from(eoaKeyHex.replace(/^0x/, ""), "hex"),
         );
         for (const attempt of [
-          () => deriveSessionForAgent(eoaKeyBytes, agentId, sessionIndex),
           () =>
-            deriveSessionAccount(eoaKeyBytes, Number(agentId), sessionIndex),
+            deriveSessionForAgent(
+              eoaKeyBytes,
+              agentId,
+              resolvedSessionIndex,
+            ),
+          () =>
+            deriveSessionAccount(
+              eoaKeyBytes,
+              Number(agentId),
+              resolvedSessionIndex,
+            ),
         ]) {
           const derived = await attempt();
-          if (
-            derived.address.toLowerCase() === session.sessionKey.toLowerCase()
-          ) {
+          if (derived.address.toLowerCase() === resolvedSessionKey) {
             sessionPrivateKey = derived.privateKey;
             // Persist for next time so derivation isn't needed again
             setVar(pkVar, derived.privateKey);
+            setVar(`SESSION_${agentId}_${resolvedSessionIndex}_ADDRESS`, derived.address);
             break outer;
           }
         }
@@ -402,16 +558,17 @@ export class KiteSettleClient {
       );
     }
 
-    // The EOA address is the agent's registered owner — the true wallet owner.
-    // agent.owner.id is the entity identifier in The Graph (= Ethereum address).
-    const eoaAddress = agent?.owner.id || agent?.owner.address || "";
+    const [, , owner] = (await readCs.validateSession(
+      resolvedSessionKey,
+    )) as any;
+    const eoaAddress = owner as string;
 
     const paymentClient = await KitePaymentClient.create({
       seedPhrase: sessionPrivateKey,
       config,
       agentId: agentId.toString(),
       defaultPaymentMode,
-      sessionKey: session.sessionKey,
+      sessionKey: resolvedSessionKey,
       eoaAddress,
     });
 
@@ -423,7 +580,7 @@ export class KiteSettleClient {
       null,
       paymentClient,
       eoaAddress,
-      session.sessionKey,
+      resolvedSessionKey,
       sessionPrivateKey,
     );
   }
@@ -431,16 +588,16 @@ export class KiteSettleClient {
   /**
    * Build an agent-mode client from the vars store.
    *
-   * Convenience wrapper around `create({ agentId, sessionIndex, sessionSeed })`.
+   * Convenience wrapper around `create({ agentId, sessionKey, sessionSeed })`.
    *
    * @param agentId      On-chain agentId (NFT tokenId from IdentityRegistry).
-   * @param sessionIndex Session key index (default: 0).
+   * @param sessionKey   Optional explicit session key address.
    * @param sessionSeed  Decryption password. Falls back to the AGENT_SEED var.
    * @param options      Optional config / mode overrides.
    */
   static async fromAgent(
     agentId: bigint | string | number,
-    sessionIndex = 0,
+    sessionKey?: string,
     sessionSeed?: string,
     options: Pick<
       KiteSettleClientOptions,
@@ -449,7 +606,7 @@ export class KiteSettleClient {
   ): Promise<KiteSettleClient> {
     return KiteSettleClient.create({
       agentId,
-      sessionIndex,
+      sessionKey,
       sessionSeed,
       ...options,
     });
