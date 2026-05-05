@@ -74,6 +74,12 @@ function parseAgentIndex(args: string[]): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
+function normalizeSessionKey(raw: string): `0x${string}` {
+  return (
+    raw.startsWith("0x") ? raw.toLowerCase() : `0x${raw.toLowerCase()}`
+  ) as `0x${string}`;
+}
+
 function toAgentEntityId(agentId: number): string {
   return `0x${BigInt(agentId).toString(16)}`;
 }
@@ -235,8 +241,26 @@ async function buildSessionClientForAgent(
 // ── channel open ─────────────────────────────────────────────────────────────
 
 async function cmdChannelOpen(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
+  const rawAgent = findFlag(args, "--agent-id") ?? findFlag(args, "--agent");
+  if (!rawAgent) {
+    throw new Error(
+      "--agent <id> (or --agent-id <id>) is required for channel open.",
+    );
+  }
+  const agentIndex = Number.parseInt(rawAgent, 10);
+  if (!Number.isFinite(agentIndex) || agentIndex < 0) {
+    throw new Error("--agent must be a non-negative integer.");
+  }
+  const sessionRaw =
+    findFlag(args, "--session") ??
+    findFlag(args, "--session-key") ??
+    findFlag(args, "--key");
+  if (!sessionRaw) {
+    throw new Error(
+      "--session <sessionKey> is required for channel open (agent/session mode).",
+    );
+  }
+  const sessionKey = normalizeSessionKey(sessionRaw);
 
   const urlFlag = findFlag(args, "--url");
   const url = urlFlag || (await prompt("Enter API URL: "));
@@ -249,7 +273,24 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   const token = await resolveTokenMetadata(tokenFlag ?? "DmUSDT");
   const tokenDecimals = token?.decimals ?? 18;
 
-  const { client, eoaAddress } = await buildAgentClient(credential);
+  const client = await KiteSettleClient.create({
+    agentId: BigInt(agentIndex),
+    sessionKey,
+    defaultPaymentMode: "channel",
+  });
+  const eoaAddress = client.eoaAddress;
+
+  const contract = client.getPaymentClient().getContractService();
+  const [active, , , , , maxValueAllowed, validUntil] =
+    (await contract.validateSession(sessionKey)) as any;
+  if (!active) {
+    throw new Error(`Session ${sessionKey} is not active.`);
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const remainingSeconds = Math.max(0, Number(validUntil) - nowSec);
+  if (remainingSeconds <= 0) {
+    throw new Error(`Session ${sessionKey} is expired.`);
+  }
 
   console.log("");
   console.log("── Opening Payment Channel ───────────────────────────────");
@@ -289,6 +330,17 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   const deposit = depositFlag
     ? parseUnits(depositFlag, tokenDecimals)
     : maxPerCall * BigInt(maxCalls);
+  const spent = await contract.getSessionSpent(sessionKey).catch(() => 0n);
+  const remainingCapacity =
+    maxValueAllowed > spent ? maxValueAllowed - spent : 0n;
+  if (remainingCapacity <= 0n) {
+    throw new Error(
+      `Session ${sessionKey} has no remaining capacity for opening a channel.`,
+    );
+  }
+  const effectiveDeposit =
+    deposit > remainingCapacity ? remainingCapacity : deposit;
+  const effectiveDuration = Math.min(durationSecs, remainingSeconds);
 
   console.log(`  Provider:      ${offer.payTo}`);
   console.log(
@@ -300,10 +352,20 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
     );
   }
   console.log(`  Max calls:     ${maxCalls}`);
-  console.log(`  Duration:      ${durationSecs}s`);
+  console.log(`  Duration:      ${effectiveDuration}s`);
   console.log(
-    `  Total deposit: ${formatUnits(deposit, tokenDecimals)} ${token?.symbol}`,
+    `  Total deposit: ${formatUnits(effectiveDeposit, tokenDecimals)} ${token?.symbol}`,
   );
+  if (effectiveDuration < durationSecs) {
+    console.log(
+      `  Session window cap applied: requested ${durationSecs}s, using ${effectiveDuration}s`,
+    );
+  }
+  if (effectiveDeposit < deposit) {
+    console.log(
+      `  Session capacity cap applied: requested ${formatUnits(deposit, tokenDecimals)}, using ${formatUnits(effectiveDeposit, tokenDecimals)} ${token?.symbol}`,
+    );
+  }
   console.log("");
 
   // Step 2: open channel on-chain
@@ -312,9 +374,9 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
     provider: offer.payTo,
     token: offer.asset,
     mode: "prepaid",
-    deposit,
-    maxSpend: deposit,
-    maxDuration: durationSecs,
+    deposit: effectiveDeposit,
+    maxSpend: effectiveDeposit,
+    maxDuration: effectiveDuration,
     maxPerCall,
   });
 
@@ -325,11 +387,11 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
     token: offer.asset,
     openUrl: url,
     agentAddress: eoaAddress,
-    agentIndex: 0,
+    agentIndex,
     maxPerCall: maxPerCall.toString(),
-    deposit: deposit.toString(),
-    maxSpend: deposit.toString(),
-    durationSecs,
+    deposit: effectiveDeposit.toString(),
+    maxSpend: effectiveDeposit.toString(),
+    durationSecs: effectiveDuration,
     openedAt: Date.now(),
     openTxHash,
     providerMaxRatePerCall,
@@ -658,7 +720,9 @@ async function cmdChannelClose(args: string[]): Promise<void> {
       : "(pending state update)";
 
   console.log(`  Settlement tx:  ${settleTxHash}`);
-  console.log(`  Explorer:       https://testnet.kitescan.ai/tx/${settleTxHash}`);
+  console.log(
+    `  Explorer:       https://testnet.kitescan.ai/tx/${settleTxHash}`,
+  );
   console.log(`  Settlement by:  ${deadlineText}`);
   console.log("  Background wait is non-blocking.");
   console.log("  Track with:     npx kite channel status --channel <id>");
@@ -735,7 +799,9 @@ async function cmdChannelForceClose(args: string[]): Promise<void> {
   const finalizeTx = await client.finalizeChannel(channelId, merkleRoot);
   console.log(`  Finalize tx:   ${finalizeTx}`);
   console.log(`  Explorer:      https://testnet.kitescan.ai/tx/${finalizeTx}`);
-  console.log("  Refund remains in KiteAAWallet (no automatic EOA withdrawal).");
+  console.log(
+    "  Refund remains in KiteAAWallet (no automatic EOA withdrawal).",
+  );
 
   const updated = await client.getChannel(channelId);
   if (updated.status === ChannelStatus.Closed && deleteChannel(channelId)) {

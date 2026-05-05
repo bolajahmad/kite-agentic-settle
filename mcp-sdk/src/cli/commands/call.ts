@@ -5,6 +5,7 @@ import {
   parseUnits,
   recoverMessageAddress,
 } from "viem";
+import { createChannelRecord } from "../../channel-store.js";
 import { KitePaymentClient } from "../../client.js";
 import {
   DecisionMode,
@@ -47,6 +48,62 @@ interface ChannelFlowOpts {
   durationSecs: number;
   ratePerCallOverride?: bigint;
   depositOverride?: bigint;
+  agentIndex?: number;
+  eoaAddress?: string;
+  sessionKeyAddress?: `0x${string}`;
+  sessionRemainingSeconds?: number;
+  sessionRemainingCapacity?: bigint;
+}
+
+function clampChannelOpenToSession(
+  requestedDurationSecs: number,
+  requestedDeposit: bigint,
+  opts: ChannelFlowOpts,
+): { durationSecs: number; deposit: bigint } {
+  const remainingSeconds = opts.sessionRemainingSeconds;
+  const remainingCapacity = opts.sessionRemainingCapacity;
+
+  if (remainingSeconds === undefined || remainingCapacity === undefined) {
+    return {
+      durationSecs: requestedDurationSecs,
+      deposit: requestedDeposit,
+    };
+  }
+
+  if (remainingSeconds <= 0) {
+    throw new Error(
+      "Selected session is expired or has no remaining validity window.",
+    );
+  }
+
+  if (remainingCapacity <= 0n) {
+    throw new Error(
+      "Selected session has no remaining spend capacity for opening a channel.",
+    );
+  }
+
+  const durationSecs = Math.min(requestedDurationSecs, remainingSeconds);
+  const deposit =
+    requestedDeposit > remainingCapacity ? remainingCapacity : requestedDeposit;
+
+  if (durationSecs < requestedDurationSecs) {
+    console.log(
+      `  Session window cap: requested ${requestedDurationSecs}s, using ${durationSecs}s.`,
+    );
+  }
+  if (deposit < requestedDeposit) {
+    console.log(
+      `  Session capacity cap: requested ${requestedDeposit.toString()} base units, using ${deposit.toString()}.`,
+    );
+  }
+
+  if (deposit <= 0n) {
+    throw new Error(
+      "Effective deposit is zero after applying session capacity limits.",
+    );
+  }
+
+  return { durationSecs, deposit };
 }
 
 async function promptForPayment(req: PaymentRequest): Promise<boolean> {
@@ -494,8 +551,16 @@ async function runBatchApiCallsFlow(
     const recommendedDeposit = raw?.channelOptions?.recommendedDeposit
       ? BigInt(raw.channelOptions.recommendedDeposit)
       : maxPerCall * 10n;
-    const deposit = depositOverride ?? recommendedDeposit;
-    const maxDuration: number = raw?.channelOptions?.maxDuration ?? 3600;
+    const requestedDeposit = depositOverride ?? recommendedDeposit;
+    const requestedMaxDuration: number =
+      raw?.channelOptions?.maxDuration ?? 3600;
+    const constrained = clampChannelOpenToSession(
+      requestedMaxDuration,
+      requestedDeposit,
+      opts,
+    );
+    const deposit = constrained.deposit;
+    const maxDuration = constrained.durationSecs;
 
     console.log(
       `  Deposit:          ${formatUnits(deposit, token?.decimals || 18)} ${token?.symbol}`,
@@ -516,6 +581,27 @@ async function runBatchApiCallsFlow(
     channelId = newChannelId;
     console.log(`  Channel ID:   ${channelId}`);
     console.log(`  Open tx:      ${openTxHash}`);
+
+    if (opts.agentIndex !== undefined && opts.eoaAddress) {
+      createChannelRecord({
+        channelId,
+        provider: offer.payTo,
+        token: offer.asset,
+        openUrl: url,
+        agentAddress: opts.eoaAddress,
+        agentIndex: opts.agentIndex,
+        maxPerCall: maxPerCall.toString(),
+        deposit: deposit.toString(),
+        maxSpend: deposit.toString(),
+        durationSecs: maxDuration,
+        openedAt: Date.now(),
+        openTxHash,
+        providerMaxRatePerCall: offer.maxRatePerCall,
+      });
+      console.log(
+        `  Saved local channel state: ~/.kite-agent-pay/channels/${channelId}.json`,
+      );
+    }
 
     client.setChannelForProvider(offer.payTo, channelId);
 
@@ -649,7 +735,14 @@ async function runStreamCallsFlow(opts: ChannelFlowOpts) {
       ? BigInt(offer.maxRatePerCall)
       : BigInt(offer.maxAmountRequired));
   // Deposit covers maxCalls worth of calls — unused funds are refunded on settle.
-  const deposit = depositOverride ?? maxPerCall * BigInt(maxCalls);
+  const requestedDeposit = depositOverride ?? maxPerCall * BigInt(maxCalls);
+  const constrained = clampChannelOpenToSession(
+    durationSecs,
+    requestedDeposit,
+    opts,
+  );
+  const deposit = constrained.deposit;
+  const effectiveDurationSecs = constrained.durationSecs;
 
   console.log(`  Provider:      ${offer.payTo}`);
   console.log(
@@ -675,11 +768,32 @@ async function runStreamCallsFlow(opts: ChannelFlowOpts) {
     mode: "prepaid",
     deposit,
     maxSpend: deposit,
-    maxDuration: durationSecs,
+    maxDuration: effectiveDurationSecs,
     maxPerCall,
   });
   console.log(`  Channel ID:   ${channelId}`);
   console.log(`  Open tx:      ${openTxHash}`);
+
+  if (opts.agentIndex !== undefined && opts.eoaAddress) {
+    createChannelRecord({
+      channelId,
+      provider: offer.payTo,
+      token: offer.asset,
+      openUrl: url,
+      agentAddress: opts.eoaAddress,
+      agentIndex: opts.agentIndex,
+      maxPerCall: maxPerCall.toString(),
+      deposit: deposit.toString(),
+      maxSpend: deposit.toString(),
+      durationSecs: effectiveDurationSecs,
+      openedAt: Date.now(),
+      openTxHash,
+      providerMaxRatePerCall: offer.maxRatePerCall,
+    });
+    console.log(
+      `  Saved local channel state: ~/.kite-agent-pay/channels/${channelId}.json`,
+    );
+  }
 
   // Notify the interceptor so auto/channel mode works if client.fetch is
   // called in a different context after this flow completes.
@@ -756,7 +870,9 @@ export async function callApi(args: string[]) {
     : undefined;
 
   const indexedSessions = agentIdStr
-    ? await getSessionsByAgent(`0x${BigInt(agentIdStr)}`).catch(() => [])
+    ? await getSessionsByAgent(`0x${BigInt(agentIdStr).toString(16)}`).catch(
+        () => [],
+      )
     : [];
 
   const normalizeSession = (raw: string) =>
@@ -765,6 +881,20 @@ export async function callApi(args: string[]) {
   const explicitSessionKey = sessionKeyFlag
     ? normalizeSession(sessionKeyFlag)
     : undefined;
+  const requiresSessionBoundChannel = mode === "batch" || mode === "stream";
+
+  if (requiresSessionBoundChannel) {
+    if (!agentIdStr) {
+      throw new Error(
+        "Channel mode requires --agent <id> so the channel is opened against an agent/session context.",
+      );
+    }
+    if (!explicitSessionKey) {
+      throw new Error(
+        "Channel mode requires --session <sessionKey> (or --session-key/--key).",
+      );
+    }
+  }
 
   const now = Math.floor(Date.now() / 1000);
   const autoCandidates = indexedSessions
@@ -786,11 +916,13 @@ export async function callApi(args: string[]) {
     new Set([...autoCandidates, ...localCandidates]),
   );
 
-  const sessionsToTry = explicitSessionKey
+  const sessionsToTry = requiresSessionBoundChannel
     ? [explicitSessionKey]
-    : mergedCandidates.length > 0
-      ? mergedCandidates
-      : [undefined];
+    : explicitSessionKey
+      ? [explicitSessionKey]
+      : mergedCandidates.length > 0
+        ? mergedCandidates
+        : [undefined];
 
   const runWithSettle = async (settle: KiteSettleClient): Promise<void> => {
     const sessionKeyAddress = settle.sessionKeyAddress;
@@ -819,6 +951,28 @@ export async function callApi(args: string[]) {
             sessionKeyAddress.toLowerCase(),
         )
       : indexedSessions[0];
+
+    let sessionRemainingSeconds: number | undefined;
+    let sessionRemainingCapacity: bigint | undefined;
+
+    if (requiresSessionBoundChannel) {
+      if (!sessionKeyAddress) {
+        throw new Error(
+          "No session key is attached to this client. Use --agent and --session.",
+        );
+      }
+      const contract = settle.getPaymentClient().getContractService();
+      const [active, , , , , maxValueAllowed, validUntil] =
+        (await contract.validateSession(sessionKeyAddress)) as any;
+      if (!active) {
+        throw new Error(`Session ${sessionKeyAddress} is not active.`);
+      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      sessionRemainingSeconds = Math.max(0, Number(validUntil) - nowSec);
+      const spent = await contract.getSessionSpent(sessionKeyAddress);
+      sessionRemainingCapacity =
+        maxValueAllowed > spent ? maxValueAllowed - spent : 0n;
+    }
 
     const defaultRule: SessionRules = selectedSession
       ? {
@@ -861,6 +1015,11 @@ export async function callApi(args: string[]) {
           durationSecs,
           ratePerCallOverride,
           depositOverride,
+          agentIndex: agentIdStr ? Number.parseInt(agentIdStr, 10) : undefined,
+          eoaAddress: settle.eoaAddress,
+          sessionKeyAddress: sessionKeyAddress as `0x${string}` | undefined,
+          sessionRemainingSeconds,
+          sessionRemainingCapacity,
         },
         channelIdFlag,
       );
@@ -879,6 +1038,11 @@ export async function callApi(args: string[]) {
         durationSecs,
         ratePerCallOverride,
         depositOverride,
+        agentIndex: agentIdStr ? Number.parseInt(agentIdStr, 10) : undefined,
+        eoaAddress: settle.eoaAddress,
+        sessionKeyAddress: sessionKeyAddress as `0x${string}` | undefined,
+        sessionRemainingSeconds,
+        sessionRemainingCapacity,
       });
       return;
     }
