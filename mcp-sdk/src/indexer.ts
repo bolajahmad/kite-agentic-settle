@@ -79,6 +79,34 @@ export interface IndexedSessionKeyAdded {
   transactionHash: string;
 }
 
+export interface IndexedChannel {
+  id: string;
+  channelId: string;
+  user: { id: string; address: string };
+  provider: string;
+  agent: { id: string; agentId: string };
+  session: { id: string; sessionKey: string };
+  walletContract: string;
+  mode: string;
+  token: string;
+  deposit: string;
+  maxSpend: string;
+  maxPerCall: string;
+  status: string;
+  openedAt: string;
+  expiresAt: string;
+  closedAt?: string | null;
+  settlementInitiator?: string | null;
+  settlementDeadline?: string | null;
+  highestClaimedCost?: string | null;
+  highestSequenceNumber?: string | null;
+  settledAmount: string;
+  refundAmount: string;
+  usageMerkleRoot?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface IndexedUserRegistered {
   address: string;
   wallet: string;
@@ -347,6 +375,94 @@ export async function getUserAgentsWithActiveSessions(
     { userId: userId.toLowerCase() },
   );
   return data.user || null;
+}
+
+export async function getChannelsByAgent(
+  agentId: string,
+  limit: number = 10,
+  offset: number = 0,
+): Promise<IndexedChannel[]> {
+  const data = await query(
+    `
+    query($agentId: String!, $first: Int!, $skip: Int!) {
+      channels(
+        where: { agent: $agentId }
+        orderBy: openedAt
+        orderDirection: desc
+        first: $first
+        skip: $skip
+      ) {
+        id
+        channelId
+        user { id address }
+        provider
+        agent { id agentId }
+        session { id sessionKey }
+        walletContract
+        mode
+        token
+        deposit
+        maxSpend
+        maxPerCall
+        status
+        openedAt
+        expiresAt
+        closedAt
+        settlementInitiator
+        settlementDeadline
+        highestClaimedCost
+        highestSequenceNumber
+        settledAmount
+        refundAmount
+        usageMerkleRoot
+        createdAt
+        updatedAt
+      }
+    }
+  `,
+    { agentId: agentId.toLowerCase(), first: limit, skip: offset },
+  );
+  return data.channels || [];
+}
+
+export async function getChannelById(
+  channelId: string,
+): Promise<IndexedChannel | null> {
+  const data = await query(
+    `
+    query($id: String!) {
+      channel(id: $id) {
+        id
+        channelId
+        user { id address }
+        provider
+        agent { id agentId }
+        session { id sessionKey }
+        walletContract
+        mode
+        token
+        deposit
+        maxSpend
+        maxPerCall
+        status
+        openedAt
+        expiresAt
+        closedAt
+        settlementInitiator
+        settlementDeadline
+        highestClaimedCost
+        highestSequenceNumber
+        settledAmount
+        refundAmount
+        usageMerkleRoot
+        createdAt
+        updatedAt
+      }
+    }
+  `,
+    { id: channelId.toLowerCase() },
+  );
+  return data.channel || null;
 }
 
 // ── Rich Payment queries (uses the Payment entity with full relations) ──────

@@ -176,6 +176,7 @@ async function waitForChannelActive(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const ch = await client.getChannel(channelId);
+    console.log({ ch });
     if (ch.status === ChannelStatus.Active) return true;
     // Wait 3 s between polls without blocking the event loop entirely.
     await new Promise((r) => setTimeout(r, 3_000));
@@ -272,7 +273,8 @@ async function runChannelCallLoop(
     console.log(`  Call #${callCount}...`);
     const t0 = Date.now();
     const headers = buildChannelHeaders(channelId, lastReceipt);
-    const response = await globalThis.fetch(url, { headers });
+    const response = await client.fetch(url, { headers });
+    console.log({ response });
     const elapsed = Date.now() - t0;
 
     if (response.status === 402) {
@@ -768,7 +770,8 @@ export async function callApi(args: string[]) {
   const autoCandidates = indexedSessions
     .filter(
       (session) =>
-        session.status.toUpperCase() === "ACTIVE" && Number(session.validUntil) > now,
+        session.status.toUpperCase() === "ACTIVE" &&
+        Number(session.validUntil) > now,
     )
     .map((session) => session.sessionKey.toLowerCase());
 
@@ -812,33 +815,33 @@ export async function callApi(args: string[]) {
     const selectedSession = sessionKeyAddress
       ? indexedSessions.find(
           (session) =>
-            session.sessionKey.toLowerCase() === sessionKeyAddress.toLowerCase(),
+            session.sessionKey.toLowerCase() ===
+            sessionKeyAddress.toLowerCase(),
         )
       : indexedSessions[0];
 
-    const defaultRule: SessionRules =
-      selectedSession
-        ? {
-            maxPerCall: formatUnits(
-              BigInt(selectedSession.valueLimit),
-              token?.decimals ?? 18,
-            ).toString(),
-            maxPerSession: formatUnits(
-              BigInt(selectedSession.maxLimit ?? selectedSession.valueLimit),
-              token?.decimals ?? 18,
-            ).toString(),
-            blockedAgents: selectedSession.blockedAgents ?? [],
-            requireApprovalAbove: formatUnits(
-              BigInt(selectedSession.maxLimit ?? selectedSession.valueLimit),
-              token?.decimals ?? 18,
-            ).toString(),
-          }
-        : {
-            maxPerCall: "10",
-            maxPerSession: "100",
-            blockedAgents: [],
-            requireApprovalAbove: "50",
-          };
+    const defaultRule: SessionRules = selectedSession
+      ? {
+          maxPerCall: formatUnits(
+            BigInt(selectedSession.valueLimit),
+            token?.decimals ?? 18,
+          ).toString(),
+          maxPerSession: formatUnits(
+            BigInt(selectedSession.maxLimit ?? selectedSession.valueLimit),
+            token?.decimals ?? 18,
+          ).toString(),
+          blockedAgents: selectedSession.blockedAgents ?? [],
+          requireApprovalAbove: formatUnits(
+            BigInt(selectedSession.maxLimit ?? selectedSession.valueLimit),
+            token?.decimals ?? 18,
+          ).toString(),
+        }
+      : {
+          maxPerCall: "10",
+          maxPerSession: "100",
+          blockedAgents: [],
+          requireApprovalAbove: "50",
+        };
 
     let lastPaymentResult: PaymentResult | undefined;
     const onPayment = (result: PaymentResult) => {

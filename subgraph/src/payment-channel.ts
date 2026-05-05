@@ -26,6 +26,7 @@ export function handleChannelOpened(event: ChannelOpenedEvent): void {
   channel.user = session.user;
   channel.agent = session.agent;
   channel.provider = event.params.provider;
+  channel.session = sessionId;
 
   channel.walletContract = event.params.walletContract;
   channel.token = event.params.token;
@@ -36,6 +37,7 @@ export function handleChannelOpened(event: ChannelOpenedEvent): void {
   channel.maxSpend = event.params.maxSpend;
   channel.maxPerCall = event.params.maxPerCall;
   channel.refundAmount = BigInt.fromI32(0);
+  channel.settledAmount = BigInt.fromI32(0);
 
   channel.status = "OPEN";
   channel.openedAt = event.block.timestamp;

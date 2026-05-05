@@ -48,9 +48,10 @@ export interface BatchSession {
 
 export interface ChannelState {
   channelId: `0x${string}`;
-  consumer: string;
-  provider: string;
-  token: string;
+  user: `0x${string}`;
+  consumer: `0x${string}`;
+  provider: `0x${string}`;
+  token: `0x${string}`;
   mode: number;
   deposit: bigint;
   maxSpend: bigint;
@@ -63,6 +64,7 @@ export interface ChannelState {
   settlementDeadline: number;
   highestClaimedCost: bigint;
   highestSequenceNumber: number;
+  wallet: `0x${string}`;
 }
 
 export enum ChannelStatus {

@@ -89,8 +89,8 @@ type Channel @entity(immutable: false) {
 
   settlementInitiator: Bytes
   settlementDeadline: BigInt
-  highestClaimedCost: BigInt!
-  highestSequenceNumber: BigInt!
+  highestClaimedCost: BigInt
+  highestSequenceNumber: BigInt
   settledAmount: BigInt!
   refundAmount: BigInt!
 

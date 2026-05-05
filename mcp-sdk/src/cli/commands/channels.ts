@@ -15,6 +15,11 @@ import {
   type ChannelCallReceipt,
   type StoredChannel,
 } from "../../channel-store.js";
+import {
+  getChannelById,
+  getChannelsByAgent,
+  type IndexedChannel,
+} from "../../indexer.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { ChannelStatus } from "../../types.js";
 import { prompt, resolveTokenMetadata } from "../../utils/index.js";
@@ -53,6 +58,180 @@ async function buildAgentClient(credential: string): Promise<{
   };
 }
 
+function parsePagination(args: string[]): { limit: number; offset: number } {
+  const limitRaw = findFlag(args, "--limit");
+  const offsetRaw = findFlag(args, "--offset");
+
+  return {
+    limit: limitRaw ? Math.max(1, Number.parseInt(limitRaw, 10)) : 10,
+    offset: offsetRaw ? Math.max(0, Number.parseInt(offsetRaw, 10)) : 0,
+  };
+}
+
+function parseAgentIndex(args: string[]): number {
+  const raw = findFlag(args, "--agent-id") ?? findFlag(args, "--agent") ?? "0";
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function toAgentEntityId(agentId: number): string {
+  return `0x${BigInt(agentId).toString(16)}`;
+}
+
+function formatSeconds(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function formatIsoFromSeconds(
+  unixSeconds: string | number | null | undefined,
+): string {
+  if (unixSeconds === null || unixSeconds === undefined) return "-";
+  const n = Number(unixSeconds);
+  if (!Number.isFinite(n) || n <= 0) return "-";
+  return new Date(n * 1000).toISOString();
+}
+
+function safeBigInt(
+  value: string | number | bigint | null | undefined,
+): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return BigInt(Math.max(0, Math.floor(value)));
+  if (!value) return 0n;
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
+}
+
+function indexedStatusLabel(status: string): string {
+  switch (status.toUpperCase()) {
+    case "OPEN":
+      return "Pending Activation";
+    case "ACTIVE":
+      return "Active";
+    case "SETTLEMENT_PENDING":
+      return "Settlement Pending";
+    case "CLOSED":
+      return "Closed";
+    default:
+      return status || "Unknown";
+  }
+}
+
+function computeChannelSnapshot(
+  indexed: IndexedChannel | null,
+  cached: StoredChannel | null,
+): {
+  source: string;
+  status: string;
+  spentRaw: bigint;
+  maxPerCallRaw: bigint;
+  maxSpendRaw: bigint;
+  durationText: string;
+} {
+  const hasIndexed = !!indexed;
+  const hasCached = !!cached;
+
+  const source = hasIndexed
+    ? hasCached
+      ? "graphql+in-memory"
+      : "graphql"
+    : "in-memory";
+
+  const status = hasIndexed
+    ? indexedStatusLabel(indexed.status)
+    : "In-memory only";
+
+  const indexedSpent = hasIndexed
+    ? safeBigInt(indexed.highestClaimedCost ?? indexed.settledAmount)
+    : 0n;
+  const cachedSpent = hasCached ? safeBigInt(cached.cumulativeCost) : 0n;
+  const spentRaw = indexedSpent > cachedSpent ? indexedSpent : cachedSpent;
+
+  const maxPerCallRaw = hasIndexed
+    ? safeBigInt(indexed.maxPerCall)
+    : hasCached
+      ? safeBigInt(cached.maxPerCall)
+      : 0n;
+
+  const maxSpendRaw = hasIndexed
+    ? safeBigInt(indexed.maxSpend)
+    : hasCached
+      ? safeBigInt(cached.maxSpend)
+      : 0n;
+
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  let durationText = "-";
+  if (hasIndexed) {
+    const openedAt = Number(indexed.openedAt);
+    const expiresAt = Number(indexed.expiresAt);
+    const total = Math.max(0, expiresAt - openedAt);
+    const remaining = Math.max(0, expiresAt - nowSec);
+    durationText = `${formatSeconds(remaining)} remaining / ${formatSeconds(total)} total`;
+  } else if (hasCached) {
+    const elapsed = Math.max(
+      0,
+      Math.floor((Date.now() - cached.openedAt) / 1000),
+    );
+    const total = Math.max(0, cached.durationSecs);
+    const remaining = Math.max(0, total - elapsed);
+    durationText = `${formatSeconds(remaining)} remaining / ${formatSeconds(total)} total`;
+  }
+
+  return {
+    source,
+    status,
+    spentRaw,
+    maxPerCallRaw,
+    maxSpendRaw,
+    durationText,
+  };
+}
+
+function resolveStoredMerkleRoot(channelId: `0x${string}`): `0x${string}` {
+  const stored = loadChannel(channelId);
+  if (!stored?.merkleRoot) {
+    return "0x0000000000000000000000000000000000000000000000000000000000000000";
+  }
+  return stored.merkleRoot;
+}
+
+function resolveLatestStoredReceipt(
+  channelId: `0x${string}`,
+): ChannelCallReceipt | null {
+  const stored = loadChannel(channelId);
+  const latest = stored?.calls.at(-1)?.channelReceipt;
+  return latest ?? null;
+}
+
+async function buildSessionClientForAgent(
+  agentIndex: number,
+  channelId?: `0x${string}`,
+): Promise<KiteSettleClient> {
+  let sessionKey: string | undefined;
+
+  if (channelId) {
+    const indexedChannel = await getChannelById(channelId).catch(() => null);
+    sessionKey = indexedChannel?.session?.sessionKey;
+  }
+
+  return KiteSettleClient.create({
+    agentId: BigInt(agentIndex),
+    sessionKey,
+    defaultPaymentMode: "channel",
+    allowUnavailableSession: true,
+  });
+}
+
 // ── channel open ─────────────────────────────────────────────────────────────
 
 async function cmdChannelOpen(args: string[]): Promise<void> {
@@ -61,9 +240,6 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
 
   const urlFlag = findFlag(args, "--url");
   const url = urlFlag || (await prompt("Enter API URL: "));
-  const agentIndex = Number(
-    findFlag(args, "--agent") ?? findFlag(args, "-aid") ?? "0",
-  );
   const maxCalls = Number(findFlag(args, "--max-calls") ?? "100");
   const durationSecs = Number(findFlag(args, "--duration") ?? "3600");
   const depositFlag = findFlag(args, "--deposit");
@@ -213,116 +389,220 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
 // ── channel status ────────────────────────────────────────────────────────────
 
 async function cmdChannelStatus(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
-
   const channelFlag = findFlag(args, "--channel") as `0x${string}` | undefined;
+  const includeCache = args.includes("--include-cache");
+  const agentIndex = parseAgentIndex(args);
+  const agentEntityId = toAgentEntityId(agentIndex);
+  const { limit, offset } = parsePagination(args);
 
-  const { client } = await buildAgentClient(credential);
+  if (channelFlag) {
+    const indexed = await getChannelById(channelFlag).catch(() => null);
+    const cached = includeCache ? loadChannel(channelFlag) : null;
 
-  // If a specific channel was requested but it's not in local store,
-  // still try to look it up on-chain.
-  const all = listChannels().filter(
-    (s) =>
-      !channelFlag || s.channelId.toLowerCase() === channelFlag.toLowerCase(),
-  );
+    if (!indexed && !cached) {
+      console.log("");
+      console.log(`  Channel ${channelFlag} was not found in GraphQL indexer.`);
+      if (!includeCache) {
+        console.log(
+          "  Re-run with --include-cache to include local in-memory state.",
+        );
+      }
+      return;
+    }
 
-  if (all.length === 0 && !channelFlag) {
+    const snapshot = computeChannelSnapshot(indexed, cached);
+    const callsRemainingRaw =
+      snapshot.maxPerCallRaw > 0n
+        ? (snapshot.maxSpendRaw > snapshot.spentRaw
+            ? snapshot.maxSpendRaw - snapshot.spentRaw
+            : 0n) / snapshot.maxPerCallRaw
+        : null;
+
     console.log("");
+    console.log("── Channel Status ────────────────────────────────────────");
+    console.log(`  Channel ID:      ${channelFlag.toLowerCase()}`);
+    console.log(`  Source:          ${snapshot.source}`);
+    console.log(`  Status:          ${snapshot.status}`);
+    console.log(`  Spent:           ${formatUnits(snapshot.spentRaw, 18)}`);
     console.log(
-      "  No channels found. Open one with: npx kite channel open --url <api>",
+      `  Calls remaining: ${callsRemainingRaw === null ? "n/a" : callsRemainingRaw.toString()}`,
     );
+    console.log(`  Duration:        ${snapshot.durationText}`);
+    if (indexed) {
+      console.log(
+        `  Opened at:       ${formatIsoFromSeconds(indexed.openedAt)}`,
+      );
+      console.log(
+        `  Expires at:      ${formatIsoFromSeconds(indexed.expiresAt)}`,
+      );
+      if (indexed.status.toUpperCase() === "SETTLEMENT_PENDING") {
+        const deadline = Number(indexed.settlementDeadline ?? "0");
+        const now = Math.floor(Date.now() / 1000);
+        if (deadline > 0) {
+          const challengeState =
+            now <= deadline
+              ? `open (${formatSeconds(deadline - now)} left)`
+              : "closed (finalizable)";
+          console.log(
+            `  Settlement by:   ${formatIsoFromSeconds(indexed.settlementDeadline)} (${challengeState})`,
+          );
+        }
+      }
+    }
+    console.log("──────────────────────────────────────────────────────────");
     return;
   }
 
-  const ids = all.length > 0 ? all.map((s) => s.channelId) : [channelFlag!];
+  const indexedChannels = await getChannelsByAgent(
+    agentEntityId,
+    limit,
+    offset,
+  ).catch((err: Error) => {
+    throw new Error(`Failed to query channels from indexer: ${err.message}`);
+  });
 
-  for (const channelId of ids) {
-    const stored =
-      all.find((s) => s.channelId.toLowerCase() === channelId.toLowerCase()) ??
-      null;
+  const cachedChannels = includeCache
+    ? listChannels().filter((s) => s.agentIndex === agentIndex)
+    : [];
 
-    console.log("");
-    console.log("── Channel ───────────────────────────────────────────────");
+  const cachedById = new Map(
+    cachedChannels.map((entry) => [entry.channelId.toLowerCase(), entry]),
+  );
 
-    if (stored) {
-      console.log(`  Channel ID:    ${channelId}`);
-      console.log(`  Provider:      ${stored.provider}`);
-      if (stored.openUrl) console.log(`  Open URL:      ${stored.openUrl}`);
-      console.log(
-        `  Agent:         ${stored.agentAddress} (index ${stored.agentIndex})`,
+  const rows: Array<{
+    channelId: string;
+    source: string;
+    status: string;
+    spent: string;
+    callsRemaining: string;
+    duration: string;
+  }> = indexedChannels.map((indexed) => {
+    const cacheMatch = cachedById.get(indexed.channelId.toLowerCase()) ?? null;
+    const snapshot = computeChannelSnapshot(indexed, cacheMatch);
+    const callsRemainingRaw =
+      snapshot.maxPerCallRaw > 0n
+        ? (snapshot.maxSpendRaw > snapshot.spentRaw
+            ? snapshot.maxSpendRaw - snapshot.spentRaw
+            : 0n) / snapshot.maxPerCallRaw
+        : null;
+
+    return {
+      channelId: indexed.channelId.toLowerCase(),
+      source: snapshot.source,
+      status: snapshot.status,
+      spent: formatUnits(snapshot.spentRaw, 18),
+      callsRemaining:
+        callsRemainingRaw === null ? "n/a" : callsRemainingRaw.toString(),
+      duration: snapshot.durationText,
+    };
+  });
+
+  if (includeCache) {
+    for (const cached of cachedChannels) {
+      const existsInIndexed = indexedChannels.some(
+        (indexed) =>
+          indexed.channelId.toLowerCase() === cached.channelId.toLowerCase(),
       );
-      console.log(`  Calls made:    ${stored.callCount}`);
-      console.log(`  Duration:      ${stored.durationSecs}s`);
-      console.log(
-        `  Deposit:       ${formatUnits(BigInt(stored.deposit), 18)} (${stored.deposit} raw)`,
-      );
-      console.log(
-        `  Max/call cap:  ${formatUnits(BigInt(stored.maxPerCall), 18)}`,
-      );
-      console.log(
-        `  Opened at:     ${new Date(stored.openedAt).toISOString()}`,
-      );
-      console.log(`  Open tx:       ${stored.openTxHash}`);
-      if (stored.merkleRoot && stored.callCount > 0) {
-        console.log(`  Merkle root:   ${stored.merkleRoot}`);
-      }
-    } else {
-      console.log(`  Channel ID:    ${channelId}`);
-      console.log(`  (no local record — fetching on-chain state only)`);
+      if (existsInIndexed) continue;
+
+      const snapshot = computeChannelSnapshot(null, cached);
+      const callsRemainingRaw =
+        snapshot.maxPerCallRaw > 0n
+          ? (snapshot.maxSpendRaw > snapshot.spentRaw
+              ? snapshot.maxSpendRaw - snapshot.spentRaw
+              : 0n) / snapshot.maxPerCallRaw
+          : null;
+
+      rows.push({
+        channelId: cached.channelId.toLowerCase(),
+        source: snapshot.source,
+        status: snapshot.status,
+        spent: formatUnits(snapshot.spentRaw, 18),
+        callsRemaining:
+          callsRemainingRaw === null ? "n/a" : callsRemainingRaw.toString(),
+        duration: snapshot.durationText,
+      });
     }
-
-    // Live on-chain state
-    try {
-      const ch = await client.getChannel(channelId);
-      console.log("");
-      console.log("  ── On-chain ──────────────────────────────────────");
-      console.log(`  Status:           ${channelStatusLabel(ch.status)}`);
-      console.log(`  Deposit:          ${formatUnits(ch.deposit, 18)}`);
-      console.log(`  Settled:          ${formatUnits(ch.settledAmount, 18)}`);
-      console.log(
-        `  Highest claimed:  ${formatUnits(ch.highestClaimedCost, 18)}`,
-      );
-      console.log(`  Sequence #:       ${ch.highestSequenceNumber}`);
-      if (ch.expiresAt > 0) {
-        console.log(
-          `  Expires at:       ${new Date(ch.expiresAt * 1000).toISOString()}`,
-        );
-      }
-      if (ch.settlementDeadline > 0) {
-        console.log(
-          `  Settlement by:    ${new Date(ch.settlementDeadline * 1000).toISOString()}`,
-        );
-      }
-    } catch (err: any) {
-      console.log(`  (on-chain lookup failed: ${err.message})`);
-    }
-
-    console.log("──────────────────────────────────────────────────────────");
   }
+
+  if (rows.length === 0) {
+    console.log("");
+    console.log(`  No channels found for agent ${agentIndex}.`);
+    if (!includeCache) {
+      console.log(
+        "  Re-run with --include-cache to include local in-memory state.",
+      );
+    }
+    return;
+  }
+
+  const headers = [
+    "Channel ID",
+    "Source",
+    "Status",
+    "Spent",
+    "Calls Remaining",
+    "Duration",
+  ];
+  const widths = [
+    Math.max(headers[0].length, ...rows.map((row) => row.channelId.length)),
+    Math.max(headers[1].length, ...rows.map((row) => row.source.length)),
+    Math.max(headers[2].length, ...rows.map((row) => row.status.length)),
+    Math.max(headers[3].length, ...rows.map((row) => row.spent.length)),
+    Math.max(
+      headers[4].length,
+      ...rows.map((row) => row.callsRemaining.length),
+    ),
+    Math.max(headers[5].length, ...rows.map((row) => row.duration.length)),
+  ];
+  const pad = (value: string, width: number) => value.padEnd(width, " ");
+
+  const pageInfo =
+    indexedChannels.length < limit
+      ? `${offset + 1}-${offset + indexedChannels.length} (all results in this page)`
+      : `${offset + 1}-${offset + indexedChannels.length}  (pass --offset ${offset + limit} for next page)`;
+
+  console.log("");
+  console.log(`  Channel status for agent ${agentIndex} (${agentEntityId})`);
+  console.log(`  Showing indexed: ${pageInfo}`);
+  if (includeCache) {
+    const localOnly = rows.filter((row) => row.source === "in-memory").length;
+    if (localOnly > 0) {
+      console.log(`  Added from in-memory only: ${localOnly}`);
+    }
+  }
+  console.log("");
+  console.log(
+    `  ${pad(headers[0], widths[0])}  ${pad(headers[1], widths[1])}  ${pad(headers[2], widths[2])}  ${pad(headers[3], widths[3])}  ${pad(headers[4], widths[4])}  ${pad(headers[5], widths[5])}`,
+  );
+  console.log(
+    `  ${"-".repeat(widths[0])}  ${"-".repeat(widths[1])}  ${"-".repeat(widths[2])}  ${"-".repeat(widths[3])}  ${"-".repeat(widths[4])}  ${"-".repeat(widths[5])}`,
+  );
+  for (const row of rows) {
+    console.log(
+      `  ${pad(row.channelId, widths[0])}  ${pad(row.source, widths[1])}  ${pad(row.status, widths[2])}  ${pad(row.spent, widths[3])}  ${pad(row.callsRemaining, widths[4])}  ${pad(row.duration, widths[5])}`,
+    );
+  }
+  console.log("");
+  console.log(`  Returned: ${rows.length} channel(s)`);
 }
 
 async function cmdChannelClose(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
-
   const channelRaw =
     findFlag(args, "--channel") || (await prompt("Enter channel ID: "));
   const channelId = channelRaw.trim() as `0x${string}`;
-  const agentIndex = Number(
-    findFlag(args, "--agent-id") ?? findFlag(args, "--agent") ?? "0",
-  );
-  const skipWithdraw = args.includes("--no-withdraw");
-
-  const { client, eoaAddress } = await buildAgentClient(credential);
+  const agentIndex = parseAgentIndex(args);
+  const client = await buildSessionClientForAgent(agentIndex, channelId);
+  const merkleRoot = resolveStoredMerkleRoot(channelId);
+  const latestReceipt = resolveLatestStoredReceipt(channelId);
 
   console.log("");
-  console.log("── Closing Payment Channel ───────────────────────────────");
+  console.log("── Closing Payment Channel (Agent) ───────────────────────");
   console.log(`  Channel ID:  ${channelId}`);
-  console.log(`  EOA:         ${eoaAddress}`);
+  console.log(`  Agent ID:    ${agentIndex}`);
+  console.log(`  Signer:      ${client.address}`);
   console.log("");
 
-  // ── 1. Fetch on-chain channel state ──────────────────────────────────────
   console.log("  Fetching on-chain channel state...");
   const ch = await client.getChannel(channelId);
 
@@ -334,213 +614,275 @@ async function cmdChannelClose(args: string[]): Promise<void> {
   console.log(`  Status:      ${channelStatusLabel(ch.status)}`);
   console.log(`  Provider:    ${ch.provider}`);
   console.log(`  Deposit:     ${formatUnits(ch.deposit, 18)} (total locked)`);
-  console.log(
-    `  Settled:     ${formatUnits(ch.settledAmount, 18)} (provider claimed so far)`,
-  );
-  const unspent = ch.deposit - ch.highestClaimedCost;
-  console.log(`  Refundable:  ~${formatUnits(unspent, 18)} (estimate)`);
+  console.log(`  Settled:     ${formatUnits(ch.settledAmount, 18)}`);
+  console.log(`  Merkle root: ${merkleRoot}`);
   console.log("");
 
-  // ── 2. Initiate settlement (starts challenge window) ─────────────────────
   if (ch.status === ChannelStatus.SettlementPending) {
-    console.log("  Settlement already pending — skipping initiateSettlement.");
-  } else {
-    console.log("  Initiating settlement on-chain...");
-    let settleTxHash: string;
-    if (
-      ch.status === ChannelStatus.Open ||
-      ch.status === ChannelStatus.Active
-    ) {
-      // Check if channel has expired — use forceCloseExpired if so
-      const now = Math.floor(Date.now() / 1000);
-      if (ch.expiresAt > 0 && now > ch.expiresAt) {
-        settleTxHash = await client.forceCloseChannel(channelId);
-        console.log(`  Force-closed expired channel.`);
-      } else {
-        settleTxHash = await client.initiateSettlement(channelId);
-      }
-    } else {
-      settleTxHash = await client.initiateSettlement(channelId);
-    }
-    console.log(`  Settlement tx:  ${settleTxHash}`);
-    console.log(
-      `  Explorer:       https://testnet.kitescan.ai/tx/${settleTxHash}`,
-    );
-    console.log("");
-  }
-
-  // ── 3. Poll for challenge window to close, then finalize ─────────────────
-  console.log("  Waiting for challenge window to close...");
-  console.log("  (This can take up to 1 hour on mainnet. Polling every 30 s.)");
-
-  const POLL_INTERVAL = 30_000;
-  let finalized = false;
-
-  while (!finalized) {
     const state = await client.getSettlementState(channelId);
-    const now = Math.floor(Date.now() / 1000);
-
-    if (state.deadline > 0 && now >= state.deadline) {
-      console.log("  Challenge window closed. Finalizing...");
-      const finalizeTx = await client.finalizeChannel(channelId);
-      console.log(`  Finalize tx:    ${finalizeTx}`);
+    console.log("  Settlement already pending.");
+    if (state.deadline > 0) {
       console.log(
-        `  Explorer:       https://testnet.kitescan.ai/tx/${finalizeTx}`,
+        `  Settlement deadline: ${new Date(state.deadline * 1000).toISOString()}`,
       );
-      finalized = true;
-    } else if (state.deadline > 0) {
-      const secsLeft = state.deadline - now;
-      console.log(
-        `  Challenge window closes in ${secsLeft}s ` +
-          `(${new Date(state.deadline * 1000).toISOString()}). Polling again in 30s...`,
-      );
-      await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL));
-    } else {
-      // deadline == 0 means we need to re-check overall channel status
-      const updated = await client.getChannel(channelId);
-      if (updated.status === ChannelStatus.Closed) {
-        console.log("  Channel already finalized (Closed).");
-        finalized = true;
-      } else {
-        console.log(
-          "  Waiting for settlement deadline to be set... retrying in 30s.",
-        );
-        await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL));
-      }
     }
+    console.log("  Use: npx kite channel status --channel <id>");
+    console.log("──────────────────────────────────────────────────────────");
+    return;
   }
 
+  console.log("  Initiating settlement on-chain...");
+  let settleTxHash: string;
+
+  if (latestReceipt) {
+    settleTxHash = await client.initiateSettlementWithReceipt(
+      channelId,
+      latestReceipt.sequenceNumber,
+      BigInt(latestReceipt.cumulativeCost),
+      latestReceipt.timestamp,
+      latestReceipt.providerSignature,
+      merkleRoot,
+    );
+    console.log(
+      `  Claimed with receipt: seq=${latestReceipt.sequenceNumber} cumulative=${latestReceipt.cumulativeCost}`,
+    );
+  } else {
+    settleTxHash = await client.initiateSettlement(channelId, merkleRoot);
+    console.log("  No local receipt found. Initiated with zero claim.");
+  }
+
+  const state = await client.getSettlementState(channelId);
+  const deadlineText =
+    state.deadline > 0
+      ? new Date(state.deadline * 1000).toISOString()
+      : "(pending state update)";
+
+  console.log(`  Settlement tx:  ${settleTxHash}`);
+  console.log(`  Explorer:       https://testnet.kitescan.ai/tx/${settleTxHash}`);
+  console.log(`  Settlement by:  ${deadlineText}`);
+  console.log("  Background wait is non-blocking.");
+  console.log("  Track with:     npx kite channel status --channel <id>");
   console.log("");
 
-  // ── 4. Withdraw refunded balance from AA wallet back to EOA ──────────────
-  if (skipWithdraw) {
-    console.log(
-      "  Skipping withdrawal (--no-withdraw). Refunded tokens remain in the AA wallet.",
-    );
-  } else {
-    // Build a fresh client with the agent key to query balance post-finalize
-    const postBalance = await client.getDepositedBalance();
-    if (postBalance === 0n) {
+  console.log("── Settlement Initiated ─────────────────────────────────");
+  console.log(`  Channel ID:  ${channelId}`);
+  console.log(`  Provider:    ${ch.provider}`);
+  console.log("  Finalize after challenge window with: ");
+  console.log(`    npx kite channel force-close --channel ${channelId}`);
+  console.log("──────────────────────────────────────────────────────────");
+}
+
+async function cmdChannelForceClose(args: string[]): Promise<void> {
+  const credential = getVar("PRIVATE_KEY");
+  if (!credential) throw new Error("No credential found. Run: npx kite init");
+
+  const channelRaw =
+    findFlag(args, "--channel") || (await prompt("Enter channel ID: "));
+  const channelId = channelRaw.trim() as `0x${string}`;
+  const merkleRoot = resolveStoredMerkleRoot(channelId);
+
+  const { client, eoaAddress } = await buildAgentClient(credential);
+
+  console.log("");
+  console.log("── Force Close / Finalize (EOA) ─────────────────────────");
+  console.log(`  Channel ID:  ${channelId}`);
+  console.log(`  EOA:         ${eoaAddress}`);
+  console.log("");
+
+  const ch = await client.getChannel(channelId);
+  if (ch.status === ChannelStatus.Closed) {
+    console.log("  Channel is already Closed.");
+    if (deleteChannel(channelId)) {
       console.log(
-        "  Deposited balance is 0 — nothing to withdraw (refund may have gone directly to EOA).",
-      );
-    } else {
-      console.log(
-        `  Withdrawing refund of ${formatUnits(postBalance, 18)} from AA wallet to EOA...`,
-      );
-      const withdrawTx = await client.withdraw(postBalance);
-      console.log(`  Withdraw tx:    ${withdrawTx}`);
-      console.log(
-        `  Explorer:       https://testnet.kitescan.ai/tx/${withdrawTx}`,
+        `  Channel removed from ~/.kite-agent-pay/channels/${channelId}.json`,
       );
     }
+    return;
   }
 
-  // ── 5. Remove channel from local store ──────────────────────────────────
-  if (deleteChannel(channelId)) {
+  if (ch.status === ChannelStatus.Open || ch.status === ChannelStatus.Active) {
+    const now = Math.floor(Date.now() / 1000);
+    const canForceClose = ch.expiresAt > 0 && now >= ch.expiresAt + 300;
+
+    if (!canForceClose) {
+      console.log("  Channel is not eligible for force-close yet.");
+      if (ch.expiresAt > 0) {
+        console.log(
+          `  Expires at:   ${new Date(ch.expiresAt * 1000).toISOString()}`,
+        );
+      }
+      console.log("  Use: npx kite channel close --channel <id> --agent <n>");
+      return;
+    }
+
+    const tx = await client.forceCloseChannel(channelId);
+    console.log(`  Force-close tx: ${tx}`);
+    console.log(`  Explorer:       https://testnet.kitescan.ai/tx/${tx}`);
+    console.log("  Settlement window is now open. Finalize after deadline.");
+    return;
+  }
+
+  const state = await client.getSettlementState(channelId);
+  const now = Math.floor(Date.now() / 1000);
+  if (state.deadline > 0 && now <= state.deadline) {
+    console.log(
+      `  Challenge window is still open until ${new Date(state.deadline * 1000).toISOString()}.`,
+    );
+    console.log("  Use: npx kite channel status --channel <id>");
+    return;
+  }
+
+  const finalizeTx = await client.finalizeChannel(channelId, merkleRoot);
+  console.log(`  Finalize tx:   ${finalizeTx}`);
+  console.log(`  Explorer:      https://testnet.kitescan.ai/tx/${finalizeTx}`);
+  console.log("  Refund remains in KiteAAWallet (no automatic EOA withdrawal).");
+
+  const updated = await client.getChannel(channelId);
+  if (updated.status === ChannelStatus.Closed && deleteChannel(channelId)) {
     console.log(
       `  Channel removed from ~/.kite-agent-pay/channels/${channelId}.json`,
     );
   }
-
-  console.log("");
-  console.log("── Channel Closed ────────────────────────────────────────");
-  console.log(`  Channel ID:  ${channelId}`);
-  console.log(`  Provider:    ${ch.provider}`);
-  console.log(
-    `  You paid:    ~${formatUnits(ch.highestClaimedCost, 18)} (provider's highest claim)`,
-  );
-  console.log(
-    `  Refunded:    ~${formatUnits(unspent, 18)} (returned to wallet)`,
-  );
-  console.log("──────────────────────────────────────────────────────────");
 }
 
 // ── channel list ─────────────────────────────────────────────────────────────
-
 async function cmdChannelList(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
-
-  const agentIndex = Number(
-    findFlag(args, "--agent-id") ?? findFlag(args, "--agent") ?? "0",
-  );
-  // --filter active|all  (default: all)
+  const agentIndex = parseAgentIndex(args);
+  const { limit, offset } = parsePagination(args);
+  const includeCache = args.includes("--include-cache");
   const filter = (findFlag(args, "--filter") ?? "all").toLowerCase();
+  const agentEntityId = toAgentEntityId(agentIndex);
 
-  const { client, eoaAddress } = await buildAgentClient(credential);
+  const indexedChannels = await getChannelsByAgent(
+    agentEntityId,
+    limit,
+    offset,
+  ).catch((err: Error) => {
+    throw new Error(`Failed to query channels from indexer: ${err.message}`);
+  });
 
-  const entries = listChannels();
+  const cachedChannels = includeCache
+    ? listChannels().filter((s) => s.agentIndex === agentIndex)
+    : [];
 
-  if (entries.length === 0) {
-    console.log("");
-    console.log(
-      "  No channels found. Open one with: npx kite channel open --url <api>",
+  const rows: Array<{
+    channelId: string;
+    status: string;
+    provider: string;
+    deposit: string;
+    maxPerCall: string;
+    source: string;
+  }> = indexedChannels.map((indexed) => {
+    const cached = cachedChannels.find(
+      (entry) =>
+        entry.channelId.toLowerCase() === indexed.channelId.toLowerCase(),
     );
-    return;
-  }
+    const source = cached ? "subgraph+in-memory" : "subgraph";
 
-  // Enrich each entry with live on-chain status
-  const enriched: Array<{
-    stored: StoredChannel;
-    onChainStatus: number | null;
-  }> = [];
-  for (const stored of entries) {
-    let onChainStatus: number | null = null;
-    try {
-      const ch = await client.getChannel(stored.channelId);
-      onChainStatus = ch.status;
-    } catch {
-      // unreachable channel — treat as unknown
+    return {
+      channelId: indexed.channelId.toLowerCase(),
+      status: indexedStatusLabel(indexed.status),
+      provider: indexed.provider,
+      deposit: formatUnits(safeBigInt(indexed.deposit), 18),
+      maxPerCall: formatUnits(safeBigInt(indexed.maxPerCall), 18),
+      source,
+    };
+  });
+
+  if (includeCache) {
+    for (const cached of cachedChannels) {
+      const existsInIndexed = indexedChannels.some(
+        (indexed) =>
+          indexed.channelId.toLowerCase() === cached.channelId.toLowerCase(),
+      );
+      if (existsInIndexed) continue;
+      rows.push({
+        channelId: cached.channelId.toLowerCase(),
+        status: "In-memory only",
+        provider: cached.provider,
+        deposit: formatUnits(safeBigInt(cached.deposit), 18),
+        maxPerCall: formatUnits(safeBigInt(cached.maxPerCall), 18),
+        source: "in-memory",
+      });
     }
-    enriched.push({ stored, onChainStatus });
   }
 
-  // Apply filter
   const visible =
     filter === "active"
-      ? enriched.filter(
-          ({ onChainStatus }) => onChainStatus === ChannelStatus.Active,
-        )
-      : enriched;
+      ? rows.filter((row) => row.status.toLowerCase() === "active")
+      : rows;
 
   if (visible.length === 0) {
     console.log("");
-    console.log(`  No ${filter} channels found.`);
+    console.log(
+      `  No ${filter == "all" ? "" : filter} channels found for agent ${agentIndex}.`,
+    );
+    if (!includeCache) {
+      console.log(
+        "  Re-run with --include-cache to include local in-memory state.",
+      );
+    }
     return;
   }
 
+  const headers = [
+    "Channel ID",
+    "Status",
+    "Provider",
+    "Deposit",
+    "Max/Call",
+    "Source",
+  ];
+  const widths = [
+    Math.max(headers[0].length, ...visible.map((row) => row.channelId.length)),
+    Math.max(headers[1].length, ...visible.map((row) => row.status.length)),
+    Math.max(headers[2].length, ...visible.map((row) => row.provider.length)),
+    Math.max(headers[3].length, ...visible.map((row) => row.deposit.length)),
+    Math.max(headers[4].length, ...visible.map((row) => row.maxPerCall.length)),
+    Math.max(headers[5].length, ...visible.map((row) => row.source.length)),
+  ];
+  const pad = (value: string, width: number) => value.padEnd(width, " ");
+
+  const pageInfo =
+    indexedChannels.length < limit
+      ? `${offset + 1}-${offset + indexedChannels.length} (all results in this page)`
+      : `${offset + 1}-${offset + indexedChannels.length}  (pass --offset ${offset + limit} for next page)`;
+
   console.log("");
-  console.log(`  Channels for EOA ${eoaAddress}`);
+  console.log(`  Channels for agent ${agentIndex} (${agentEntityId})`);
+  console.log(`  Source of truth: GraphQL indexer`);
+  console.log(`  Showing indexed: ${pageInfo}`);
   if (filter === "active") console.log("  Filter: active only");
-  console.log("");
-
-  for (const { stored, onChainStatus } of visible) {
-    const statusLabel =
-      onChainStatus !== null ? channelStatusLabel(onChainStatus) : "Unknown";
-    const age = Math.round((Date.now() - stored.openedAt) / 60_000);
-    console.log(
-      `  ${stored.channelId}  ${statusLabel.padEnd(20)}  ${stored.openUrl ?? stored.provider}  (+${age}m)`,
-    );
-    console.log(
-      `    Provider: ${stored.provider}  Deposit: ${formatUnits(BigInt(stored.deposit), 18)}`,
-    );
-    console.log("");
+  if (includeCache) {
+    const localOnly = visible.filter(
+      (row) => row.source === "in-memory",
+    ).length;
+    if (localOnly > 0) {
+      console.log(`  Added from in-memory only: ${localOnly}`);
+    }
   }
-
-  console.log(`  Total: ${visible.length} channel(s)`);
+  console.log("");
+  console.log(
+    `  ${pad(headers[0], widths[0])}  ${pad(headers[1], widths[1])}  ${pad(headers[2], widths[2])}  ${pad(headers[3], widths[3])}  ${pad(headers[4], widths[4])}  ${pad(headers[5], widths[5])}`,
+  );
+  console.log(
+    `  ${"-".repeat(widths[0])}  ${"-".repeat(widths[1])}  ${"-".repeat(widths[2])}  ${"-".repeat(widths[3])}  ${"-".repeat(widths[4])}  ${"-".repeat(widths[5])}`,
+  );
+  for (const row of visible) {
+    console.log(
+      `  ${pad(row.channelId, widths[0])}  ${pad(row.status, widths[1])}  ${pad(row.provider, widths[2])}  ${pad(row.deposit, widths[3])}  ${pad(row.maxPerCall, widths[4])}  ${pad(row.source, widths[5])}`,
+    );
+  }
+  console.log("");
+  console.log(`  Returned: ${visible.length} channel(s)`);
 }
 
 // ── channel resume ────────────────────────────────────────────────────────────
-
 async function cmdChannelResume(args: string[]): Promise<void> {
   const credential = getVar("PRIVATE_KEY");
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const channelRaw = findFlag(args, "--channel");
-  const agentIndex = Number(
-    findFlag(args, "--agent-id") ?? findFlag(args, "--agent") ?? "0",
-  );
 
   const { client, eoaAddress } = await buildAgentClient(credential);
 
@@ -558,7 +900,7 @@ async function cmdChannelResume(args: string[]): Promise<void> {
     }
   } else {
     // Pick the most recent Active channel
-    const agentSessions = all.sort((a, b) => b.openedAt - a.openedAt);
+    const agentSessions = [...all].sort((a, b) => b.openedAt - a.openedAt);
 
     for (const s of agentSessions) {
       try {
@@ -677,7 +1019,10 @@ async function cmdChannelCall(args: string[]): Promise<void> {
   };
 
   if (stored.calls.length > 0) {
-    const last = stored.calls[stored.calls.length - 1].channelReceipt;
+    const last = stored.calls.at(-1)?.channelReceipt;
+    if (!last) {
+      throw new Error("Missing latest receipt state for this channel.");
+    }
     headers["X-Prev-Cumulative-Cost"] = last.cumulativeCost;
     headers["X-Prev-Provider-Sig"] = last.providerSignature;
   }
@@ -778,17 +1123,10 @@ async function cmdChannelCall(args: string[]): Promise<void> {
   console.log(`  Seq #:       ${channelReceipt.sequenceNumber}`);
   console.log(`  Call cost:   ${callCostStr} (base units)`);
   console.log(`  Cumulative:  ${cumCostStr} (base units)`);
-  console.log(`  Leaf hash:   ${updated.leaves[updated.leaves.length - 1]}`);
+  console.log(`  Leaf hash:   ${updated.leaves.at(-1)}`);
   console.log(`  Merkle root: ${updated.merkleRoot}`);
   console.log(`  Total calls: ${updated.callCount}`);
   console.log("──────────────────────────────────────────────────────────");
-}
-
-// ── (extend removed — channels are one-off; open a new channel instead) ───────
-
-async function cmdSessionExtend(_args: string[]): Promise<void> {
-  console.log("  npx kite channel open --url <api>   opens a new channel.");
-  console.log("  Channels cannot be extended in-place on-chain.");
 }
 
 // ── Public dispatcher ─────────────────────────────────────────────────────────
@@ -804,6 +1142,8 @@ export async function cmdChannels(args: string[]): Promise<void> {
       return cmdChannelStatus(args.slice(1));
     case "close":
       return cmdChannelClose(args.slice(1));
+    case "force-close":
+      return cmdChannelForceClose(args.slice(1));
     case "list":
       return cmdChannelList(args.slice(1));
     case "resume":
@@ -818,21 +1158,33 @@ export async function cmdChannels(args: string[]): Promise<void> {
         "  npx kite channel call    --channel <id> --url <endpoint>  Make a call on an existing channel",
       );
       console.log(
-        "  npx kite channel list    [--agent <n>] [--filter active|all]",
+        "  npx kite channel list    [--agent <n>] [--filter active|all] [--limit <n>] [--offset <n>] [--include-cache]",
       );
       console.log(
-        "  npx kite channel status  [--channel <id>]        Show channel state",
+        "  npx kite channel status  [--channel <id>] [--agent <n>] [--limit <n>] [--offset <n>] [--include-cache]",
       );
       console.log(
         "  npx kite channel resume  [--channel <id>]        Re-attach to existing channel",
       );
       console.log(
-        "  npx kite channel close   --channel <id> [opts]   Settle & refund",
+        "  npx kite channel close   --channel <id> [--agent <n>]   Initiate settlement (agent/session)",
+      );
+      console.log(
+        "  npx kite channel force-close --channel <id>         Force-close expired or finalize (EOA)",
       );
       console.log("");
       console.log("Common options:");
       console.log(
         "  --agent-id <n>         Agent derivation index (default: 0)",
+      );
+      console.log(
+        "  --limit <n>            Page size for indexed channel reads (default: 10)",
+      );
+      console.log(
+        "  --offset <n>           Result offset for indexed channel reads (default: 0)",
+      );
+      console.log(
+        "  --include-cache        Merge local in-memory channel state with indexed data",
       );
       console.log("");
       console.log("open options:");
@@ -859,7 +1211,7 @@ export async function cmdChannels(args: string[]): Promise<void> {
       console.log("");
       console.log("close options:");
       console.log(
-        "  --no-withdraw          Skip withdrawing refund to EOA after finalization",
+        "  --agent <n>            Agent ID used to load/regenerate session key (default: 0)",
       );
   }
 }

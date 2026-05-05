@@ -115,16 +115,16 @@ export interface KiteSettleClientOptions {
    */
   agentId?: bigint | string | number;
   /**
-    * Session key address to load in agent mode.
-    *
-    * If omitted, the SDK auto-selects the first on-chain session for the
-    * agent that is currently active, not expired, and has remaining capacity.
-    */
-    sessionKey?: string;
-    /**
-      * Legacy session index (optional). This is no longer required by callers.
-      * When provided with no `sessionKey`, it is ignored and an available
-      * on-chain session is auto-selected.
+   * Session key address to load in agent mode.
+   *
+   * If omitted, the SDK auto-selects the first on-chain session for the
+   * agent that is currently active, not expired, and has remaining capacity.
+   */
+  sessionKey?: string;
+  /**
+   * Legacy session index (optional). This is no longer required by callers.
+   * When provided with no `sessionKey`, it is ignored and an available
+   * on-chain session is auto-selected.
    */
   sessionIndex?: number;
   /**
@@ -142,6 +142,12 @@ export interface KiteSettleClientOptions {
    * - `"auto"`    — SDK picks the best available mode
    */
   defaultPaymentMode?: KiteClientOptions["defaultPaymentMode"];
+  /**
+   * Allow explicit sessionKey loading even if indexer/limits mark it unavailable.
+   * Intended for channel lifecycle actions (e.g., settlement) where the
+   * channel-bound session key must be used regardless of current spend/expiry.
+   */
+  allowUnavailableSession?: boolean;
 }
 
 // ── KiteSettleClient ───────────────────────────────────────────────
@@ -261,6 +267,7 @@ export class KiteSettleClient {
       sessionSeed,
       config,
       defaultPaymentMode = "auto",
+      allowUnavailableSession = false,
     } = options;
 
     // ── Agent mode ─────────────────────────────────────────────────────
@@ -271,6 +278,7 @@ export class KiteSettleClient {
         defaultPaymentMode,
         sessionSeed,
         config,
+        allowUnavailableSession,
       );
     }
 
@@ -336,7 +344,14 @@ export class KiteSettleClient {
         ...config?.contracts,
       },
     };
-    return new KiteSettleClient(fullConfig, null, null, "", undefined, undefined);
+    return new KiteSettleClient(
+      fullConfig,
+      null,
+      null,
+      "",
+      undefined,
+      undefined,
+    );
   }
 
   /**
@@ -355,6 +370,7 @@ export class KiteSettleClient {
     defaultPaymentMode: KiteClientOptions["defaultPaymentMode"],
     _sessionSeed?: string | undefined,
     config?: Partial<KiteConfig> | undefined,
+    allowUnavailableSession: boolean = false,
   ): Promise<KiteSettleClient> {
     const fullConfig: KiteConfig = {
       ...KITE_TESTNET,
@@ -385,9 +401,9 @@ export class KiteSettleClient {
 
     const now = Math.floor(Date.now() / 1000);
     const selectedSessionKey = sessionKey
-      ? (sessionKey.startsWith("0x")
+      ? ((sessionKey.startsWith("0x")
           ? sessionKey.toLowerCase()
-          : `0x${sessionKey.toLowerCase()}`) as `0x${string}`
+          : `0x${sessionKey.toLowerCase()}`) as `0x${string}`)
       : undefined;
 
     let selectedIndex = -1;
@@ -402,34 +418,38 @@ export class KiteSettleClient {
         );
       }
 
-      const indexed = indexedByKey.get(selectedSessionKey.toLowerCase());
-      if (!indexed) {
-        throw new Error(
-          `Session key ${selectedSessionKey} was not found in the indexer for agentId=${agentId}.`,
-        );
-      }
-      if (indexed.status.toUpperCase() !== "ACTIVE") {
-        throw new Error(
-          `Session key ${selectedSessionKey} is ${indexed.status.toLowerCase()} in the indexer.`,
-        );
-      }
-      if (Number(indexed.validUntil) <= now) {
-        throw new Error(`Session key ${selectedSessionKey} is expired.`);
-      }
+      if (!allowUnavailableSession) {
+        const indexed = indexedByKey.get(selectedSessionKey.toLowerCase());
+        if (!indexed) {
+          throw new Error(
+            `Session key ${selectedSessionKey} was not found in the indexer for agentId=${agentId}.`,
+          );
+        }
+        if (indexed.status.toUpperCase() !== "ACTIVE") {
+          throw new Error(
+            `Session key ${selectedSessionKey} is ${indexed.status.toLowerCase()} in the indexer.`,
+          );
+        }
+        if (Number(indexed.validUntil) <= now) {
+          throw new Error(`Session key ${selectedSessionKey} is expired.`);
+        }
 
-      const [active, , , , , maxValueAllowed, validUntil] =
-        (await readCs.validateSession(selectedSessionKey)) as any;
-      const spent = await readCs.getSessionSpent(selectedSessionKey).catch(() => 0n);
-      if (!active) {
-        throw new Error(`Session key ${selectedSessionKey} is not active.`);
-      }
-      if (Number(validUntil) <= now) {
-        throw new Error(`Session key ${selectedSessionKey} is expired.`);
-      }
-      if (spent >= maxValueAllowed) {
-        throw new Error(
-          `Session key ${selectedSessionKey} has no remaining capacity.`,
-        );
+        const [active, , , , , maxValueAllowed, validUntil] =
+          (await readCs.validateSession(selectedSessionKey)) as any;
+        const spent = await readCs
+          .getSessionSpent(selectedSessionKey)
+          .catch(() => 0n);
+        if (!active) {
+          throw new Error(`Session key ${selectedSessionKey} is not active.`);
+        }
+        if (Number(validUntil) <= now) {
+          throw new Error(`Session key ${selectedSessionKey} is expired.`);
+        }
+        if (spent >= maxValueAllowed) {
+          throw new Error(
+            `Session key ${selectedSessionKey} has no remaining capacity.`,
+          );
+        }
       }
     } else {
       for (let i = 0; i < onchainSessions.length; i++) {
@@ -526,11 +546,7 @@ export class KiteSettleClient {
         );
         for (const attempt of [
           () =>
-            deriveSessionForAgent(
-              eoaKeyBytes,
-              agentId,
-              resolvedSessionIndex,
-            ),
+            deriveSessionForAgent(eoaKeyBytes, agentId, resolvedSessionIndex),
           () =>
             deriveSessionAccount(
               eoaKeyBytes,
@@ -543,7 +559,10 @@ export class KiteSettleClient {
             sessionPrivateKey = derived.privateKey;
             // Persist for next time so derivation isn't needed again
             setVar(pkVar, derived.privateKey);
-            setVar(`SESSION_${agentId}_${resolvedSessionIndex}_ADDRESS`, derived.address);
+            setVar(
+              `SESSION_${agentId}_${resolvedSessionIndex}_ADDRESS`,
+              derived.address,
+            );
             break outer;
           }
         }
@@ -803,12 +822,16 @@ export class KiteSettleClient {
 
   /** Look up an agent by its on-chain ID (agentId = bigint tokenId). */
   async getAgent(agentId: bigint) {
-    return this.requirePaymentClient().getContractService().getAgentURI(agentId);
+    return this.requirePaymentClient()
+      .getContractService()
+      .getAgentURI(agentId);
   }
 
   /** Update the agentURI stored on IdentityRegistry. Requires EOA credential. */
   async updateAgentURI(agentId: bigint, newURI: string): Promise<string> {
-    return this.requireEoaClient().getContractService().setAgentURI(agentId, newURI);
+    return this.requireEoaClient()
+      .getContractService()
+      .setAgentURI(agentId, newURI);
   }
 
   // ── Payment Channels ─────────────────────────────────────────
@@ -830,7 +853,34 @@ export class KiteSettleClient {
     channelId: `0x${string}`,
     merkleRoot?: `0x${string}`,
   ): Promise<string> {
-    return this.requirePaymentClient().initiateSettlement(channelId, merkleRoot);
+    return this.requirePaymentClient().initiateSettlement(
+      channelId,
+      merkleRoot,
+    );
+  }
+
+  /**
+   * Initiate settlement with an explicit provider-signed receipt claim.
+   * Useful for CLI flows that reconstruct receipts from local persisted state.
+   */
+  async initiateSettlementWithReceipt(
+    channelId: `0x${string}`,
+    sequenceNumber: number,
+    cumulativeCost: bigint,
+    timestamp: number,
+    providerSignature: `0x${string}`,
+    merkleRoot?: `0x${string}`,
+  ): Promise<string> {
+    return this.requirePaymentClient()
+      .getContractService()
+      .initiateSettlement(
+        channelId,
+        sequenceNumber,
+        cumulativeCost,
+        timestamp,
+        providerSignature,
+        merkleRoot,
+      );
   }
 
   /** Finalize (close) a payment channel. */
@@ -919,7 +969,11 @@ export class KiteSettleClient {
     deposit: bigint,
     limits?: BatchLimits,
   ): BatchSession {
-    return this.requirePaymentClient().startBatchSession(provider, deposit, limits);
+    return this.requirePaymentClient().startBatchSession(
+      provider,
+      deposit,
+      limits,
+    );
   }
 
   /** End a batch payment session. */

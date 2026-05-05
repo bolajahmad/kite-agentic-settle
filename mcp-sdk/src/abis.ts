@@ -99,7 +99,7 @@ export const paymentChannelAbi = parseAbi([
   "function submitReceipt(bytes32 channelId, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp, bytes providerSignature) external",
   "function finalize(bytes32 channelId, bytes32 merkleRoot) external",
   "function forceCloseExpired(bytes32 channelId) external",
-  "function getChannel(bytes32 channelId) external view returns (address consumer, address provider, address token, uint8 mode, uint256 deposit, uint256 maxSpend, uint256 maxDuration, uint256 openedAt, uint256 expiresAt, uint256 maxPerCall, uint256 settledAmount, uint8 status, uint256 settlementDeadline, uint256 highestClaimedCost, uint256 highestSequenceNumber, address walletContract)",
+  "function getChannel(bytes32 channelId) external view returns (address consumer, address user, address provider, address token, uint8 mode, uint256 deposit, uint256 maxSpend, uint256 maxDuration, uint256 openedAt, uint256 expiresAt, uint256 maxPerCall, uint256 settledAmount, uint8 status, uint256 settlementDeadline, uint256 highestClaimedCost, uint256 highestSequenceNumber, address walletContract)",
   "function getReceiptHash(bytes32 channelId, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp) public pure returns (bytes32)",
   "function isChannelExpired(bytes32 channelId) external view returns (bool)",
   "function getChannelTimeRemaining(bytes32 channelId) external view returns (uint256)",

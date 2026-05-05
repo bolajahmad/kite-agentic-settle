@@ -457,7 +457,6 @@ export class ContractService {
       this.config.contracts.paymentChannel,
       data,
     );
-    console.log(`[openChannel] Tx: ${result.hash}`);
 
     // Decode ChannelOpened event to get channelId
     const event = await this.waitAndDecodeLogs(
@@ -565,30 +564,32 @@ export class ContractService {
   }
 
   async getChannel(channelId: `0x${string}`): Promise<ChannelState> {
-    const result = (await this.client.readContract({
+    const result = await this.client.readContract({
       address: this.config.contracts.paymentChannel as `0x${string}`,
       abi: paymentChannelAbi,
       functionName: "getChannel",
       args: [channelId],
-    })) as any;
+    });
 
     return {
-      channelId,
       consumer: result[0],
-      provider: result[1],
-      token: result[2],
-      mode: Number(result[3]),
-      deposit: result[4],
-      maxSpend: result[5],
-      maxDuration: Number(result[6]),
-      openedAt: Number(result[7]),
-      expiresAt: Number(result[8]),
-      maxPerCall: result[9],
-      settledAmount: result[10],
-      status: Number(result[11]),
-      settlementDeadline: Number(result[12]),
-      highestClaimedCost: result[13],
-      highestSequenceNumber: Number(result[14]),
+      user: result[1],
+      provider: result[2],
+      token: result[3],
+      mode: Number(result[4]),
+      deposit: result[5],
+      maxSpend: result[6],
+      maxDuration: Number(result[7]),
+      openedAt: Number(result[8]),
+      expiresAt: Number(result[9]),
+      maxPerCall: result[10],
+      settledAmount: result[11],
+      status: Number(result[12]),
+      settlementDeadline: Number(result[13]),
+      highestClaimedCost: result[14],
+      highestSequenceNumber: Number(result[15]),
+      wallet: result[16],
+      channelId,
     };
   }
 

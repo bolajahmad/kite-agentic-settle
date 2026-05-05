@@ -407,6 +407,7 @@ export async function getChannelOnChain(channelId: string) {
   const pc = getPaymentChannel(getProvider());
   const [
     consumer,
+    user,
     provider,
     token,
     mode,
@@ -421,10 +422,12 @@ export async function getChannelOnChain(channelId: string) {
     settlementDeadline,
     highestClaimedCost,
     highestSequenceNumber,
+    wallet,
   ] = await pc.getChannel(channelId);
   return {
     consumer,
     provider,
+    user,
     token,
     mode: Number(mode),
     deposit: deposit.toString(),
@@ -438,6 +441,7 @@ export async function getChannelOnChain(channelId: string) {
     settlementDeadline: Number(settlementDeadline),
     highestClaimedCost: highestClaimedCost.toString(),
     highestSequenceNumber: Number(highestSequenceNumber),
+    wallet,
   };
 }
 
@@ -718,7 +722,8 @@ export function isContractsConfigured(): boolean {
   return !!(
     process.env.IDENTITY_REGISTRY_ADDRESS &&
     process.env.KITE_AA_WALLET_ADDRESS &&
-    process.env.ANCHOR_MERKLE_ADDRESS &&
+    process.env.ATTESTATION_REGISTRY_ADDRESS &&
+    process.env.PAYMENT_CHANNEL_ADDRESS &&
     process.env.DEPLOYER_PRIVATE_KEY
   );
 }

@@ -273,7 +273,8 @@ function showHelp() {
     kite channel status       Show on-chain + local channel state
     kite channel list         List all channels for an agent
     kite channel resume       Re-attach to an existing channel
-    kite channel close        Settle and close a channel
+    kite channel close        Initiate settlement (agent/session)
+    kite channel force-close  Force-close expired / finalize (EOA)
 
   Options:
     --agent-index <n>         Agent derivation index (default: 0)
