@@ -93,7 +93,7 @@ export function formatUsdc(amount: bigint, decimals = 18): string {
   const divisor = BigInt(10 ** decimals);
   const whole = amount / divisor;
   const fraction = amount % divisor;
-  return `${whole}.${fraction.toString().padStart(decimals, "0")} USDC`;
+  return `${whole}.${fraction.toString()} USDC`;
 }
 
 /**

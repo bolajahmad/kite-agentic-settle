@@ -24,6 +24,7 @@ type Session @entity(immutable: false) {
   valueLimit: BigInt!
   maxLimit: BigInt!
   metadataHash: Bytes
+  payments: [Payment!]! @derivedFrom(field: "session")
 
   status: String! # "ACTIVE", "REVOKED", "EXPIRED"
   blockedAgents: [Bytes!] # address[]

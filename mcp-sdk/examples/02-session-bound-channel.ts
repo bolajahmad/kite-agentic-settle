@@ -23,6 +23,11 @@
  * - Fund your KiteAAWallet with test USDC
  */
 
+// Demo configuration - replace with your agent and session
+const AGENT_ID = "2";
+const SESSION_KEY = "0xb06ccc215fdcff276b82edce185fa7733be16fb4";
+
+import { getSessionSpentFromIndexer } from "../src/indexer.js";
 import { createLogger } from "./lib/logger.js";
 import {
   createDemoClient,
@@ -42,7 +47,15 @@ export async function run() {
   try {
     // ── Setup ────────────────────────────────────────────────────────
     logger.step("Initialize Kite client in agent mode");
-    const client = await createDemoClient({ logger });
+    logger.info(`Agent ID: ${AGENT_ID}`);
+    logger.info(`Session key: ${SESSION_KEY}`);
+
+    const client = await createDemoClient({
+      logger,
+      agentId: AGENT_ID,
+      sessionKey: SESSION_KEY,
+      allowUnavailableSession: true, // For demo purposes
+    });
 
     if (!client.sessionKeyAddress) {
       logger.error(
@@ -58,7 +71,7 @@ export async function run() {
     // ── Fetch session limits ──────────────────────────────────────────
     logger.step("Query session limits from indexer");
 
-    const sessions = await client.getSessionsByAgent(client.eoaAddress);
+    const sessions = await client.getSessionsByAgent(`0x${AGENT_ID}`);
     const activeSession = sessions.find(
       (s) =>
         s.sessionKey.toLowerCase() === client.sessionKeyAddress?.toLowerCase(),
@@ -79,7 +92,7 @@ export async function run() {
     // ── Check on-chain spent ──────────────────────────────────────────
     logger.step("Check on-chain spent for session");
 
-    const spent = await client.getSessionSpent(client.sessionKeyAddress);
+    const spent = await getSessionSpentFromIndexer(client.sessionKeyAddress);
     const remaining = BigInt(activeSession.valueLimit) - spent;
 
     logger.data("Session Capacity", {
@@ -133,7 +146,7 @@ export async function run() {
     // ── Explain enforcement mechanism ─────────────────────────────────
     logger.step("Enforcement mechanism");
 
-    logger.info("🔐 Session-bound channels enforce limits at multiple layers:");
+    logger.info(" Session-bound channels enforce limits at multiple layers:");
     logger.info(
       "  1. CLI validation: Rejects channel open without agent/session pair",
     );
@@ -150,20 +163,20 @@ export async function run() {
     // ── Show benefits ─────────────────────────────────────────────────
     logger.step("Key benefits of session-bound architecture");
 
-    logger.success("✅ Granular spend control");
+    logger.success(" Granular spend control");
     logger.info(
       "  Sessions can have different capacity limits for different use cases",
     );
 
-    logger.success("✅ Time-bounded delegation");
+    logger.success(" Time-bounded delegation");
     logger.info("  Sessions automatically expire, limiting exposure window");
 
-    logger.success("✅ Revocable without EOA compromise");
+    logger.success(" Revocable without EOA compromise");
     logger.info(
       "  Revoke individual session keys without touching EOA private key",
     );
 
-    logger.success("✅ Multi-session concurrency");
+    logger.success(" Multi-session concurrency");
     logger.info(
       "  Single agent can have multiple sessions for parallel workloads",
     );
