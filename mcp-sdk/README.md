@@ -18,9 +18,6 @@ npm install -g @kite-agent-pay/sdk
 import { KiteSettleClient } from "@kite-agent-pay/sdk";
 
 // Create a client from a stored credential (~/.kite-agent-pay/vars.json)
-const client = await KiteSettleClient.fromStoredCredential();
-
-// Or create with an explicit seed phrase / private key
 const client = await KiteSettleClient.create({
   credential: "your seed phrase or 0x private key",
 });
@@ -30,15 +27,74 @@ const res = await client.fetchWithPayment("https://api.example.com/data");
 const data = await res.json();
 
 // Check wallet balance
-const balance = await client.getDepositedBalance();
-console.log("Deposited balance:", KiteSettleClient.formatAmount(balance));
+const balance = await client.getBalance();
+console.log("Balance:", balance);
 
-// Deposit USDT into the AA wallet
-await client.deposit("10.0"); // 10 USDT
+// Deposit USDC into the AA wallet
+await client.deposit("10.0"); // 10 USDC
 
 // Withdraw funds
-await client.withdraw("5.0"); // 5 USDT
+await client.withdraw("5.0"); // 5 USDC
 ```
+
+## Examples (Demo Suite)
+
+The SDK includes a comprehensive progressive narrative demo suite demonstrating all protocol capabilities:
+
+```bash
+# List all demos
+npm run demo
+
+# Run specific demo by number
+npm run demo 1              # Per-call payment
+npm run demo 2              # Session-bound channels
+
+# Run by keyword
+npm run demo percall        # Find and run matching demo
+npm run demo observability  # Find and run matching demo
+
+# Run all demos in sequence
+npm run demo all
+```
+
+### Available Demos
+
+1. **Per-Call Payment with x402** (`01-percall-payment.ts`)
+   - Value proposition: programmable micropayments with EIP-712 receipts
+   - Shows 402 challenge → signed receipt → 200 success flow
+   - No pre-funding or channel setup required
+
+2. **Session-Bound Channel Architecture** (`02-session-bound-channel.ts`)
+   - Architectural differentiator: channels constrained by session limits
+   - Demonstrates capacity and validity clamping
+   - Shows multi-layer enforcement (CLI, SDK, on-chain)
+
+3. **Batch Channel Flow** (`03-batch-channel-flow.ts`)
+   - Stateful reuse: off-chain batched calls with local state
+   - Shows cost efficiency via aggregate settlement
+   - Demonstrates local state persistence and resume capability
+
+4. **Stream Channel Flow** (`04-stream-channel-flow.ts`)
+   - Time-governed execution: scheduled calls within time window
+   - Perfect for monitoring, recurring tasks, deadline-constrained processing
+   - Shows automatic expiry handling
+
+5. **Channel Settlement and Finalization** (`05-channel-settlement.ts`)
+   - Closure semantics: cooperative settlement vs force-close
+   - Explains when to use each method
+   - Demonstrates dispute resolution workflows
+
+6. **Multi-Provider Agent Workflow** (`06-multi-provider-agent.ts`)
+   - Scalability: one agent identity across many providers
+   - O(1) credential management regardless of provider count
+   - Shows unified cost tracking and attribution
+
+7. **Observability and Transparency** (`07-observability.ts`)
+   - Transparency: indexer queries, local state inspection, usage tracking
+   - Complete audit trail for compliance
+   - Debugging tools and workflows
+
+Each demo is self-contained with clear step annotations and expected outputs.
 
 ## CLI Usage
 
@@ -93,21 +149,21 @@ KiteSettleClient.generateSeedPhrase(): string
 
 ```typescript
 interface KiteSettleClientOptions {
-  credential: string;         // seed phrase or 0x private key
-  config?: KiteConfig;        // chain/contract overrides
+  credential: string; // seed phrase or 0x private key
+  config?: KiteConfig; // chain/contract overrides
   defaultPaymentMode?: "perCall" | "channel" | "batch" | "auto";
-  agentIndex?: number;        // default 0
-  sessionIndex?: number;      // default 0, used for perCall mode
+  agentIndex?: number; // default 0
+  sessionIndex?: number; // default 0, used for perCall mode
 }
 ```
 
 ### Addresses
 
 ```typescript
-client.eoaAddress      // string — EOA wallet address
-client.address         // string — active signer (session key / agent / EOA)
-client.agentAddress    // string | undefined — derived agent key address
-client.sessionKeyAddress // string | undefined — derived session key address
+client.eoaAddress; // string — EOA wallet address
+client.address; // string — active signer (session key / agent / EOA)
+client.agentAddress; // string | undefined — derived agent key address
+client.sessionKeyAddress; // string | undefined — derived session key address
 ```
 
 ### Wallet
@@ -250,11 +306,11 @@ Your App / AI Agent
 
 Set via `kite vars set KEY value` or directly in `~/.kite-agent-pay/vars.json`:
 
-| Key | Description |
-|-----|-------------|
-| `PRIVATE_KEY` | EOA private key or BIP-39 seed phrase |
-| `KITE_RPC_URL` | Custom RPC endpoint (optional) |
-| `KITE_REGISTRY_ADDRESS` | Custom registry contract (optional) |
+| Key                     | Description                           |
+| ----------------------- | ------------------------------------- |
+| `PRIVATE_KEY`           | EOA private key or BIP-39 seed phrase |
+| `KITE_RPC_URL`          | Custom RPC endpoint (optional)        |
+| `KITE_REGISTRY_ADDRESS` | Custom registry contract (optional)   |
 
 ## License
 

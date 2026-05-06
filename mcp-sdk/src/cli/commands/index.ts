@@ -7,7 +7,6 @@
 
 import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { TOKENS } from "../../config.js";
-import type { DecisionMode } from "../../decide.js";
 import { KITE_TESTNET, KiteSettleClient } from "../../index.js";
 import {
   _tokenMetadataCache,
@@ -16,15 +15,6 @@ import {
 import { getVar } from "../../vars.js";
 import { findFlag } from "../index.js";
 import { callApi } from "./call.js";
-
-// ── Arg parsing ────────────────────────────────────────────────────
-interface CmdOpts {
-  decide: DecisionMode;
-  agentIndex?: string;
-  url?: string;
-  fundAddress?: string;
-  fundAmount?: string;
-}
 
 // ── Formatting ─────────────────────────────────────────────────────
 function fmt(wei: bigint): string {

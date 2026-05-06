@@ -26,11 +26,7 @@
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
     "kite": "tsx src/cli.ts",
-    "app": "tsx examples/app.ts",
-    "call": "tsx examples/app.ts call",
-    "balance": "tsx examples/app.ts balance",
-    "fund": "tsx examples/app.ts fund",
-    "simulate": "tsx examples/simulate.ts"
+    "demo": "tsx examples/run.ts"
   },
   "keywords": [
     "payments",

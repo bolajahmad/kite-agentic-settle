@@ -129,6 +129,7 @@ export class PaymentInterceptor {
         merchantName: offer.merchantName,
       };
       const approved = await opts.onPaymentRequired(paymentRequest);
+      console.log({ approved });
       if (!approved) {
         return response;
       }
@@ -173,7 +174,9 @@ export class PaymentInterceptor {
     if (result.method === "perCall") {
       // x402 programmable settlement: base64-encoded signed authorization payload
       retryHeaders.set("X-PAYMENT", result.x402Payload || "");
-      console.log(`  [interceptor] Retrying with X-PAYMENT header (${result.x402Payload?.length} chars)`);
+      console.log(
+        `  [interceptor] Retrying with X-PAYMENT header (${result.x402Payload?.length} chars)`,
+      );
     } else if (result.method === "channel") {
       // For channel mode the deposit IS the payment commitment; include the
       // channel ID so the provider knows which channel to debit.  Also
@@ -234,7 +237,9 @@ export class PaymentInterceptor {
     }
 
     // Generate a random bitmap nonce (any unique uint256; bitmap-based replay protection)
-    const nonce = BigInt(Date.now()) * BigInt(1_000_000) + BigInt(Math.floor(Math.random() * 1_000_000));
+    const nonce =
+      BigInt(Date.now()) * BigInt(1_000_000) +
+      BigInt(Math.floor(Math.random() * 1_000_000));
     // 5-minute deadline
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
 
@@ -253,13 +258,13 @@ export class PaymentInterceptor {
       },
       types: {
         Payment: [
-          { name: "agentId",    type: "uint256" },
+          { name: "agentId", type: "uint256" },
           { name: "sessionKey", type: "address" },
-          { name: "recipient",  type: "address" },
-          { name: "token",      type: "address" },
-          { name: "amount",     type: "uint256" },
-          { name: "nonce",      type: "uint256" },
-          { name: "deadline",   type: "uint256" },
+          { name: "recipient", type: "address" },
+          { name: "token", type: "address" },
+          { name: "amount", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
         ],
       },
       primaryType: "Payment",
