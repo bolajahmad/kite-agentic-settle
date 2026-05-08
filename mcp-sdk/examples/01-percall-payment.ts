@@ -25,8 +25,8 @@
  */
 
 // Demo configuration - replace with your agent and session
-const AGENT_ID = "2";
-const SESSION_KEY = "0xb06ccc215fdcff276b82edce185fa7733be16fb4";
+const AGENT_ID = "1";
+const SESSION_KEY = "0x525e1B309Ddc64a79C41f76570CA2D08b3A11596";
 
 import { createLogger } from "./lib/logger.js";
 import { createDemoClient, formatUsdc } from "./lib/setup.js";

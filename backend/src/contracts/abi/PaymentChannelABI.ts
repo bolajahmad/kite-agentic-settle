@@ -246,6 +246,31 @@ export const PaymentChannelABI = [
       {
         indexed: true,
         internalType: "address",
+        name: "approver",
+        type: "address",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "finalAmount",
+        type: "uint256",
+      },
+    ],
+    name: "SettlementApproved",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "bytes32",
+        name: "channelId",
+        type: "bytes32",
+      },
+      {
+        indexed: true,
+        internalType: "address",
         name: "initiator",
         type: "address",
       },
@@ -300,6 +325,19 @@ export const PaymentChannelABI = [
       },
     ],
     name: "activateChannel",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "bytes32",
+        name: "channelId",
+        type: "bytes32",
+      },
+    ],
+    name: "approveSettlement",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
@@ -412,6 +450,11 @@ export const PaymentChannelABI = [
       {
         internalType: "address",
         name: "settlementInitiator",
+        type: "address",
+      },
+      {
+        internalType: "address",
+        name: "lastReceiptSubmitter",
         type: "address",
       },
     ],
@@ -542,6 +585,11 @@ export const PaymentChannelABI = [
       {
         internalType: "address",
         name: "walletContract",
+        type: "address",
+      },
+      {
+        internalType: "address",
+        name: "lastReceiptSubmitter",
         type: "address",
       },
     ],

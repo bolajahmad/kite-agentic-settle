@@ -15,6 +15,7 @@ import walletRoutes from "./routes/wallet";
 import {
   isContractsConfigured,
   startChannelWatcher,
+  startSettlementWatcher,
 } from "./services/contract-service";
 import {
   handleMcp,
@@ -77,4 +78,5 @@ app.use(errorHandler);
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   startChannelWatcher();
+  startSettlementWatcher();
 });

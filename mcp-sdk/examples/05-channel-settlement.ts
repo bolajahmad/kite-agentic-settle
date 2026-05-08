@@ -21,18 +21,21 @@
 import { createLogger } from "./lib/logger.js";
 import {
   createDemoClient,
-  formatUsdc,
   formatTimestamp,
+  formatUsdc,
   now,
   parseUsdc,
 } from "./lib/setup.js";
+
+const AGENT_ID = "2";
+const SESSION_KEY = "0x2DEb5Dc8C9EB1D06BfFad7D808a56C46089e78aF";
 
 export async function run() {
   const logger = createLogger();
 
   logger.header(
     "Demo 5: Channel Settlement and Finalization",
-    "Cooperative closure vs force-close scenarios"
+    "Cooperative closure vs force-close scenarios",
   );
 
   try {
@@ -42,7 +45,7 @@ export async function run() {
 
     if (!client.sessionKeyAddress) {
       logger.error(
-        "No session key found. Run 'npx kite onboard' to create one."
+        "No session key found. Run 'npx kite onboard' to create one.",
       );
       throw new Error("Session key required for channel settlement");
     }
@@ -71,7 +74,7 @@ export async function run() {
       spent: formatUsdc(cooperativeChannel.spent),
       unsettledCalls: cooperativeChannel.unsettledCalls,
       refundDue: formatUsdc(
-        cooperativeChannel.deposit - cooperativeChannel.spent
+        cooperativeChannel.deposit - cooperativeChannel.spent,
       ),
     });
 
@@ -91,7 +94,7 @@ export async function run() {
     logger.data("Settlement Result", {
       paidToProvider: formatUsdc(cooperativeChannel.spent),
       refundedToConsumer: formatUsdc(
-        cooperativeChannel.deposit - cooperativeChannel.spent
+        cooperativeChannel.deposit - cooperativeChannel.spent,
       ),
       gasUsed: "~80,000 gas",
       status: "FINALIZED",
@@ -128,10 +131,10 @@ export async function run() {
       providerStatus: "OFFLINE",
     });
 
-    logger.info("\n⚔️  Force-close steps:");
+    logger.info("\n   Force-close steps:");
     logger.info("  1. Consumer calls initiateClose() on PaymentChannel");
     logger.info(
-      `  2. Contract starts dispute timer (${forceCloseChannel.disputeTimeout}s)`
+      `  2. Contract starts dispute timer (${forceCloseChannel.disputeTimeout}s)`,
     );
     logger.info("  3. Provider has chance to challenge with proof");
     logger.info("  4. If provider doesn't challenge, consumer can finalize");
@@ -142,7 +145,7 @@ export async function run() {
     const closeInitiatedAt = now();
     const canFinalizeAt = closeInitiatedAt + forceCloseChannel.disputeTimeout;
 
-    logger.warn("⏰ Dispute window active");
+    logger.warn("  Dispute window active");
     logger.data("Force-Close Timeline", {
       closeInitiatedAt: formatTimestamp(closeInitiatedAt),
       canFinalizeAt: formatTimestamp(canFinalizeAt),
@@ -150,54 +153,54 @@ export async function run() {
     });
 
     logger.info("\n(Demo skips actual wait time)");
-    logger.success("✅ Force-close finalized (simulated)");
+    logger.success("  Force-close finalized (simulated)");
 
     logger.data("Force-Close Result", {
       refundedToConsumer: formatUsdc(
-        forceCloseChannel.deposit - forceCloseChannel.spent
+        forceCloseChannel.deposit - forceCloseChannel.spent,
       ),
       providerLost: formatUsdc(forceCloseChannel.spent),
       gasUsed: "~120,000 gas (2 txs: initiate + finalize)",
       status: "CLOSED",
     });
 
-    logger.warn("\n⚠️  Downsides of force-close:");
-    logger.info("  ⏰ Requires waiting for dispute timeout");
-    logger.info("  💸 Higher gas cost (2 transactions)");
-    logger.info("  🔒 Funds locked during dispute window");
-    logger.info("  ⚖️  Provider may lose unsettled funds (if offline)");
+    logger.warn("\n   Downsides of force-close:");
+    logger.info("    Requires waiting for dispute timeout");
+    logger.info("    Higher gas cost (2 transactions)");
+    logger.info("    Funds locked during dispute window");
+    logger.info("     Provider may lose unsettled funds (if offline)");
 
     // ── When to use each method ───────────────────────────────────────
     logger.separator();
     logger.step("Decision guide: Which settlement method?");
 
     logger.info("Use COOPERATIVE SETTLEMENT when:");
-    logger.success("  ✅ Provider is responsive and online");
-    logger.success("  ✅ Both parties agree on call history");
-    logger.success("  ✅ Normal channel closure (no dispute)");
-    logger.success("  ✅ Want fast, efficient settlement");
+    logger.success("    Provider is responsive and online");
+    logger.success("    Both parties agree on call history");
+    logger.success("    Normal channel closure (no dispute)");
+    logger.success("    Want fast, efficient settlement");
 
     logger.info("\nUse FORCE-CLOSE when:");
-    logger.warn("  ⚠️  Provider is offline or unresponsive");
-    logger.warn("  ⚠️  Dispute over unsettled receipts");
-    logger.warn("  ⚠️  Provider refuses to cooperate");
-    logger.warn("  ⚠️  Consumer needs to recover funds urgently");
+    logger.warn("     Provider is offline or unresponsive");
+    logger.warn("     Dispute over unsettled receipts");
+    logger.warn("     Provider refuses to cooperate");
+    logger.warn("     Consumer needs to recover funds urgently");
 
     // ── Best practices ────────────────────────────────────────────────
     logger.separator();
     logger.step("Best practices for channel closure");
 
-    logger.info("🔄 Regular settlement:");
+    logger.info("  Regular settlement:");
     logger.info(
-      "  - Settle channels periodically (don't wait until maxValue reached)"
+      "  - Settle channels periodically (don't wait until maxValue reached)",
     );
     logger.info("  - Reduces risk exposure for both parties");
     logger.info("  - Keeps local state small and manageable");
 
-    logger.info("\n📊 Monitor channel health:");
+    logger.info("\n  Monitor channel health:");
     logger.info("  - Track unsettled call count and value");
     logger.info(
-      "  - Alert if provider becomes unresponsive during active channel"
+      "  - Alert if provider becomes unresponsive during active channel",
     );
     logger.info("  - Use indexer to verify on-chain channel status");
 
@@ -207,9 +210,11 @@ export async function run() {
     logger.info("  - Verify provider signatures on settlement proofs");
 
     logger.info("\n💾 State cleanup:");
-    logger.info("  - Delete local channel state only after on-chain finalization");
     logger.info(
-      "  - Archive settled channel records for accounting/compliance"
+      "  - Delete local channel state only after on-chain finalization",
+    );
+    logger.info(
+      "  - Archive settled channel records for accounting/compliance",
     );
     logger.info("  - Verify refund received before considering channel closed");
 
@@ -217,7 +222,7 @@ export async function run() {
       "Channel settlement lifecycle demonstrated. Cooperative settlement " +
         "is preferred for normal operations (fast, efficient, both parties agree). " +
         "Force-close is available as last resort for dispute resolution or " +
-        "unresponsive providers (slower, higher cost, dispute window required)."
+        "unresponsive providers (slower, higher cost, dispute window required).",
     );
   } catch (err: any) {
     logger.error(`Demo failed: ${err.message}`);

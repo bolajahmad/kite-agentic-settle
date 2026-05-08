@@ -8,7 +8,7 @@ dataSources:
     name: IdentityRegistry
     network: kite-ai-testnet
     source:
-      address: "0x46A6cbc0Fd15936F4F67aABBc554f4CAf80281F9"
+      address: "0xb86a1e88dD55CE110968F184B946461219542e63"
       abi: IdentityRegistry
       startBlock: 21096127
     mapping:
@@ -42,7 +42,7 @@ dataSources:
     name: KiteAAWallet
     network: kite-ai-testnet
     source:
-      address: "0xBfdbA4E11De8B3b82F910Dd3AE8e517Ce60b0bB2"
+      address: "0x4328AF0B2435bf02224CDe80d2037349c3769667"
       abi: KiteAAWallet
       startBlock: 21096127
     mapping:
@@ -81,7 +81,7 @@ dataSources:
     name: PaymentChannel
     network: kite-ai-testnet
     source:
-      address: "0x4791Ea0134eA66b40371A6Daf22d43e02bbB39f8"
+      address: "0x759d29f72De7144f1Fa8f2e38E2D388bD393B04c"
       abi: PaymentChannel
       startBlock: 21096127
     mapping:

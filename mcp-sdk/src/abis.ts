@@ -27,31 +27,6 @@ export const identityRegistryAbi = parseAbi([
   "event SessionRevoked(uint256 indexed agentId, address indexed sessionKey)",
 ]);
 
-// ── AgentRegistry ABI (legacy — kept for backwards compat) ────────
-// Source of truth: frontend/utils/contracts/abi/AgentRegistryABI.ts
-
-export const agentRegistryAbi = parseAbi([
-  // Write
-  "function registerAgent(address agentAddress, address walletContract, uint256 agentIndex, bytes metadata) external returns (bytes32)",
-  "function deactivateAgent(bytes32 agentId) external",
-  "function registerSession(bytes32 agentId, address sessionKey, uint256 sessionIndex, uint256 validUntil) external",
-  "function deactivateSession(address sessionKey) external",
-  // Read
-  "function getAgent(bytes32 agentId) external view returns (bytes32 metadataHash, address agentAddress, address walletContract, address ownerAddr, uint256 agentIndex, bool active)",
-  "function getAgentBySession(address sessionKey) external view returns (bytes32 agentId, bytes32 metadataHash, address agentAddress, uint256 agentIndex, uint256 sessionIndex, bool agentActive, bool sessionActive, uint256 sessionValidUntil)",
-  "function getOwnerAgents(address ownerAddr) external view returns (bytes32[])",
-  "function resolveAgentByAddress(address agentAddr) external view returns (bytes32 agentId, bytes32 metadataHash, address walletContract, address ownerAddr, uint256 agentIndex, bool active)",
-  "function addressToAgent(address) external view returns (bytes32)",
-  "function nonce() external view returns (uint256)",
-  "function totalAgents() external view returns (uint256)",
-  "function owner() external view returns (address)",
-  // Events
-  "event AgentRegistered(bytes32 indexed agentId, address indexed agentAddress, address indexed walletContract, address ownerAddress, uint256 agentIndex, bytes metadata)",
-  "event AgentDeactivated(bytes32 indexed agentId)",
-  "event SessionRegistered(bytes32 indexed agentId, address indexed sessionKey, uint256 sessionIndex, uint256 validUntil)",
-  "event SessionDeactivated(address indexed sessionKey)",
-]);
-
 // ── KiteAAWallet ABI ──────────────────────────────────────────────
 // Source of truth: frontend/utils/contracts/abi/KiteAAWalletABI.ts
 
@@ -97,18 +72,21 @@ export const paymentChannelAbi = parseAbi([
   "function activateChannel(bytes32 channelId) external",
   "function initiateSettlement(bytes32 channelId, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp, bytes providerSignature, bytes32 merkleRoot) external",
   "function submitReceipt(bytes32 channelId, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp, bytes providerSignature) external",
+  "function approveSettlement(bytes32 channelId) external",
   "function finalize(bytes32 channelId, bytes32 merkleRoot) external",
   "function forceCloseExpired(bytes32 channelId) external",
-  "function getChannel(bytes32 channelId) external view returns (address consumer, address user, address provider, address token, uint8 mode, uint256 deposit, uint256 maxSpend, uint256 maxDuration, uint256 openedAt, uint256 expiresAt, uint256 maxPerCall, uint256 settledAmount, uint8 status, uint256 settlementDeadline, uint256 highestClaimedCost, uint256 highestSequenceNumber, address walletContract)",
+  "function getChannel(bytes32 channelId) external view returns (address consumer, address user, address provider, address token, uint8 mode, uint256 deposit, uint256 maxSpend, uint256 maxDuration, uint256 openedAt, uint256 expiresAt, uint256 maxPerCall, uint256 settledAmount, uint8 status, uint256 settlementDeadline, uint256 highestClaimedCost, uint256 highestSequenceNumber, address walletContract, address lastReceiptSubmitter)",
   "function getReceiptHash(bytes32 channelId, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp) public pure returns (bytes32)",
   "function isChannelExpired(bytes32 channelId) external view returns (bool)",
   "function getChannelTimeRemaining(bytes32 channelId) external view returns (uint256)",
   "function getSettlementState(bytes32 channelId) external view returns (uint256 deadline, uint256 highestCost, uint256 highestSeq, address initiator, bool challengeOpen)",
+  "function getLockedFunds(address wallet, address token) external view returns (uint256)",
   "function lockedFunds(address wallet, address token) external view returns (uint256)",
   "event ChannelOpened(bytes32 indexed channelId, address indexed consumer, address indexed provider, address token, uint8 mode, uint256 deposit, uint256 maxSpend, uint256 maxDuration, uint256 maxPerCall, address walletContract)",
   "event ChannelActivated(bytes32 indexed channelId)",
   "event SettlementInitiated(bytes32 indexed channelId, address indexed initiator, uint256 claimedAmount, uint256 settlementDeadline)",
   "event ReceiptSubmitted(bytes32 indexed channelId, address indexed submitter, uint256 sequenceNumber, uint256 cumulativeCost)",
+  "event SettlementApproved(bytes32 indexed channelId, address indexed approver, uint256 finalAmount)",
   "event ChannelFinalized(bytes32 indexed channelId, uint256 payment, uint256 refund, bytes32 usageMerkleRoot)",
 ]);
 

@@ -46,7 +46,6 @@ export {
 } from "./indexer.js";
 
 export {
-  agentRegistryAbi,
   erc20Abi,
   kiteAAWalletAbi,
   paymentChannelAbi,

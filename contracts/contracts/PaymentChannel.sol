@@ -115,6 +115,7 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 highestClaimedCost;
         uint256 highestSequenceNumber;
         address settlementInitiator;
+        address lastReceiptSubmitter;
     }
 
     mapping(bytes32 => Channel) public channels;
@@ -168,6 +169,11 @@ contract PaymentChannel is ReentrancyGuard {
         address indexed wallet,
         address indexed token,
         uint256 amount
+    );
+    event SettlementApproved(
+        bytes32 indexed channelId,
+        address indexed approver,
+        uint256 finalAmount
     );
 
     // ─── Modifiers ─────────────────────────────────────────────────────
@@ -320,7 +326,8 @@ contract PaymentChannel is ReentrancyGuard {
             settlementDeadline: 0,
             highestClaimedCost: 0,
             highestSequenceNumber: 0,
-            settlementInitiator: address(0)
+            settlementInitiator: address(0),
+            lastReceiptSubmitter: address(0)
         });
 
         emit ChannelOpened(
@@ -390,6 +397,7 @@ contract PaymentChannel is ReentrancyGuard {
         ch.status = ChannelStatus.SettlementPending;
         ch.settlementDeadline = block.timestamp + CHALLENGE_WINDOW;
         ch.settlementInitiator = msg.sender;
+        ch.lastReceiptSubmitter = msg.sender;
 
         emit SettlementInitiated(
             channelId,
@@ -433,6 +441,8 @@ contract PaymentChannel is ReentrancyGuard {
         );
         ch.highestClaimedCost = cumulativeCost;
         ch.highestSequenceNumber = sequenceNumber;
+        ch.settlementDeadline = block.timestamp + CHALLENGE_WINDOW;
+        ch.lastReceiptSubmitter = msg.sender;
 
         emit ReceiptSubmitted(
             channelId,
@@ -440,6 +450,38 @@ contract PaymentChannel is ReentrancyGuard {
             sequenceNumber,
             cumulativeCost
         );
+    }
+
+    /**
+     * @notice Approve settlement cooperatively. The party who did NOT last submit
+     *         a receipt can call this to immediately settle at the current
+     *         highestClaimedCost, skipping the challenge window.
+     */
+    function approveSettlement(
+        bytes32 channelId
+    )
+        external
+        nonReentrant
+        onlyChannelParty(channelId)
+        channelInStatus(channelId, ChannelStatus.SettlementPending)
+    {
+        Channel storage ch = channels[channelId];
+        require(
+            msg.sender != ch.lastReceiptSubmitter,
+            "Cannot approve own submission"
+        );
+        require(
+            block.timestamp <= ch.settlementDeadline,
+            "Challenge window expired, use finalize"
+        );
+
+        emit SettlementApproved(
+            channelId,
+            msg.sender,
+            ch.highestClaimedCost
+        );
+
+        _settle(channelId, ch.highestClaimedCost);
     }
 
     /**
@@ -596,7 +638,8 @@ contract PaymentChannel is ReentrancyGuard {
             uint256 settlementDeadline,
             uint256 highestClaimedCost,
             uint256 highestSequenceNumber,
-            address walletContract
+            address walletContract,
+            address lastReceiptSubmitter
         )
     {
         Channel storage ch = channels[channelId];
@@ -617,7 +660,8 @@ contract PaymentChannel is ReentrancyGuard {
             ch.settlementDeadline,
             ch.highestClaimedCost,
             ch.highestSequenceNumber,
-            ch.walletContract
+            ch.walletContract,
+            ch.lastReceiptSubmitter
         );
     }
 

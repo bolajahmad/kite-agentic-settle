@@ -1,10 +1,4 @@
-import {
-  encodePacked,
-  formatUnits,
-  keccak256,
-  parseUnits,
-  recoverMessageAddress,
-} from "viem";
+import { formatUnits, parseUnits } from "viem";
 import { createChannelRecord } from "../../channel-store.js";
 import { KitePaymentClient } from "../../client.js";
 import {
@@ -12,9 +6,16 @@ import {
   SessionRules,
   decide as decideCall,
 } from "../../decide.js";
+import {
+  buildChannelHeaders,
+  extractChannelReceipt,
+  validateChannelReceipt,
+  waitForChannelActive,
+  type ChannelCallReceipt,
+} from "../../utils/channel-helpers.js";
 import { getSessionsByAgent } from "../../indexer.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
-import { ChannelStatus, PaymentRequest, PaymentResult } from "../../types.js";
+import { PaymentRequest, PaymentResult } from "../../types.js";
 import {
   prompt,
   resolveTokenMetadata,
@@ -168,130 +169,6 @@ function formatReceipt(
   }
   lines.push("──────────────────────────────────────────────────────────", "");
   return lines.join("\n");
-}
-
-/**
- * Provider-signed receipt returned per call in batch/stream mode.
- * The signature covers `keccak256(abi.encodePacked(channelId, sequenceNumber,
- * cumulativeCost, timestamp))` — the same digest the PaymentChannel contract
- * uses for on-chain settlement verification.
- */
-interface ChannelCallReceipt {
-  channelId: `0x${string}`;
-  sequenceNumber: number;
-  cumulativeCost: string; // bigint serialised as decimal string
-  timestamp: number;
-  providerSignature: `0x${string}`;
-}
-
-/**
- * Verify that a provider-signed channel receipt is authentic.
- *
- * The PaymentChannel contract uses:
- *   hash = keccak256(abi.encodePacked(channelId, sequenceNumber, cumulativeCost, timestamp))
- *   signer = toEthSignedMessageHash(hash).recover(signature)
- *   require(signer == ch.provider)
- *
- * We replicate the same digest here so we catch forged receipts before
- * they reach the settlement step.
- */
-async function validateChannelReceipt(
-  receipt: ChannelCallReceipt,
-  providerAddress: string,
-): Promise<boolean> {
-  const hash = keccak256(
-    encodePacked(
-      ["bytes32", "uint256", "uint256", "uint256"],
-      [
-        receipt.channelId,
-        BigInt(receipt.sequenceNumber),
-        BigInt(receipt.cumulativeCost),
-        BigInt(receipt.timestamp),
-      ],
-    ),
-  );
-  try {
-    const recovered = await recoverMessageAddress({
-      message: { raw: hash },
-      signature: receipt.providerSignature,
-    });
-    return recovered.toLowerCase() === providerAddress.toLowerCase();
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Poll the on-chain channel status until it reaches `Active`, or until
- * `timeoutMs` elapses.  Returns `true` if activation was detected.
- */
-async function waitForChannelActive(
-  client: KitePaymentClient,
-  channelId: `0x${string}`,
-  timeoutMs = 90_000,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const ch = await client.getChannel(channelId);
-    console.log({ ch });
-    if (ch.status === ChannelStatus.Active) return true;
-    // Wait 3 s between polls without blocking the event loop entirely.
-    await new Promise((r) => setTimeout(r, 3_000));
-  }
-  return false;
-}
-
-/**
- * Extract a `ChannelCallReceipt` from an HTTP response.
- * Providers should embed it in `body.channelReceipt`; headers are checked
- * as a fallback so existing middleware can also convey the receipt.
- */
-function extractChannelReceipt(
-  body: any,
-  headers: Headers,
-): ChannelCallReceipt | null {
-  // Hopefully, structured object in response body
-  if (body?.channelReceipt) {
-    return body.channelReceipt as ChannelCallReceipt;
-  }
-  // Fallback: individual HTTP headers
-  const sig = headers.get("x-channel-receipt-sig");
-  const seq = headers.get("x-channel-receipt-seq");
-  const cost = headers.get("x-channel-cumulative-cost");
-  const ts = headers.get("x-channel-receipt-timestamp");
-  const channelId = headers.get("x-channel-id");
-  if (sig && seq && cost && ts && channelId) {
-    return {
-      channelId: channelId as `0x${string}`,
-      sequenceNumber: Number(seq),
-      cumulativeCost: cost,
-      timestamp: Number(ts),
-      providerSignature: sig as `0x${string}`,
-    };
-  }
-  return null;
-}
-
-/**
- * Build request headers for a channel call, including the last receipt if available.
- */
-function buildChannelHeaders(
-  channelId: `0x${string}`,
-  lastReceipt: ChannelCallReceipt | null,
-): Record<string, string> {
-  const headers: Record<string, string> = {
-    "X-Payment-Mode": "channel",
-    "X-Channel-Id": channelId,
-  };
-
-  if (lastReceipt) {
-    headers["X-Last-Receipt-Seq"] = String(lastReceipt.sequenceNumber);
-    headers["X-Last-Receipt-Cost"] = lastReceipt.cumulativeCost;
-    headers["X-Last-Receipt-Timestamp"] = String(lastReceipt.timestamp);
-    headers["X-Last-Receipt-Sig"] = lastReceipt.providerSignature;
-  }
-
-  return headers;
 }
 
 /**

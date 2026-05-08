@@ -1,201 +1,445 @@
 /**
  * Demo 3: Batch Channel Flow
  *
- * STATEFUL REUSE:
- * This demo shows how batch channels enable stateful, cost-efficient API
- * workflows. Instead of paying per-call, the consumer opens a channel once,
- * makes multiple batched calls, and settles the aggregate cost at the end.
- * Local state tracks unsettled calls, enabling resume and audit.
+ * CHANNEL-BASED BATCHING:
+ * This demo shows how payment channels enable cost-efficient API workflows.
+ * The consumer opens a channel on-chain once, makes multiple calls through it,
+ * and settles the aggregate cost at the end. Provider signs receipts for each
+ * call, enabling merkle-proof-based auditability.
  *
  * WHAT YOU'LL LEARN:
- * - How to open a batch channel with capacity limits
- * - How batch calls accumulate off-chain before settlement
- * - How local channel state tracks unsettled calls
- * - How settlement finalizes aggregate payment
+ * - How to open a payment channel on-chain with deposit
+ * - How channel calls accumulate provider-signed receipts
+ * - How merkle roots track cumulative call history
+ * - How to handle 402 rejections and stop gracefully
+ * - How settlement finalizes aggregate payment with gas savings
  *
  * PREREQUISITES:
- * - Run `npx kite init` to store your EOA seed phrase
- * - Run `npx kite onboard` to register an agent and create a session key
+ * - Run \`npx kite init\` to store your EOA seed phrase
+ * - Run \`npx kite onboard\` to register an agent and create a session key
  * - Fund your KiteAAWallet with test USDC
+ * - Start backend server at http://localhost:4000
  */
 
-import { createLogger } from "./lib/logger.js";
-import { createMockProvider } from "./lib/mock-provider.js";
+import { buildMerkleRoot, computeLeafHash } from "../src/merkle.js";
+import { ChannelStatus } from "../src/types.js";
 import {
-  createDemoClient,
-  formatUsdc,
-  parseUsdc,
-  wait,
-} from "./lib/setup.js";
+  buildChannelHeaders,
+  extractChannelReceipt,
+  validateChannelReceipt,
+  waitForChannelActive,
+  type ChannelCallReceipt,
+} from "../src/utils/channel-helpers.js";
+import { createLogger } from "./lib/logger.js";
+import { createDemoClient, formatUsdc, parseUsdc } from "./lib/setup.js";
+
+// Demo configuration
+const AGENT_ID = "2";
+const SESSION_KEY = "0x2DEb5Dc8C9EB1D06BfFad7D808a56C46089e78aF";
+const MAX_CALLS = 10;
 
 export async function run() {
   const logger = createLogger();
 
   logger.header(
     "Demo 3: Batch Channel Flow",
-    "Stateful off-chain batching with aggregate settlement"
+    "Multiple API calls through a single on-chain payment channel",
   );
 
   try {
     // ── Setup ────────────────────────────────────────────────────────
-    logger.step("Initialize Kite client");
-    const client = await createDemoClient({ logger });
+    logger.step("Initialize Kite client in agent mode");
+    logger.info(`Agent ID: ${AGENT_ID}`);
+    logger.info(`Session key: ${SESSION_KEY}`);
+
+    const client = await createDemoClient({
+      logger,
+      agentId: AGENT_ID,
+      sessionKey: SESSION_KEY,
+      allowUnavailableSession: true,
+    });
 
     if (!client.sessionKeyAddress) {
       logger.error(
-        "No session key found. Run 'npx kite onboard' to create one."
+        "No session key found. Run 'npx kite onboard' to create one.",
       );
-      throw new Error("Session key required for batch channels");
+      throw new Error("Session key required for channels");
     }
 
-    logger.success("Client initialized");
+    logger.success("Client initialized in agent mode");
+    logger.info(`Active address: ${client.address}`);
     logger.info(`Session key: ${client.sessionKeyAddress}`);
 
-    // ── Check balance ─────────────────────────────────────────────────
-    logger.step("Check wallet balance");
-    const balance = await client.getBalance();
-    logger.data("Balance", {
-      formatted: formatUsdc(balance),
-      raw: balance.toString(),
+    // ── Check balance before ──────────────────────────────────────────
+    logger.step("Check wallet balance before opening channel");
+    const balanceBefore = await client.getDepositedBalance();
+    logger.data("Balance Before", {
+      formatted: formatUsdc(balanceBefore),
+      raw: balanceBefore.toString(),
     });
 
-    if (balance === 0n) {
+    if (balanceBefore === 0n) {
       logger.warn(
-        "Wallet balance is zero. Demo will use mock provider (no real settlement)"
+        "Wallet balance is zero. Fund your wallet: npx kite fund --amount <amount>",
+      );
+      logger.info("Demo will continue but channel opening may fail");
+    }
+
+    // ── Discover provider and channel options ─────────────────────────
+    logger.step("Discover provider from 402 challenge");
+
+    const discoveryUrl = "http://localhost:4000/api/stream/intelligence";
+    const probeResponse = await fetch(discoveryUrl, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (probeResponse.status !== 402) {
+      throw new Error(
+        `Expected 402 response, got ${probeResponse.status}. Make sure backend is running.`,
       );
     }
 
-    // ── Start mock provider ───────────────────────────────────────────
-    logger.step("Start mock provider");
-    const pricePerCall = parseUsdc("0.05"); // $0.05 per call
-    const provider = await createMockProvider({
-      port: 3403,
-      agentAddress: client.eoaAddress,
-      pricePerCall,
-    });
-    logger.success("Provider started");
-    logger.info(`Price per call: ${formatUsdc(pricePerCall)}`);
+    const challenge = await probeResponse.json();
+    const offer = challenge.accepts?.[0];
+    if (!offer) {
+      throw new Error("402 response missing accepts[] array");
+    }
 
-    // ── Open batch channel ────────────────────────────────────────────
-    logger.step("Open batch channel");
+    const providerAddress = offer.payTo;
+    const tokenAddress = offer.asset;
+    const ratePerCall = BigInt(offer.maxAmountRequired);
+    const maxPerCall = offer.maxRatePerCall
+      ? BigInt(offer.maxRatePerCall)
+      : ratePerCall;
 
-    const batchLimits = {
-      maxCalls: 5, // Max 5 calls before settlement required
-      maxValue: parseUsdc("0.30"), // Max $0.30 total
-      maxDuration: 300, // 5 minutes
-    };
-
-    logger.info("Batch limits:");
-    logger.data("Limits", {
-      maxCalls: batchLimits.maxCalls,
-      maxValue: formatUsdc(batchLimits.maxValue),
-      maxDurationSeconds: batchLimits.maxDuration,
+    logger.success(`Provider discovered: ${providerAddress}`);
+    logger.data("Channel Options", {
+      ratePerCall: formatUsdc(ratePerCall),
+      maxPerCall: formatUsdc(maxPerCall),
+      recommendedDeposit: challenge.channelOptions?.recommendedDeposit
+        ? formatUsdc(BigInt(challenge.channelOptions.recommendedDeposit))
+        : "N/A",
+      maxDuration: challenge.channelOptions?.maxDuration || "3600s",
     });
 
-    // Note: In production, you'd use client.openBatchSession() or similar.
-    // For this demo, we simulate the batch tracking.
+    // ── Open payment channel on-chain ─────────────────────────────────
+    logger.step("Open payment channel on-chain");
 
-    const batchState = {
-      callCount: 0,
-      totalValue: 0n,
-      calls: [] as Array<{ timestamp: number; cost: bigint; result: any }>,
-    };
+    const depositAmount = parseUsdc("5.0");
+    const maxDuration = 3600;
 
-    logger.success("Batch channel opened (simulated)");
+    logger.info("Channel configuration:");
+    logger.data("Configuration", {
+      deposit: formatUsdc(depositAmount),
+      maxSpend: formatUsdc(depositAmount),
+      maxDuration: `${maxDuration}s`,
+      maxPerCall: formatUsdc(maxPerCall),
+      mode: "prepaid",
+    });
 
-    // ── Make batched calls ────────────────────────────────────────────
-    logger.step("Make batched API calls");
+    const { txHash: openTxHash, channelId } = await client.openChannel({
+      provider: providerAddress,
+      token: tokenAddress,
+      mode: "prepaid",
+      deposit: depositAmount,
+      maxSpend: depositAmount,
+      maxDuration,
+      maxPerCall,
+    });
 
-    for (let i = 1; i <= 4; i++) {
-      logger.info(`\n  📞 Call ${i}/${batchLimits.maxCalls}`);
+    logger.success("Channel opened on-chain");
+    logger.data("Channel Info", {
+      channelId: channelId,
+      txHash: openTxHash,
+      status: "Open (awaiting provider activation)",
+    });
+
+    client.setChannelForProvider(providerAddress, channelId);
+    logger.info("Channel registered with payment interceptor");
+
+    // ── Wait for provider activation ──────────────────────────────────
+    logger.step("Wait for provider to activate channel");
+    logger.info("Provider reads channel from chain and activates it...");
+
+    const activated = await waitForChannelActive(client, channelId);
+    if (activated) {
+      logger.success("Channel is Active");
+    } else {
+      logger.warn(
+        "Provider did not activate within 90s. Proceeding anyway (calls may fail).",
+      );
+    }
+
+    // ── Define API endpoints ──────────────────────────────────────────
+    const apiEndpoints = [
+      {
+        name: "Market Data (BTC)",
+        url: "http://localhost:4000/api/stream/market/BTCUSDT",
+      },
+      {
+        name: "Market Data (ETH)",
+        url: "http://localhost:4000/api/stream/market/ETHUSDT",
+      },
+      {
+        name: "Intelligence Report",
+        url: "http://localhost:4000/api/stream/intelligence",
+      },
+      {
+        name: "Protocol Analytics",
+        url: "http://localhost:4000/api/stream/protocol-report",
+      },
+      {
+        name: "Market Data (SOL)",
+        url: "http://localhost:4000/api/stream/market/SOLUSDT",
+      },
+    ];
+
+    // ── Make channel calls ────────────────────────────────────────────
+    logger.step(`Make ${MAX_CALLS} API calls through channel`);
+    logger.info(
+      "Calls use channel mode: X-Payment-Mode: channel + X-Channel-Id header",
+    );
+
+    const receipts: ChannelCallReceipt[] = [];
+    const leafHashes: `0x${string}`[] = [];
+    let lastReceipt: ChannelCallReceipt | null = null;
+    let callCount = 0;
+
+    for (let i = 0; i < MAX_CALLS; i++) {
+      const endpoint = apiEndpoints[i % apiEndpoints.length];
+      const callNum = i + 1;
+
+      logger.info(`\nCall ${callNum}/${MAX_CALLS}: ${endpoint.name}`);
 
       const startTime = Date.now();
-      const response = await client.fetchWithPayment(provider.getUrl(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: `Batch query ${i}` }),
-        mode: "perCall", // Using perCall for demo; real batch mode would accumulate off-chain
-      });
 
-      const result = await response.json();
-      const elapsed = Date.now() - startTime;
+      try {
+        const headers = buildChannelHeaders(channelId, lastReceipt);
 
-      batchState.callCount++;
-      batchState.totalValue += pricePerCall;
-      batchState.calls.push({
-        timestamp: Date.now(),
-        cost: pricePerCall,
-        result,
-      });
+        const response = await fetch(endpoint.url, {
+          method: "GET",
+          headers,
+        });
 
-      logger.success(`  Call ${i} completed in ${elapsed}ms`);
-      logger.info(`  Cost: ${formatUsdc(pricePerCall)}`);
-      logger.info(
-        `  Running total: ${formatUsdc(batchState.totalValue)} (${batchState.callCount} calls)`
-      );
+        const elapsed = Date.now() - startTime;
 
-      await wait(500); // Brief pause between calls
+        // ── Handle 402 rejection (stop immediately) ───────────────────
+        if (response.status === 402) {
+          const errorBody = await response.json().catch(() => ({}));
+          logger.error(
+            `Call ${callNum} rejected with 402 Payment Required (${elapsed}ms)`,
+          );
+          logger.data("402 Error", errorBody);
+          logger.info(
+            "Channel rejected by provider. Stopping batch flow gracefully.",
+          );
+          logger.info("Common causes:");
+          logger.info("  - Channel deposit exhausted");
+          logger.info("  - Channel expired");
+          logger.info("  - Provider detected issue with last receipt");
+          break;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          logger.error(
+            `Call ${callNum} failed with status ${response.status} (${elapsed}ms)`,
+          );
+          logger.data("Error Response", errorText);
+          break;
+        }
+
+        const body = await response.json();
+
+        const receipt = extractChannelReceipt(body, response.headers);
+        if (!receipt) {
+          logger.warn(
+            `Call ${callNum} succeeded but provider did not return receipt`,
+          );
+          continue;
+        }
+
+        if (receipt.channelId.toLowerCase() !== channelId.toLowerCase()) {
+          logger.warn(
+            `Call ${callNum} receipt channelId mismatch: ${receipt.channelId} != ${channelId}`,
+          );
+          continue;
+        }
+
+        if (
+          lastReceipt &&
+          receipt.sequenceNumber <= lastReceipt.sequenceNumber
+        ) {
+          logger.warn(
+            `Call ${callNum} receipt sequence not increasing: ${receipt.sequenceNumber} <= ${lastReceipt.sequenceNumber}`,
+          );
+          continue;
+        }
+
+        const valid = await validateChannelReceipt(receipt, providerAddress);
+        if (!valid) {
+          logger.warn(
+            `Call ${callNum} receipt signature invalid or not from provider`,
+          );
+          continue;
+        }
+
+        logger.success(`Call ${callNum} completed in ${elapsed}ms`);
+
+        receipts.push(receipt);
+        lastReceipt = receipt;
+        callCount++;
+
+        logger.data(`Receipt ${callNum}`, {
+          sequence: receipt.sequenceNumber,
+          cumulativeCost: formatUsdc(BigInt(receipt.cumulativeCost)),
+          timestamp: new Date(receipt.timestamp * 1000).toISOString(),
+          signature: receipt.providerSignature.slice(0, 20) + "...",
+        });
+
+        const leafHash = computeLeafHash({
+          channelId: receipt.channelId,
+          sequenceNumber: receipt.sequenceNumber,
+          callCost: 0n,
+          cumulativeCost: BigInt(receipt.cumulativeCost),
+          timestamp: receipt.timestamp,
+          url: endpoint.url,
+          requestHash:
+            "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+          responseHash:
+            "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+          providerSignature: receipt.providerSignature,
+        });
+        leafHashes.push(leafHash);
+
+        const merkleRoot = buildMerkleRoot(leafHashes);
+        logger.data("Merkle State", {
+          leafHash: leafHash.slice(0, 20) + "...",
+          merkleRoot: merkleRoot.slice(0, 20) + "...",
+          leafCount: leafHashes.length,
+          cumulativeSequence: receipt.sequenceNumber,
+        });
+
+        logger.info(
+          `Cumulative cost: ${formatUsdc(BigInt(receipt.cumulativeCost))}`,
+        );
+        logger.info(
+          `Remaining deposit: ~${formatUsdc(depositAmount - BigInt(receipt.cumulativeCost))}`,
+        );
+      } catch (err: any) {
+        logger.error(`Call ${callNum} error: ${err.message}`);
+        logger.info("Stopping batch flow due to error");
+        break;
+      }
     }
 
-    // ── Show batch state ──────────────────────────────────────────────
-    logger.step("Inspect batch channel state");
+    // ── Show final summary ────────────────────────────────────────────
+    logger.step("Batch flow summary");
 
-    logger.data("Batch Summary", {
-      totalCalls: batchState.callCount,
-      totalValue: formatUsdc(batchState.totalValue),
-      avgCostPerCall: formatUsdc(batchState.totalValue / BigInt(batchState.callCount)),
-      remainingCapacity: {
-        calls: batchLimits.maxCalls - batchState.callCount,
-        value: formatUsdc(batchLimits.maxValue - batchState.totalValue),
-      },
+    if (callCount === 0) {
+      logger.warn("No calls completed successfully");
+    } else {
+      logger.data("Summary", {
+        totalCalls: callCount,
+        totalCost: lastReceipt
+          ? formatUsdc(BigInt(lastReceipt.cumulativeCost))
+          : "0",
+        avgCostPerCall: lastReceipt
+          ? formatUsdc(BigInt(lastReceipt.cumulativeCost) / BigInt(callCount))
+          : "0",
+        receiptsCollected: receipts.length,
+        finalSequence: lastReceipt?.sequenceNumber || 0,
+      });
+
+      const finalMerkleRoot = buildMerkleRoot(leafHashes);
+      logger.data("Final Merkle Root", {
+        root: finalMerkleRoot,
+        leafCount: leafHashes.length,
+        purpose:
+          "Submitted to PaymentChannel.initiateSettlement() for on-chain verification",
+      });
+    }
+
+    // ── Check channel state ───────────────────────────────────────────
+    logger.step("Check channel state on-chain");
+    const channelState = await client.getChannel(channelId);
+    logger.data("Channel State", {
+      status: ChannelStatus[channelState.status],
+      deposit: formatUsdc(channelState.deposit),
+      settledAmount: formatUsdc(channelState.settledAmount),
+      highestClaimedCost: formatUsdc(channelState.highestClaimedCost),
+      highestSequence: channelState.highestSequenceNumber,
     });
 
-    logger.info("💾 Local state persisted:");
-    logger.info(
-      `  Channel record stored at: ~/.kite-agent-pay/channels/<channelId>.json`
-    );
-    logger.info(`  Contains: ${batchState.callCount} unsettled call receipts`);
-    logger.info("  Can be resumed after interruption or across sessions");
-
-    // ── Settlement ────────────────────────────────────────────────────
-    logger.step("Settle batch channel");
-
-    logger.info("Settlement process:");
-    logger.info("  1. Aggregate all unsettled receipts");
-    logger.info(
-      `  2. Submit settlement transaction: ${formatUsdc(batchState.totalValue)}`
-    );
-    logger.info("  3. On-chain verification of batch merkle proof");
-    logger.info("  4. Update channel nonce and clear local state");
-
-    logger.success("Batch settled (simulated)");
-    logger.data("Settlement Result", {
-      totalSettled: formatUsdc(batchState.totalValue),
-      callsSettled: batchState.callCount,
-      gasEstimate: "~50,000 gas (single tx for entire batch)",
+    // ── Check balance after ───────────────────────────────────────────
+    logger.step("Check wallet balance after channel calls");
+    const balanceAfter = await client.getDepositedBalance();
+    logger.data("Balance After", {
+      formatted: formatUsdc(balanceAfter),
+      raw: balanceAfter.toString(),
     });
 
-    // ── Compare to per-call ───────────────────────────────────────────
-    logger.step("Cost comparison: Batch vs Per-Call");
+    const spent = balanceBefore - balanceAfter;
+    if (spent > 0n) {
+      logger.success(`Total spent: ${formatUsdc(spent)}`);
+    } else {
+      logger.info(
+        "No balance change yet (channel deposit locked, settlement pending)",
+      );
+    }
 
-    const perCallGas = 100000; // Estimated gas per individual settlement
-    const batchGas = 50000; // Estimated gas for batch settlement
+    // ── Settlement instructions ───────────────────────────────────────
+    logger.step("Settlement process");
 
-    logger.data("Gas Efficiency", {
-      perCallApproach: `${batchState.callCount} × ${perCallGas} = ${batchState.callCount * perCallGas} gas`,
-      batchApproach: `1 × ${batchGas} = ${batchGas} gas`,
-      savings: `${((1 - batchGas / (batchState.callCount * perCallGas)) * 100).toFixed(1)}% gas reduction`,
-    });
+    if (callCount > 0 && lastReceipt) {
+      logger.info("To settle this channel:");
+      logger.info("  1. Initiate settlement with last receipt:");
+      logger.info(`     npx kite finalize --channel ${channelId}`);
+      logger.info("  2. Wait for challenge window (1 hour)");
+      logger.info("  3. After window: finalize settlement");
+      logger.info("");
+      logger.info("Settlement will:");
+      logger.info(
+        `  - Verify provider signature on receipt seq ${lastReceipt.sequenceNumber}`,
+      );
+      logger.info(
+        `  - Transfer ${formatUsdc(BigInt(lastReceipt.cumulativeCost))} to provider`,
+      );
+      logger.info(
+        `  - Refund ${formatUsdc(depositAmount - BigInt(lastReceipt.cumulativeCost))} to consumer`,
+      );
+      logger.info("  - Close channel");
+    } else {
+      logger.info(
+        "No calls completed - channel can be closed without settlement",
+      );
+    }
 
-    // ── Cleanup ───────────────────────────────────────────────────────
-    logger.step("Cleanup resources");
-    await provider.stop();
-    logger.success("Provider stopped");
+    // ── Cost comparison ───────────────────────────────────────────────
+    if (callCount > 1) {
+      logger.step("Cost comparison: Channel vs Per-Call");
+
+      const perCallGas = 100000;
+      const channelOpenGas = 150000;
+      const channelSettleGas = 50000;
+      const channelTotalGas = channelOpenGas + channelSettleGas;
+
+      logger.data("Gas Efficiency", {
+        perCallApproach: `${callCount} calls x ${perCallGas} gas = ${callCount * perCallGas} gas`,
+        channelApproach: `Open (${channelOpenGas}) + Settle (${channelSettleGas}) = ${channelTotalGas} gas`,
+        savings:
+          callCount * perCallGas > channelTotalGas
+            ? `${((1 - channelTotalGas / (callCount * perCallGas)) * 100).toFixed(1)}% gas reduction`
+            : "Break-even point not reached",
+        breakEvenCalls: Math.ceil(channelTotalGas / perCallGas),
+      });
+    }
 
     logger.complete(
-      "Batch channel flow demonstrated. Multiple API calls batched off-chain, " +
-        "local state tracked for resume/audit, and aggregate settlement achieved " +
-        "significant gas savings vs per-call settlement."
+      "Channel batch flow demonstrated. Multiple API calls made through single on-chain channel. " +
+        "Provider signed receipts collected. Merkle proofs computed for auditability. " +
+        "Ready for aggregate settlement with gas savings.",
     );
   } catch (err: any) {
     logger.error(`Demo failed: ${err.message}`);
@@ -208,8 +452,5 @@ export async function run() {
 
 // Allow running standalone
 if (import.meta.url === `file://${process.argv[1]}`) {
-  run().catch((err) => {
-    console.error("Fatal error:", err);
-    process.exit(1);
-  });
+  await run();
 }

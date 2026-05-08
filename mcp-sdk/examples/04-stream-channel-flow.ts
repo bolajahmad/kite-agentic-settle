@@ -17,205 +17,401 @@
  * - Run `npx kite init` to store your EOA seed phrase
  * - Run `npx kite onboard` to register an agent and create a session key
  * - Fund your KiteAAWallet with test USDC
+ * - Start backend server at http://localhost:4000
  */
 
-import { createLogger } from "./lib/logger.js";
-import { createMockProvider } from "./lib/mock-provider.js";
+import { buildMerkleRoot, computeLeafHash } from "../src/merkle.js";
+import { ChannelStatus } from "../src/types.js";
 import {
-  createDemoClient,
-  formatUsdc,
-  formatTimestamp,
-  now,
-  parseUsdc,
-  wait,
-} from "./lib/setup.js";
+  buildChannelHeaders,
+  extractChannelReceipt,
+  validateChannelReceipt,
+  waitForChannelActive,
+  type ChannelCallReceipt,
+} from "../src/utils/channel-helpers.js";
+import { createLogger } from "./lib/logger.js";
+import { createDemoClient, formatUsdc } from "./lib/setup.js";
+
+// Demo configuration
+const AGENT_ID = "2";
+const SESSION_KEY = "0x2DEb5Dc8C9EB1D06BfFad7D808a56C46089e78aF";
+const STREAM_DURATION_SECONDS = 30; // 30 second window for demo
+const CALL_INTERVAL_MS = 3000; // Call every 3 seconds
 
 export async function run() {
   const logger = createLogger();
 
   logger.header(
     "Demo 4: Stream Channel Flow",
-    "Time-bounded scheduled API execution"
+    "Time-bounded scheduled API execution",
   );
 
   try {
     // ── Setup ────────────────────────────────────────────────────────
-    logger.step("Initialize Kite client");
-    const client = await createDemoClient({ logger });
+    logger.step("Initialize Kite client in agent mode");
+    logger.info(`Agent ID: ${AGENT_ID}`);
+    logger.info(`Session key: ${SESSION_KEY}`);
+
+    const client = await createDemoClient({
+      logger,
+      agentId: AGENT_ID,
+      sessionKey: SESSION_KEY,
+      allowUnavailableSession: true,
+    });
 
     if (!client.sessionKeyAddress) {
       logger.error(
-        "No session key found. Run 'npx kite onboard' to create one."
+        "No session key found. Run 'npx kite onboard' to create one.",
       );
       throw new Error("Session key required for stream channels");
     }
 
-    logger.success("Client initialized");
+    logger.success("Client initialized in agent mode");
+    logger.info(`Active address: ${client.address}`);
     logger.info(`Session key: ${client.sessionKeyAddress}`);
 
-    // ── Start mock provider ───────────────────────────────────────────
-    logger.step("Start mock provider");
-    const pricePerCall = parseUsdc("0.02"); // $0.02 per call
-    const provider = await createMockProvider({
-      port: 3404,
-      agentAddress: client.eoaAddress,
-      pricePerCall,
+    // ── Check balance before ──────────────────────────────────────────
+    logger.step("Check wallet balance before opening channel");
+    const balanceBefore = await client.getDepositedBalance();
+    logger.data("Balance Before", {
+      formatted: formatUsdc(balanceBefore),
+      raw: balanceBefore.toString(),
     });
-    logger.success("Provider started");
-    logger.info(`Price per call: ${formatUsdc(pricePerCall)}`);
 
-    // ── Open stream channel ───────────────────────────────────────────
-    logger.step("Open stream channel with time window");
+    if (balanceBefore === 0n) {
+      logger.warn(
+        "Wallet balance is zero. Fund your wallet: npx kite fund --amount <amount>",
+      );
+      logger.info("Demo will continue but channel opening may fail");
+    }
 
-    const streamConfig = {
-      startTime: now(),
-      endTime: now() + 60, // 60-second window
-      maxValue: parseUsdc("1.00"), // Max $1.00 within window
-      intervalSeconds: 10, // Call every 10 seconds
-    };
+    // ── Discover provider and channel options ─────────────────────────
+    logger.step("Discover provider from 402 challenge");
+
+    const apiUrl = "http://localhost:4000/api/stream/market/BTCUSDT";
+    const probeResponse = await fetch(apiUrl, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (probeResponse.status !== 402) {
+      throw new Error(
+        `Expected 402 response, got ${probeResponse.status}. Make sure backend is running.`,
+      );
+    }
+
+    const challenge = await probeResponse.json();
+    const offer = challenge.accepts?.[0];
+    if (!offer) {
+      throw new Error("402 response missing accepts[] array");
+    }
+
+    const providerAddress = offer.payTo;
+    const tokenAddress = offer.asset;
+    const ratePerCall = BigInt(offer.maxAmountRequired);
+    const maxPerCall = offer.maxRatePerCall
+      ? BigInt(offer.maxRatePerCall)
+      : ratePerCall;
+
+    logger.success(`Provider discovered: ${providerAddress}`);
+    logger.data("Channel Options", {
+      ratePerCall: formatUsdc(ratePerCall),
+      maxPerCall: formatUsdc(maxPerCall),
+    });
+
+    // ── Open stream channel with time bounds ──────────────────────────
+    logger.step("Open stream channel with time bounds");
+
+    // Estimate max calls based on duration and interval
+    const estimatedMaxCalls = Math.ceil(
+      (STREAM_DURATION_SECONDS * 1000) / CALL_INTERVAL_MS,
+    );
+    const depositAmount = maxPerCall * BigInt(estimatedMaxCalls + 2); // +2 buffer
 
     logger.data("Stream Configuration", {
-      startTime: formatTimestamp(streamConfig.startTime),
-      endTime: formatTimestamp(streamConfig.endTime),
-      duration: `${streamConfig.endTime - streamConfig.startTime} seconds`,
-      maxValue: formatUsdc(streamConfig.maxValue),
-      callInterval: `${streamConfig.intervalSeconds} seconds`,
-      estimatedCalls: Math.floor(
-        (streamConfig.endTime - streamConfig.startTime) /
-          streamConfig.intervalSeconds
-      ),
+      duration: `${STREAM_DURATION_SECONDS}s`,
+      callInterval: `${CALL_INTERVAL_MS / 1000}s`,
+      estimatedCalls: estimatedMaxCalls,
+      deposit: formatUsdc(depositAmount),
+      maxPerCall: formatUsdc(maxPerCall),
     });
 
-    const streamState = {
-      callCount: 0,
-      totalValue: 0n,
-      calls: [] as Array<{ timestamp: number; cost: bigint }>,
-    };
+    const { txHash: openTxHash, channelId } = await client.openChannel({
+      provider: providerAddress,
+      token: tokenAddress,
+      mode: "prepaid",
+      deposit: depositAmount,
+      maxSpend: depositAmount,
+      maxDuration: STREAM_DURATION_SECONDS,
+      maxPerCall,
+    });
 
-    logger.success("Stream channel opened (simulated)");
+    logger.success("Stream channel opened on-chain");
+    logger.data("Channel Info", {
+      channelId: channelId,
+      txHash: openTxHash,
+      status: "Open (awaiting provider activation)",
+      expiresIn: `${STREAM_DURATION_SECONDS}s`,
+    });
 
-    // ── Execute stream calls ──────────────────────────────────────────
-    logger.step("Execute scheduled stream calls");
+    client.setChannelForProvider(providerAddress, channelId);
 
+    // ── Wait for provider activation ──────────────────────────────────
+    logger.step("Wait for provider to activate channel");
+    const activated = await waitForChannelActive(client, channelId);
+    if (activated) {
+      logger.success("Channel is Active");
+    } else {
+      logger.warn(
+        "Provider did not activate within 90s. Proceeding anyway (calls may fail).",
+      );
+    }
+
+    // ── Execute scheduled stream calls ────────────────────────────────
+    logger.step("Execute scheduled stream calls within time window");
+
+    const streamStartTime = Date.now();
+    const streamDeadline = streamStartTime + STREAM_DURATION_SECONDS * 1000;
+
+    logger.info(`Stream window: ${STREAM_DURATION_SECONDS}s`);
+    logger.info(`Calls scheduled every ${CALL_INTERVAL_MS / 1000}s`);
     logger.info(
-      "Stream will execute calls at regular intervals within time window..."
-    );
-    logger.info(
-      "(Demo accelerated: running 3 calls with 2s intervals instead of 10s)\n"
+      `Stream will auto-terminate at ${new Date(streamDeadline).toLocaleTimeString()}\n`,
     );
 
-    for (let i = 1; i <= 3; i++) {
-      const currentTime = now();
-      const timeRemaining = streamConfig.endTime - currentTime;
+    const receipts: ChannelCallReceipt[] = [];
+    const leafHashes: `0x${string}`[] = [];
+    let lastReceipt: ChannelCallReceipt | null = null;
+    let callCount = 0;
 
-      if (timeRemaining <= 0) {
-        logger.warn("Stream window expired, stopping execution");
-        break;
-      }
+    // Define rotating endpoints for variety
+    const endpoints = [
+      "http://localhost:4000/api/stream/market/BTCUSDT",
+      "http://localhost:4000/api/stream/market/ETHUSDT",
+      "http://localhost:4000/api/stream/market/SOLUSDT",
+    ];
 
-      logger.info(`  ⏰ Scheduled call ${i} at ${formatTimestamp(currentTime)}`);
-      logger.info(`  Time remaining in window: ${timeRemaining}s`);
+    while (Date.now() < streamDeadline) {
+      const timeRemaining = Math.ceil((streamDeadline - Date.now()) / 1000);
+      const callNum = callCount + 1;
+      const endpoint = endpoints[callCount % endpoints.length];
+      const symbol = endpoint.split("/").pop() || "UNKNOWN";
 
-      const response = await client.fetchWithPayment(provider.getUrl(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: `Stream query ${i}`,
-          timestamp: currentTime,
-        }),
-        mode: "perCall",
-      });
-
-      const result = await response.json();
-
-      streamState.callCount++;
-      streamState.totalValue += pricePerCall;
-      streamState.calls.push({
-        timestamp: currentTime,
-        cost: pricePerCall,
-      });
-
-      logger.success(`  Call ${i} completed`);
-      logger.info(`  Cost: ${formatUsdc(pricePerCall)}`);
       logger.info(
-        `  Running total: ${formatUsdc(streamState.totalValue)}\n`
+        `\nCall ${callNum} (${timeRemaining}s remaining): Market data for ${symbol}`,
       );
 
-      // Wait for next interval (accelerated for demo)
-      if (i < 3) {
-        await wait(2000); // 2 seconds instead of 10
+      const startTime = Date.now();
+
+      try {
+        const headers = buildChannelHeaders(channelId, lastReceipt);
+
+        const response = await fetch(endpoint, {
+          method: "GET",
+          headers,
+        });
+
+        const elapsed = Date.now() - startTime;
+
+        // ── Handle 402 rejection (channel may be expired) ─────────────
+        if (response.status === 402) {
+          const errorBody = await response.json().catch(() => ({}));
+          logger.error(
+            `Call ${callNum} rejected with 402 Payment Required (${elapsed}ms)`,
+          );
+          logger.data("402 Error", errorBody);
+          logger.info(
+            "Channel rejected by provider (likely expired or exhausted).",
+          );
+          break;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          logger.error(
+            `Call ${callNum} failed with status ${response.status} (${elapsed}ms)`,
+          );
+          logger.data("Error Response", errorText);
+          break;
+        }
+
+        const body = await response.json();
+
+        const receipt = extractChannelReceipt(body, response.headers);
+        if (!receipt) {
+          logger.warn(
+            `Call ${callNum} succeeded but provider did not return receipt`,
+          );
+        } else if (
+          receipt.channelId.toLowerCase() !== channelId.toLowerCase()
+        ) {
+          logger.warn(`Call ${callNum} receipt channelId mismatch`);
+        } else if (
+          lastReceipt &&
+          receipt.sequenceNumber <= lastReceipt.sequenceNumber
+        ) {
+          logger.warn(`Call ${callNum} receipt sequence not increasing`);
+        } else {
+          const valid = await validateChannelReceipt(receipt, providerAddress);
+          if (!valid) {
+            logger.warn(`Call ${callNum} receipt signature invalid`);
+          } else {
+            receipts.push(receipt);
+            lastReceipt = receipt;
+            callCount++;
+
+            logger.success(`Call ${callNum} completed in ${elapsed}ms`);
+            logger.data(`Receipt ${callNum}`, {
+              sequence: receipt.sequenceNumber,
+              cumulativeCost: formatUsdc(BigInt(receipt.cumulativeCost)),
+              timestamp: new Date(receipt.timestamp * 1000).toISOString(),
+            });
+
+            const leafHash = computeLeafHash({
+              channelId: receipt.channelId,
+              sequenceNumber: receipt.sequenceNumber,
+              callCost: 0n,
+              cumulativeCost: BigInt(receipt.cumulativeCost),
+              timestamp: receipt.timestamp,
+              url: endpoint,
+              requestHash:
+                "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+              responseHash:
+                "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+              providerSignature: receipt.providerSignature,
+            });
+            leafHashes.push(leafHash);
+
+            const merkleRoot = buildMerkleRoot(leafHashes);
+            logger.info(
+              `Merkle root: ${merkleRoot.slice(0, 20)}... (${leafHashes.length} leaves)`,
+            );
+            logger.info(
+              `Cumulative cost: ${formatUsdc(BigInt(receipt.cumulativeCost))}`,
+            );
+          }
+        }
+      } catch (err: any) {
+        logger.error(`Call ${callNum} error: ${err.message}`);
+      }
+
+      // ── Wait for next interval (if time remaining) ────────────────
+      const nextCallTime = startTime + CALL_INTERVAL_MS;
+      const waitTime = nextCallTime - Date.now();
+
+      if (waitTime > 0 && Date.now() + waitTime < streamDeadline) {
+        logger.info(
+          `Waiting ${(waitTime / 1000).toFixed(1)}s until next call...`,
+        );
+        await new Promise((r) => setTimeout(r, waitTime));
+      } else if (Date.now() >= streamDeadline) {
+        logger.info("\nStream window expired - no more calls will be made");
+        break;
       }
     }
 
-    // ── Show stream state ─────────────────────────────────────────────
-    logger.step("Inspect stream channel state");
+    // ── Show stream summary ───────────────────────────────────────────
+    logger.step("Stream flow summary");
 
-    const avgInterval =
-      streamState.calls.length > 1
-        ? (streamState.calls[streamState.calls.length - 1].timestamp -
-            streamState.calls[0].timestamp) /
-          (streamState.calls.length - 1)
-        : 0;
+    const actualDuration = (Date.now() - streamStartTime) / 1000;
 
-    logger.data("Stream Summary", {
-      totalCalls: streamState.callCount,
-      totalValue: formatUsdc(streamState.totalValue),
-      avgInterval: `${avgInterval.toFixed(1)}s`,
-      costPerCall: formatUsdc(pricePerCall),
-      timeWindowUsed: `${streamState.calls[streamState.calls.length - 1].timestamp - streamState.calls[0].timestamp}s`,
+    if (callCount === 0) {
+      logger.warn("No calls completed successfully");
+    } else {
+      logger.data("Summary", {
+        totalCalls: callCount,
+        streamDuration: `${actualDuration.toFixed(1)}s`,
+        avgCallInterval: `${(actualDuration / callCount).toFixed(1)}s`,
+        totalCost: lastReceipt
+          ? formatUsdc(BigInt(lastReceipt.cumulativeCost))
+          : "0",
+        avgCostPerCall: lastReceipt
+          ? formatUsdc(BigInt(lastReceipt.cumulativeCost) / BigInt(callCount))
+          : "0",
+        receiptsCollected: receipts.length,
+        finalSequence: lastReceipt?.sequenceNumber || 0,
+      });
+
+      const finalMerkleRoot = buildMerkleRoot(leafHashes);
+      logger.data("Final Merkle Root", {
+        root: finalMerkleRoot,
+        leafCount: leafHashes.length,
+      });
+    }
+
+    // ── Check channel state ───────────────────────────────────────────
+    logger.step("Check channel state on-chain");
+    const channelState = await client.getChannel(channelId);
+    const isExpired = Date.now() / 1000 > channelState.expiresAt;
+
+    logger.data("Channel State", {
+      status: ChannelStatus[channelState.status],
+      deposit: formatUsdc(channelState.deposit),
+      settledAmount: formatUsdc(channelState.settledAmount),
+      highestClaimedCost: formatUsdc(channelState.highestClaimedCost),
+      expired: isExpired ? "Yes (time window closed)" : "No (still active)",
+      expiresAt: new Date(channelState.expiresAt * 1000).toISOString(),
     });
 
-    // ── Time expiry handling ──────────────────────────────────────────
-    logger.step("Handle time expiry");
+    // ── Check balance after ───────────────────────────────────────────
+    logger.step("Check wallet balance after stream");
+    const balanceAfter = await client.getDepositedBalance();
+    logger.data("Balance After", {
+      formatted: formatUsdc(balanceAfter),
+      raw: balanceAfter.toString(),
+    });
 
-    logger.info("🕐 Stream channel behavior on time expiry:");
-    logger.info("  - Automatically prevents new calls after endTime");
-    logger.info("  - Unsettled calls remain in local state");
-    logger.info("  - Settlement can occur after expiry (grace period)");
-    logger.info("  - Force-close available if settlement fails");
+    const spent = balanceBefore - balanceAfter;
+    if (spent > 0n) {
+      logger.success(`Total spent: ${formatUsdc(spent)}`);
+    } else {
+      logger.info(
+        "No balance change yet (channel deposit locked, settlement pending)",
+      );
+    }
+
+    // ── Settlement instructions ───────────────────────────────────────
+    logger.step("Settlement process");
+
+    if (callCount > 0 && lastReceipt) {
+      logger.info("Stream channel settlement:");
+      logger.info("  1. Channel expired after time window");
+      logger.info(
+        `  2. Total cost accumulated: ${formatUsdc(BigInt(lastReceipt.cumulativeCost))}`,
+      );
+      logger.info("  3. Initiate settlement:");
+      logger.info(`     npx kite finalize --channel ${channelId}`);
+      logger.info("  4. Wait for challenge window (1 hour)");
+      logger.info("  5. Finalize to close channel and recover unused deposit");
+    } else {
+      logger.info(
+        "No calls completed - channel can be closed without settlement",
+      );
+    }
 
     // ── Compare stream vs batch ───────────────────────────────────────
     logger.step("Stream vs Batch channels");
 
-    logger.info("Stream channels:");
-    logger.success("  ✅ Time-bounded execution (perfect for scheduled tasks)");
-    logger.success("  ✅ Automatic interval pacing");
-    logger.success("  ✅ Predictable expiry behavior");
-    logger.info("  ⚠️  Requires time synchronization");
+    logger.data("Stream Channels", {
+      boundedBy: "Time duration",
+      useCases:
+        "Monitoring, scheduled tasks, periodic data collection, time-boxed workflows",
+      advantage: "Automatic expiry, predictable window, recurring execution",
+      termination: "Time-based (channel expires at maxDuration)",
+    });
 
-    logger.info("\nBatch channels:");
-    logger.success("  ✅ Count/value-bounded execution");
-    logger.success("  ✅ Flexible call timing");
-    logger.success("  ✅ Resume after interruption");
-    logger.info("  ⚠️  Manual settlement trigger required");
-
-    // ── Use cases ─────────────────────────────────────────────────────
-    logger.step("Ideal use cases for stream channels");
-
-    logger.info("📊 Monitoring & Observability:");
-    logger.info("  - Poll metrics every N seconds");
-    logger.info("  - Collect logs within maintenance window");
-    logger.info("  - Health checks on schedule");
-
-    logger.info("\n🔄 Recurring Data Collection:");
-    logger.info("  - Fetch market prices every interval");
-    logger.info("  - Sync state periodically");
-    logger.info("  - Schedule report generation");
-
-    logger.info("\n⏲️  Time-bounded Workflows:");
-    logger.info("  - Execute tasks during business hours");
-    logger.info("  - Rate-limited API consumption");
-    logger.info("  - Deadline-constrained processing");
-
-    // ── Cleanup ───────────────────────────────────────────────────────
-    logger.step("Cleanup resources");
-    await provider.stop();
-    logger.success("Provider stopped");
+    logger.data("Batch Channels", {
+      boundedBy: "Call count or deposit amount",
+      useCases:
+        "Bulk processing, multi-step workflows, variable-cost operations",
+      advantage: "Flexible timing, resume after interruption, cost-controlled",
+      termination: "Manual (consumer decides when to settle)",
+    });
 
     logger.complete(
-      "Stream channel flow demonstrated. Time-bounded execution with scheduled " +
-        "intervals enables predictable, automated API workflows with automatic " +
-        "expiry handling."
+      `Stream channel flow demonstrated. ${callCount} API calls executed within ${actualDuration.toFixed(1)}s time window. ` +
+        "Time-bounded execution enables scheduled workflows with automatic expiry handling. " +
+        "Ideal for monitoring, recurring tasks, and time-sensitive operations.",
     );
   } catch (err: any) {
     logger.error(`Demo failed: ${err.message}`);
@@ -228,8 +424,5 @@ export async function run() {
 
 // Allow running standalone
 if (import.meta.url === `file://${process.argv[1]}`) {
-  run().catch((err) => {
-    console.error("Fatal error:", err);
-    process.exit(1);
-  });
+  await run();
 }
