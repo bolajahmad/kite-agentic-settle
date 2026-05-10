@@ -81,6 +81,15 @@ const DEMOS: Demo[] = [
     file: "./07-observability.js",
     keywords: ["observability", "transparency", "indexer", "query", "usage"],
   },
+  {
+    number: 8,
+    name: "aa-onboard-session",
+    title: "AA Onboarding and Session Rule Flow",
+    description:
+      "EOA onboarding, session constraints, and sponsored AA user operation",
+    file: "./bkp.js",
+    keywords: ["aa", "onboard", "session", "sponsored", "gasless"],
+  },
 ];
 
 function printHelp() {
@@ -171,8 +180,8 @@ function findDemo(query: string): Demo | undefined {
   const normalized = query.toLowerCase().trim();
 
   // Try by number first
-  const number = parseInt(normalized, 10);
-  if (!isNaN(number)) {
+  const number = Number.parseInt(normalized, 10);
+  if (!Number.isNaN(number)) {
     return DEMOS.find((d) => d.number === number);
   }
 
@@ -212,7 +221,9 @@ async function main() {
   process.exit(success ? 0 : 1);
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error("Fatal error:", err);
   process.exit(1);
-});
+}

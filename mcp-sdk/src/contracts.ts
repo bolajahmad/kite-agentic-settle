@@ -36,7 +36,46 @@ export class ContractService {
   }
 
   getKiteAAWalletAddress(): string {
-    return this.config.contracts.kiteAAWallet;
+    const wallet = this.config.contracts.kiteAAWallet;
+    if (!wallet) {
+      throw new Error(
+        "kiteAAWallet is not configured. Pass walletContract dynamically or set config.contracts.kiteAAWallet.",
+      );
+    }
+    return wallet;
+  }
+
+  async resolveWalletContractForSession(
+    sessionKey: string,
+  ): Promise<`0x${string}` | null> {
+    const session = (await this.getSessionFromRegistry(sessionKey)) as readonly [
+      bigint,
+      `0x${string}`,
+      `0x${string}`,
+      bigint,
+      bigint,
+      bigint,
+      readonly bigint[],
+      boolean,
+    ];
+    const walletContract = session[2];
+    if (!walletContract || walletContract === "0x0000000000000000000000000000000000000000") {
+      return null;
+    }
+    return walletContract;
+  }
+
+  async getWalletUserBalance(
+    walletContract: `0x${string}`,
+    user: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<bigint> {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: kiteAAWalletAbi,
+      functionName: "getUserBalance",
+      args: [user, token],
+    })) as bigint;
   }
 
   // -- Helpers --
@@ -119,28 +158,28 @@ export class ContractService {
   }
 
   /** Register a session key on IdentityRegistry (via KiteAAWallet proxy). */
-  async registerSessionOnRegistry(
-    agentId: bigint,
-    sessionKey: string,
-    user: string,
-    walletContract: string,
-    valueLimit: bigint,
-    maxValueAllowed: bigint,
-    validUntil: bigint,
-    blockedAgents: bigint[] = [],
-  ): Promise<string> {
+  async registerSessionOnRegistry(params: {
+    agentId: bigint;
+    sessionKey: string;
+    user: string;
+    walletContract: string;
+    valueLimit: bigint;
+    maxValueAllowed: bigint;
+    validUntil: bigint;
+    blockedAgents?: bigint[];
+  }): Promise<string> {
     const data = encodeFunctionData({
       abi: identityRegistryAbi,
       functionName: "registerSession",
       args: [
-        agentId,
-        sessionKey as `0x${string}`,
-        user as `0x${string}`,
-        walletContract as `0x${string}`,
-        valueLimit,
-        maxValueAllowed,
-        validUntil,
-        blockedAgents,
+        params.agentId,
+        params.sessionKey as `0x${string}`,
+        params.user as `0x${string}`,
+        params.walletContract as `0x${string}`,
+        params.valueLimit,
+        params.maxValueAllowed,
+        params.validUntil,
+        params.blockedAgents ?? [],
       ],
     });
     const result = await this.sendTx(
@@ -222,17 +261,19 @@ export class ContractService {
   // -- KiteAAWallet --
 
   async registerUser(): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "register",
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
   async isUserRegistered(address: string): Promise<boolean> {
+    const walletContract = this.getKiteAAWalletAddress();
     return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      address: walletContract as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "isRegistered",
       args: [address as `0x${string}`],
@@ -251,11 +292,12 @@ export class ContractService {
   }
 
   async depositToWallet(token: string, amount: bigint): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     // First approve
     const approveData = encodeFunctionData({
       abi: erc20Abi,
       functionName: "approve",
-      args: [this.config.contracts.kiteAAWallet as `0x${string}`, amount],
+      args: [walletContract as `0x${string}`, amount],
     });
     await this.sendTx(token, approveData);
 
@@ -266,20 +308,21 @@ export class ContractService {
       args: [token as `0x${string}`, amount],
     });
     const result = await this.sendTx(
-      this.config.contracts.kiteAAWallet,
+      walletContract,
       depositData,
     );
     return result.hash;
   }
 
   async withdrawFromWallet(token: string, amount: bigint): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const withdrawData = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "withdraw",
       args: [token as `0x${string}`, amount],
     });
     const result = await this.sendTx(
-      this.config.contracts.kiteAAWallet,
+      walletContract,
       withdrawData,
     );
     return result.hash;
@@ -293,6 +336,7 @@ export class ContractService {
     validUntil: bigint,
     blockedAgents: bigint[] = [],
   ): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "addSessionKeyRule",
@@ -305,7 +349,7 @@ export class ContractService {
         blockedAgents,
       ],
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
@@ -314,28 +358,31 @@ export class ContractService {
     provider: string,
     blocked: boolean,
   ): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "setBlockedProvider",
       args: [provider as `0x${string}`, blocked],
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
   async revokeSessionKey(sessionKey: string): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "revokeSessionKey",
       args: [sessionKey as `0x${string}`],
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
   async isNonceUsed(sessionKey: string, nonce: bigint): Promise<boolean> {
+    const walletContract = this.getKiteAAWalletAddress();
     return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      address: walletContract as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "isNonceUsed",
       args: [sessionKey as `0x${string}`, nonce],
@@ -343,8 +390,9 @@ export class ContractService {
   }
 
   async getSessionSpent(sessionKey: string): Promise<bigint> {
+    const walletContract = this.getKiteAAWalletAddress();
     return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      address: walletContract as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "getSessionSpent",
       args: [sessionKey as `0x${string}`],
@@ -355,8 +403,9 @@ export class ContractService {
     token: `0x${string}`,
     address: `0x${string}`,
   ): Promise<bigint> {
+    const walletContract = this.getKiteAAWalletAddress();
     return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      address: walletContract as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "getUserBalance",
       args: [address, token],
@@ -385,19 +434,38 @@ export class ContractService {
     maxSpend: bigint,
     maxDuration: number,
     maxPerCall: bigint,
+    walletContractOverride?: string,
   ): Promise<{ txHash: string; channelId: `0x${string}` | undefined }> {
     const signerAddress = this.wdkAccount.getAddress() as string;
     const user = this.eoaAddress as `0x${string}`;
-    const walletContract = this.config.contracts.kiteAAWallet as `0x${string}`;
+    let walletContract = walletContractOverride as `0x${string}` | undefined;
+
+    if (!walletContract) {
+      const resolvedWallet = await this.resolveWalletContractForSession(
+        signerAddress,
+      );
+      if (resolvedWallet) {
+        walletContract = resolvedWallet;
+      }
+    }
+    if (!walletContract) {
+      walletContract = this.config.contracts.kiteAAWallet as `0x${string}` | undefined;
+    }
+    if (!walletContract) {
+      throw new Error(
+        "Unable to resolve walletContract for channel open. Pass channelConfig.walletContract or configure contracts.kiteAAWallet.",
+      );
+    }
 
     // ── Pre-flight diagnostics ──────────────────────────────────────
     // Balance check: for prepaid the deposit comes from the EOA's
     // KiteAAWallet balance — the agent/signer itself has no ERC20 tokens.
     let balance = 0n;
     if (mode === 0 && deposit > 0n) {
-      balance = await this.getDepositedTokenBalance(
-        token as `0x${string}`,
+      balance = await this.getWalletUserBalance(
+        walletContract,
         user,
+        token as `0x${string}`,
       );
     }
 

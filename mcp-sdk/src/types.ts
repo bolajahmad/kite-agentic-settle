@@ -4,7 +4,7 @@ export interface KiteConfig {
   contracts: {
     identityRegistry: string;
     attestationRegistry: string;
-    kiteAAWallet: string;
+    kiteAAWallet?: string;
     paymentChannel: string;
     walletFactory?: string;
   };
@@ -14,6 +14,8 @@ export interface KiteConfig {
 export interface ChannelConfig {
   provider: string;
   token?: string;
+  /** Optional wallet contract override; if omitted, SDK resolves from session. */
+  walletContract?: string;
   mode: "prepaid" | "postpaid";
   deposit: bigint;
   maxSpend: bigint;

@@ -41,6 +41,7 @@ export class ChannelManager {
       config.maxSpend,
       config.maxDuration,
       config.maxPerCall,
+      config.walletContract,
     );
 
     if (!result.channelId) {

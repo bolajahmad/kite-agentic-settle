@@ -1,11 +1,17 @@
 {
-  "servers": {
-    "wdk-docs": {
-      "url": "https://docs.wallet.tether.io/~gitbook/mcp"
-    },
-    "Goldsky": {
-      "type": "http",
-      "url": "https://docs.goldsky.com/mcp"
-    }
-  }
+	"servers": {
+		"wdk-docs": {
+			"url": "https://docs.wallet.tether.io/~gitbook/mcp",
+			"type": "http"
+		},
+		"Goldsky": {
+			"type": "http",
+			"url": "https://docs.goldsky.com/mcp"
+		},
+		"KITE": {
+			"url": "https://docs.gokite.ai/~gitbook/mcp",
+			"type": "http"
+		}
+	},
+	"inputs": []
 }

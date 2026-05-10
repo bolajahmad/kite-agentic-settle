@@ -840,7 +840,19 @@ export class KiteSettleClient {
   async openChannel(
     channelConfig: ChannelConfig,
   ): Promise<{ txHash: string; channelId: `0x${string}` }> {
-    return this.requirePaymentClient().openChannel(channelConfig);
+    const resolvedConfig = { ...channelConfig };
+
+    if (!resolvedConfig.walletContract && this.sessionKeyAddress) {
+      const walletContract = await this.requirePaymentClient()
+        .getContractService()
+        .resolveWalletContractForSession(this.sessionKeyAddress)
+        .catch(() => null);
+      if (walletContract) {
+        resolvedConfig.walletContract = walletContract;
+      }
+    }
+
+    return this.requirePaymentClient().openChannel(resolvedConfig);
   }
 
   /** Activate a payment channel (provider-side confirmation). */

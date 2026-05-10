@@ -94,6 +94,11 @@ npm run demo all
    - Complete audit trail for compliance
    - Debugging tools and workflows
 
+8. **AA Onboarding and Session Rule Flow** (`bkp.ts`)
+   - Simulates EOA onboarding and session/spending-rule checks on-chain
+   - Demonstrates sponsored AA user operation execution
+   - Verifies state transitions before and after the sponsored call
+
 Each demo is self-contained with clear step annotations and expected outputs.
 
 ## CLI Usage
