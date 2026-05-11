@@ -1,50 +1,68 @@
+"""
+AA Wallet: Derived from EOA via GokiteAASDK.
+Each user may have one or more AA wallets if they interact across different networks.
+Tracked via IdentityRegistry.AgentWalletSet events.
+"""
+type AAWallet @entity(immutable: false) {
+  id: ID! # aaWalletAddress-chainId or similar
+  address: Bytes!
+  owner: User!
+  agents: [Agent!]! @derivedFrom(field: "aaWallet")
+  sessions: [Session!]! @derivedFrom(field: "aaWallet")
+  createdAt: BigInt!
+}
+
 type Agent @entity(immutable: false) {
-  id: ID!
+  id: ID! # agentId as hex
   agentId: BigInt!
   metadata: String
-  wallet: Bytes
-
   owner: User!
-
+  aaWallet: AAWallet # The AA wallet contract where this agent's funds live
+  
   active: Boolean!
   sessions: [Session!]! @derivedFrom(field: "agent")
+  attestations: [Attestation!]! @derivedFrom(field: "agent")
 
+  reputationScore: BigInt # Aggregate reputation (calculated from attestations)
+  feedbackCount: BigInt! # Total feedback count
+  
   createdAt: BigInt!
   updatedAt: BigInt!
 }
 
 type Session @entity(immutable: false) {
-  id: ID!
+  id: ID! # sessionKey address as hex
   sessionKey: Bytes!
   user: User!
   agent: Agent!
+  aaWallet: AAWallet # The AA wallet contract this session uses for payments
 
-  # sessionIndex: BigInt!
   validUntil: BigInt!
-  valueLimit: BigInt!
-  maxLimit: BigInt!
-  metadataHash: Bytes
-  payments: [Payment!]! @derivedFrom(field: "session")
-
+  valueLimit: BigInt! # Per-transaction limit in USDT
+  maxLimit: BigInt! # Total session budget in USDT
+  
   status: String! # "ACTIVE", "REVOKED", "EXPIRED"
-  blockedAgents: [Bytes!] # address[]
+  blockedAgents: [BigInt!] # agentIds blocked from using this session
+  
+  payments: [Payment!]! @derivedFrom(field: "session")
+  channels: [Channel!]! @derivedFrom(field: "session")
+  
   createdAt: BigInt!
   updatedAt: BigInt!
 }
 
 type User @entity(immutable: false) {
-  id: ID!
-  address: Bytes!
-  wallet: Bytes!
-
+  id: ID! # EOA address as hex
+  address: Bytes! # EOA address
+  
+  aaWallets: [AAWallet!]! @derivedFrom(field: "owner")
   agents: [Agent!]! @derivedFrom(field: "owner")
   sessions: [Session!]! @derivedFrom(field: "user")
-
-  blockedProviders: [Bytes!] # address[]
-  totalDeposited: BigInt!
-  totalWithdrawn: BigInt!
-  lockedInChannels: BigInt!
-
+  
+  totalChannelsOpened: BigInt! # Total number of payment channels
+  totalSpent: BigInt! # Total spent across all channels
+  totalRefunded: BigInt! # Total refunded
+  
   createdAt: BigInt!
   updatedAt: BigInt!
 }
@@ -54,50 +72,50 @@ type Payment @entity(immutable: false) {
   session: Session!
   agent: Agent!
   user: User!
-  channel: Channel
-
-  recipient: Bytes!
+  channel: Channel # May be null for per-call payments
+  
+  recipient: Bytes! # Provider receiving the payment
   token: Bytes!
   amount: BigInt!
   nonce: BigInt
-  change: BigInt
-
+  change: BigInt # Refund amount if any
+  
   timestamp: BigInt!
   txHash: Bytes!
-  type: String! # "PerCall" | "BatchCall" | "BatchTime"
+  type: String! # "PerCall" | "Channel"
 }
 
 type Channel @entity(immutable: false) {
-  id: ID!
+  id: ID! # channelId as hex
   channelId: Bytes!
-
+  
   user: User!
-  provider: Bytes!
+  provider: Bytes! # Service provider address
   agent: Agent!
   session: Session!
-  walletContract: Bytes!
-
+  aaWallet: AAWallet! # The AA wallet contract where funds are locked
+  
   mode: String! # "PREPAID" | "POSTPAID"
   token: Bytes!
   deposit: BigInt!
   maxSpend: BigInt!
   maxPerCall: BigInt!
-
-  status: String! # "OPEN", "ACTIVE", "CLOSED", "SETTLEMENT_PENDING"
+  
+  status: String! # "OPEN", "ACTIVE", "SETTLEMENT_PENDING", "CLOSED"
   openedAt: BigInt!
   expiresAt: BigInt!
   closedAt: BigInt
-
-  settlementInitiator: Bytes
+  
   settlementDeadline: BigInt
   highestClaimedCost: BigInt
   highestSequenceNumber: BigInt
   settledAmount: BigInt!
   refundAmount: BigInt!
-
+  
   usageMerkleRoot: Bytes
   receipts: [Receipt!]! @derivedFrom(field: "channel")
-
+  payments: [Payment!]! @derivedFrom(field: "channel")
+  
   createdAt: BigInt!
   updatedAt: BigInt!
 }
@@ -105,14 +123,11 @@ type Channel @entity(immutable: false) {
 type Receipt @entity(immutable: false) {
   id: ID!
   channel: Channel!
-
+  
   sequenceNumber: BigInt!
   cumulativeCost: BigInt!
   timestamp: BigInt!
-
-  endpoint: String
-  method: String
-
+  
   submitter: Bytes!
   txHash: Bytes!
   createdAt: BigInt!
@@ -121,11 +136,72 @@ type Receipt @entity(immutable: false) {
 type ChannelSettlement @entity(immutable: false) {
   id: ID! # channelId
   channel: Channel!
-
+  
   payment: BigInt!
   refund: BigInt!
-
+  usageMerkleRoot: Bytes!
+  
   txHash: Bytes!
-
   finalizedAt: BigInt!
+}
+
+"""
+Attestation: Reputation feedback given by one user/entity about an agent.
+Tracked via AttestationRegistry.FeedbackGiven events.
+"""
+type Attestation @entity(immutable: false) {
+  id: ID! # agentId-giver-feedbackIndex
+  agent: Agent!
+  giver: Bytes! # Address that gave the feedback
+  
+  feedbackIndex: BigInt!
+  value: BigInt! # Reputation value (scaled by valueDecimals)
+  valueDecimals: Int! # Decimal scale (e.g., 2 = percentage)
+  tag1: String # Reputation category/tag
+  tag2: String # Additional tag
+  
+  status: String! # "ACTIVE", "REVOKED"
+  responseHash: Bytes # Hash of agent's response if any
+  
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+"""
+Validation: Third-party validation request/response for agent reputation.
+Tracked via AttestationRegistry.ValidationRequested/ValidationResponded events.
+"""
+type Validation @entity(immutable: false) {
+  id: ID! # requestKey as hex
+  requestKey: Bytes!
+  
+  agent: Agent!
+  validator: Bytes! # Validator address
+  requestHash: Bytes!
+  
+  response: Int # 0=No, 1=Yes, 2=Abstain
+  responseTag: String # Validator's tag/comment
+  
+  status: String! # "PENDING", "RESPONDED"
+  
+  requestedAt: BigInt!
+  respondedAt: BigInt
+  txHash: Bytes!
+}
+
+"""
+MerkleRoot: Anchored proofs for agent performance/usage.
+Tracked via AttestationRegistry.MerkleRootAnchored events.
+"""
+type MerkleRoot @entity(immutable: false) {
+  id: ID! # agentId-merkleRoot
+  agent: Agent!
+  merkleRoot: Bytes!
+  
+  logCount: BigInt! # Number of logs in the merkle tree
+  ipfsURI: String # Link to off-chain data
+  validator: Bytes! # Address that anchored this root
+  
+  anchoredAt: BigInt!
+  txHash: Bytes!
 }

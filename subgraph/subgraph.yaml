@@ -16,12 +16,10 @@ dataSources:
       apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
-        - Registered
-        - URIUpdated
-        - AgentWalletSet
-        - AgentWakketCleared
-        - SessionRegistered
-        - SessionRevoked
+        - Agent
+        - Session
+        - User
+        - AAWallet
       abis:
         - name: IdentityRegistry
           file: ./abis/IdentityRegistryABI.json
@@ -32,7 +30,7 @@ dataSources:
           handler: handleURIUpdated
         - event: AgentWalletSet(indexed uint256,indexed address,indexed address)
           handler: handleAgentWalletSet
-        - event: SessionRegistered(indexed uint256,indexed address,indexed address,address,uint256,uint256,uint256)
+        - event: SessionRegistered(indexed uint256,indexed address,indexed address,address,uint256)
           handler: handleSessionRegistered
         - event: SessionRevoked(indexed uint256,indexed address)
           handler: handleSessionRevoked
@@ -50,11 +48,11 @@ dataSources:
       apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
-        - ChannelOpened
-        - ChannelActivated
-        - SettlementInitiated
-        - ReceiptSubmitted
-        - ChannelFinalized
+        - Channel
+        - Receipt
+        - Payment
+        - User
+        - AAWallet
       abis:
         - name: PaymentChannel
           file: ./abis/PaymentChannelABI.json
@@ -65,6 +63,43 @@ dataSources:
           handler: handleChannelActivated
         - event: SettlementInitiated(indexed bytes32,indexed address,uint256,uint256)
           handler: handleSettlementInitiated
+        - event: ReceiptSubmitted(indexed bytes32,indexed address,uint256,uint256)
+          handler: handleReceiptSubmitted
         - event: ChannelFinalized(indexed bytes32,uint256,uint256,bytes32)
           handler: handleChannelFinalized
       file: ./src/payment-channel.ts
+
+  - kind: ethereum
+    name: AttestationRegistry
+    network: kite-ai-testnet
+    source:
+      address: "0x95b4e0e5A4F7d10F77f5FB4C1E9Ea3a5e0e5C5C1" # Updated with actual address when deployed
+      abi: AttestationRegistry
+      startBlock: 21096127
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Attestation
+        - Validation
+        - MerkleRoot
+        - Agent
+      abis:
+        - name: AttestationRegistry
+          file: ./abis/AttestationRegistry.json
+      eventHandlers:
+        - event: FeedbackGiven(indexed uint256,indexed address,indexed uint64,int128,uint8,string,string)
+          handler: handleFeedbackGiven
+        - event: FeedbackRevoked(indexed uint256,indexed address,indexed uint64)
+          handler: handleFeedbackRevoked
+        - event: ResponseAppended(indexed uint256,indexed address,indexed uint64)
+          handler: handleResponseAppended
+        - event: ValidationRequested(indexed bytes32,indexed uint256,indexed address,bytes32)
+          handler: handleValidationRequested
+        - event: ValidationResponded(indexed bytes32,indexed address,uint8,string)
+          handler: handleValidationResponded
+        - event: MerkleRootAnchored(indexed uint256,indexed bytes32,uint256,string,address)
+          handler: handleMerkleRootAnchored
+      file: ./src/attestation-registry.ts
+

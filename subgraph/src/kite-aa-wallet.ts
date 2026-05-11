@@ -114,34 +114,6 @@ export function handleChannelsFundsRefunded(
   user.save();
 }
 
-// export function handleBlockedProvidersUpdated(event: BlockedProvidersUpdatedEvent): void {
-//   let id = event.params.sessionKey.toHex();
-//   let session = Session.load(id);
-
-//   if (session) {
-//     let providers = session.blockedProviders;
-//     if (!providers) {
-//       providers = [];
-//     }
-//     let provider = event.params.provider as Bytes;
-//     let exists = false;
-
-//     for (let i = 0; i < providers.length; i++) {
-//       if (providers[i].equals(provider)) {
-//         exists = true;
-//         break;
-//       }
-//     }
-
-//     if (!exists) {
-//       providers.push(provider);
-//     }
-//     session.blockedProviders = providers;
-//     session.updatedAt = event.block.timestamp;
-//     session.save();
-//   }
-// }
-
 export function handleUserRegistered(event: UserRegisteredEvent): void {
   let id = event.params.user.toHex();
   let user = User.load(id);
