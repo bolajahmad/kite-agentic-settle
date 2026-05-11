@@ -7,6 +7,7 @@ import {
   type PublicClient,
 } from "viem";
 import {
+  clientAgentVaultAbi,
   erc20Abi,
   identityRegistryAbi,
   kiteAAWalletAbi,
@@ -53,8 +54,6 @@ export class ContractService {
       `0x${string}`,
       `0x${string}`,
       bigint,
-      bigint,
-      bigint,
       readonly bigint[],
       boolean,
     ];
@@ -67,14 +66,14 @@ export class ContractService {
 
   async getWalletUserBalance(
     walletContract: `0x${string}`,
-    user: `0x${string}`,
+    _walletOwner: `0x${string}`,
     token: `0x${string}`,
   ): Promise<bigint> {
     return (await this.client.readContract({
-      address: walletContract,
-      abi: kiteAAWalletAbi,
-      functionName: "getUserBalance",
-      args: [user, token],
+      address: token,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [walletContract],
     })) as bigint;
   }
 
@@ -157,14 +156,12 @@ export class ContractService {
     return { txHash: result.hash, agentId };
   }
 
-  /** Register a session key on IdentityRegistry (via KiteAAWallet proxy). */
+  /** Register a session key on IdentityRegistry. */
   async registerSessionOnRegistry(params: {
     agentId: bigint;
     sessionKey: string;
     user: string;
     walletContract: string;
-    valueLimit: bigint;
-    maxValueAllowed: bigint;
     validUntil: bigint;
     blockedAgents?: bigint[];
   }): Promise<string> {
@@ -176,8 +173,6 @@ export class ContractService {
         params.sessionKey as `0x${string}`,
         params.user as `0x${string}`,
         params.walletContract as `0x${string}`,
-        params.valueLimit,
-        params.maxValueAllowed,
         params.validUntil,
         params.blockedAgents ?? [],
       ],
@@ -403,13 +398,7 @@ export class ContractService {
     token: `0x${string}`,
     address: `0x${string}`,
   ): Promise<bigint> {
-    const walletContract = this.getKiteAAWalletAddress();
-    return await this.client.readContract({
-      address: walletContract as `0x${string}`,
-      abi: kiteAAWalletAbi,
-      functionName: "getUserBalance",
-      args: [address, token],
-    });
+    return await this.getTokenBalance(token, address);
   }
 
   async getTokenBalance(
@@ -458,8 +447,8 @@ export class ContractService {
     }
 
     // ── Pre-flight diagnostics ──────────────────────────────────────
-    // Balance check: for prepaid the deposit comes from the EOA's
-    // KiteAAWallet balance — the agent/signer itself has no ERC20 tokens.
+    // Balance check: for prepaid the deposit comes from the AA wallet's
+    // ERC-20 balance, which PaymentChannel pulls via transferFrom.
     let balance = 0n;
     if (mode === 0 && deposit > 0n) {
       balance = await this.getWalletUserBalance(
@@ -472,13 +461,12 @@ export class ContractService {
     if (mode === 0) {
       if (balance < deposit) {
         throw new Error(
-          `Insufficient KiteAAWallet balance: have ${formatUnits(balance, 18)}, need ${formatUnits(deposit, 18)}`,
+          `Insufficient AA wallet balance: have ${formatUnits(balance, 18)}, need ${formatUnits(deposit, 18)}`,
         );
       }
     }
 
-    // No ERC20 approve needed — KiteAAWallet.withdrawForChannel transfers
-    // directly from the wallet contract to PaymentChannel.
+    // The AA wallet must have approved PaymentChannel before openChannel.
 
     // ── Simulate the call to surface the revert reason ──────────────
     try {
@@ -736,6 +724,66 @@ export class ContractService {
       functionName: "getWallet",
       args: [owner as `0x${string}`],
     })) as string;
+  }
+
+  // -- ClientAgentVault sessions --
+
+  async createVaultSession(params: {
+    walletContract: string;
+    sessionId: `0x${string}`;
+    sessionKey: string;
+    rules?: Array<{
+      timeWindow: bigint;
+      budget: bigint;
+      initialWindowStartTime: bigint;
+      targetProviders: `0x${string}`[];
+    }>;
+  }): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "createSession",
+      args: [
+        params.sessionId,
+        params.sessionKey as `0x${string}`,
+        (params.rules ?? []).map((rule) => ({
+          timeWindow: rule.timeWindow,
+          budget: rule.budget,
+          initialWindowStartTime: rule.initialWindowStartTime,
+          targetProviders: rule.targetProviders,
+        })),
+      ],
+    });
+
+    const result = await this.sendTx(params.walletContract, data);
+    return result.hash;
+  }
+
+  async addVaultSpendingRules(params: {
+    walletContract: string;
+    sessionId: `0x${string}`;
+    rules: Array<{
+      timeWindow: bigint;
+      budget: bigint;
+      initialWindowStartTime: bigint;
+      targetProviders: `0x${string}`[];
+    }>;
+  }): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "addSpendingRules",
+      args: [
+        params.sessionId,
+        params.rules.map((rule) => ({
+          timeWindow: rule.timeWindow,
+          budget: rule.budget,
+          initialWindowStartTime: rule.initialWindowStartTime,
+          targetProviders: rule.targetProviders,
+        })),
+      ],
+    });
+
+    const result = await this.sendTx(params.walletContract, data);
+    return result.hash;
   }
 
   // -- KiteAAWallet executePayment --

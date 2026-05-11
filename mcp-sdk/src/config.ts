@@ -5,11 +5,12 @@ import type { KiteConfig } from "./types.js";
 export const KITE_TESTNET: KiteConfig = {
   rpcUrl: "https://rpc-testnet.gokite.ai",
   chainId: 2368,
+  networkName: "kite_testnet",
+  bundlerUrl: "https://bundler-service.staging.gokite.ai/rpc/",
   contracts: {
-    attestationRegistry: "0x251f2150b9c32fbc60ca43fd80Dd9478C4E04b6A",
-    identityRegistry: "0xb86a1e88dD55CE110968F184B946461219542e63",
-    kiteAAWallet: "0x4328AF0B2435bf02224CDe80d2037349c3769667",
-    paymentChannel: "0x759d29f72De7144f1Fa8f2e38E2D388bD393B04c",
+    attestationRegistry: "0x5a9BE0D79F5ed3906f6Dcc0E5679D318AC85e61f",
+    identityRegistry: "0x986A171fd6CE1Dc89d104E2b2a424Df9d4ef7524",
+    paymentChannel: "0xa00dDA4C326e045aF948cc1dD45A464c09db3Af8",
   },
   token: "0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489",
 };

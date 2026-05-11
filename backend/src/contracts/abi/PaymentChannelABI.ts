@@ -1,5 +1,16 @@
 export const PaymentChannelABI = [
   {
+    inputs: [
+      {
+        internalType: "address",
+        name: "_identityRegistry",
+        type: "address",
+      },
+    ],
+    stateMutability: "nonpayable",
+    type: "constructor",
+  },
+  {
     inputs: [],
     name: "ECDSAInvalidSignature",
     type: "error",
@@ -707,6 +718,19 @@ export const PaymentChannelABI = [
         internalType: "bool",
         name: "challengeOpen",
         type: "bool",
+      },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "identityRegistry",
+    outputs: [
+      {
+        internalType: "address",
+        name: "",
+        type: "address",
       },
     ],
     stateMutability: "view",

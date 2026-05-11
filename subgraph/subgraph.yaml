@@ -8,7 +8,7 @@ dataSources:
     name: IdentityRegistry
     network: kite-ai-testnet
     source:
-      address: "0xb86a1e88dD55CE110968F184B946461219542e63"
+      address: "0x986A171fd6CE1Dc89d104E2b2a424Df9d4ef7524"
       abi: IdentityRegistry
       startBlock: 21096127
     mapping:
@@ -39,49 +39,10 @@ dataSources:
       file: ./src/identity-registry.ts
 
   - kind: ethereum
-    name: KiteAAWallet
-    network: kite-ai-testnet
-    source:
-      address: "0x4328AF0B2435bf02224CDe80d2037349c3769667"
-      abi: KiteAAWallet
-      startBlock: 21096127
-    mapping:
-      kind: ethereum/events
-      apiVersion: 0.0.9
-      language: wasm/assemblyscript
-      entities:
-        - UserRegistered
-        - FundsDeposited
-        - FundsWithdrawn
-        - ChannelFundsWithdrawn
-        - ChannelFundsRefunded
-        - PaymentExecuted
-        # - BlockedProvidersUpdated
-      abis:
-        - name: KiteAAWallet
-          file: ./abis/KiteAAWalletABI.json
-      eventHandlers:
-        - event: FundsDeposited(indexed address,indexed address,uint256)
-          handler: handleFundsDeposited
-        - event: FundsWithdrawn(indexed address,indexed address,uint256)
-          handler: handleFundsWithdrawn
-        - event: ChannelFundsWithdrawn(indexed address,indexed address,uint256)
-          handler: handleChannelsFundsWithdrawn
-        - event: ChannelFundsRefunded(indexed address,indexed address,uint256)
-          handler: handleChannelsFundsRefunded
-        - event: PaymentExecuted(indexed address,indexed uint256,indexed address,address,uint256,uint256)
-          handler: handlePaymentExecuted
-        # - event: BlockedProvidersUpdated(indexed address)
-        #   handler: handleBlockedProvidersUpdated
-        - event: UserRegistered(indexed address)
-          handler: handleUserRegistered
-      file: ./src/kite-aa-wallet.ts
-
-  - kind: ethereum
     name: PaymentChannel
     network: kite-ai-testnet
     source:
-      address: "0x759d29f72De7144f1Fa8f2e38E2D388bD393B04c"
+      address: "0xa00dDA4C326e045aF948cc1dD45A464c09db3Af8"
       abi: PaymentChannel
       startBlock: 21096127
     mapping:

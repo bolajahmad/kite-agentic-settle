@@ -6,36 +6,9 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import "./interfaces/IClientAgentVault.sol";
 
 // ─── Interfaces ────────────────────────────────────────────────────────────
-
-interface IKiteAAWallet {
-    function withdrawForChannel(
-        address user,
-        address token,
-        uint256 amount
-    ) external;
-
-    function refundFromChannel(
-        address user,
-        address token,
-        uint256 amount
-    ) external;
-
-    function getUserBalance(
-        address user,
-        address token
-    ) external view returns (uint256);
-
-    function identityRegistry() external view returns (address);
-
-    function isRegistered(address user) external view returns (bool);
-
-    function isProviderBlocked(
-        address user,
-        address provider
-    ) external view returns (bool);
-}
 
 interface IIdentityRegistry {
     function validateSession(
@@ -48,8 +21,6 @@ interface IIdentityRegistry {
             uint256 agentId,
             address user,
             address walletContract,
-            uint256 valueLimit,
-            uint256 maxValueAllowed,
             uint256 validUntil
         );
 
@@ -98,7 +69,7 @@ contract PaymentChannel is ReentrancyGuard {
         bytes32 channelId;
         address consumer; // session key that opened the channel
         address user; // EOA (derived from session at open)
-        address walletContract; // KiteAAWallet holding the user's funds
+        address walletContract; // AA wallet contract holding the user's funds
         address provider;
         address token;
         PaymentMode mode;
@@ -124,8 +95,15 @@ contract PaymentChannel is ReentrancyGuard {
     // walletContract => token => locked amount
     mapping(address => mapping(address => uint256)) public lockedFunds;
 
+    address public immutable identityRegistry;
+
     uint256 public constant CHALLENGE_WINDOW = 1 hours;
     uint256 public constant CLOSE_GRACE_PERIOD = 5 minutes;
+
+    constructor(address _identityRegistry) {
+        require(_identityRegistry != address(0), "Invalid registry");
+        identityRegistry = _identityRegistry;
+    }
 
     // ─── Events ────────────────────────────────────────────────────────
 
@@ -217,8 +195,8 @@ contract PaymentChannel is ReentrancyGuard {
      * @param deposit        Amount to lock (> 0 for prepaid, 0 for postpaid)
      * @param maxSpend       Hard cap on total payment
      * @param maxDuration    Channel duration in seconds
-     * @param maxPerCall     Ceiling on cost for any single API call
-     * @param walletContract The KiteAAWallet where msg.sender is a registered session key
+      * @param maxPerCall     Ceiling on cost for any single API call
+      * @param walletContract The AA wallet where msg.sender is a registered session key
      */
     function openChannel(
         address provider,
@@ -240,20 +218,14 @@ contract PaymentChannel is ReentrancyGuard {
         require(walletContract != address(0), "Wallet contract required");
 
         // ── Session validation via IdentityRegistry ────────────────────
-        IKiteAAWallet wallet = IKiteAAWallet(walletContract);
-        address registry = wallet.identityRegistry();
-        require(registry != address(0), "Wallet has no IdentityRegistry");
-
-        IIdentityRegistry identityRegistry = IIdentityRegistry(registry);
+        IIdentityRegistry registry = IIdentityRegistry(identityRegistry);
         (
-            bool active, // agentId
-            ,
+            bool active,
+            uint256 agentId,
             address user,
             address sessionWallet,
-            uint256 valueLimit,
-            uint256 maxValueAllowed,
             uint256 validUntil
-        ) = identityRegistry.validateSession(msg.sender);
+        ) = registry.validateSession(msg.sender);
 
         require(active, "Session key is not active");
         require(block.timestamp <= validUntil, "Session key expired");
@@ -261,21 +233,21 @@ contract PaymentChannel is ReentrancyGuard {
             sessionWallet == walletContract,
             "Session not registered to this wallet"
         );
-        require(
-            maxPerCall <= valueLimit,
-            "maxPerCall exceeds session valueLimit"
+        bytes32 sessionId = keccak256(
+            abi.encodePacked(msg.sender, agentId, validUntil)
         );
+        bytes32 hashedProvider = keccak256(abi.encodePacked(provider));
         require(
-            maxSpend <= maxValueAllowed,
-            "maxSpend exceeds session maxValueAllowed"
+            IClientAgentVault(walletContract).checkSpendingRules(
+                sessionId,
+                maxSpend,
+                hashedProvider
+            ),
+            "Exceeds vault spending rules"
         );
         require(
             block.timestamp + maxDuration <= validUntil,
             "Channel duration exceeds session validity"
-        );
-        require(
-            !wallet.isProviderBlocked(user, provider),
-            "Provider is blocked by this user"
         );
         // ─────────────────────────────────────────────────────────────────
 
@@ -283,11 +255,7 @@ contract PaymentChannel is ReentrancyGuard {
             require(deposit > 0, "Prepaid requires deposit");
             require(maxSpend > 0, "Max spend must be > 0");
             require(deposit <= maxSpend, "Deposit exceeds maxSpend");
-            require(
-                deposit <= wallet.getUserBalance(user, token),
-                "Insufficient wallet balance for deposit"
-            );
-            wallet.withdrawForChannel(user, token, deposit);
+            IERC20(token).safeTransferFrom(walletContract, address(this), deposit);
             lockedFunds[walletContract][token] += deposit;
             emit FundsLocked(walletContract, token, deposit);
         } else {
@@ -577,16 +545,8 @@ contract PaymentChannel is ReentrancyGuard {
                 IERC20(ch.token).safeTransfer(ch.provider, payment);
             }
 
-            if (refund > 0 && ch.walletContract != address(0)) {
-                // Approve wallet to pull refund back from PaymentChannel
-                IERC20(ch.token).approve(ch.walletContract, refund);
-                IKiteAAWallet(ch.walletContract).refundFromChannel(
-                    ch.user,
-                    ch.token,
-                    refund
-                );
-            } else if (refund > 0) {
-                IERC20(ch.token).safeTransfer(ch.consumer, refund);
+            if (refund > 0) {
+                IERC20(ch.token).safeTransfer(ch.walletContract, refund);
             }
 
             lockedFunds[ch.walletContract][ch.token] -= ch.deposit;
@@ -602,7 +562,7 @@ contract PaymentChannel is ReentrancyGuard {
         } else {
             if (amount > 0) {
                 IERC20(ch.token).safeTransferFrom(
-                    ch.consumer,
+                    ch.walletContract,
                     ch.provider,
                     amount
                 );

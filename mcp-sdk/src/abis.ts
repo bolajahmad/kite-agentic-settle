@@ -9,11 +9,11 @@ export const identityRegistryAbi = parseAbi([
   "function register(string agentURI) external returns (uint256 agentId)",
   "function register() external returns (uint256 agentId)",
   "function setAgentURI(uint256 agentId, string newURI) external",
-  "function registerSession(uint256 agentId, address sessionKey, address user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil, uint256[] blockedAgents) external",
+  "function registerSession(uint256 agentId, address sessionKey, address user, address walletContract, uint256 validUntil, uint256[] blockedAgents) external",
   "function revokeSession(address sessionKey) external",
   // Read (sessions)
-  "function validateSession(address sessionKey) external view returns (bool active, uint256 agentId, address user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil)",
-  "function getSession(address sessionKey) external view returns (uint256 agentId, address user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil, uint256[] blockedAgents, bool active)",
+  "function validateSession(address sessionKey) external view returns (bool active, uint256 agentId, address user, address walletContract, uint256 validUntil)",
+  "function getSession(address sessionKey) external view returns (uint256 agentId, address user, address walletContract, uint256 validUntil, uint256[] blockedAgents, bool active)",
   "function getAgentSessions(uint256 agentId) external view returns (address[])",
   "function isAgentBlocked(address sessionKey, uint256 agentId) external view returns (bool)",
   // Read (agents / ERC-721)
@@ -23,12 +23,12 @@ export const identityRegistryAbi = parseAbi([
   "function agentURI(uint256 agentId) external view returns (string)",
   // Events
   "event Registered(uint256 indexed agentId, string agentURI, address indexed owner)",
-  "event SessionRegistered(uint256 indexed agentId, address indexed sessionKey, address indexed user, address walletContract, uint256 valueLimit, uint256 maxValueAllowed, uint256 validUntil)",
+  "event SessionRegistered(uint256 indexed agentId, address indexed sessionKey, address indexed user, address walletContract, uint256 validUntil)",
   "event SessionRevoked(uint256 indexed agentId, address indexed sessionKey)",
 ]);
 
-// ── KiteAAWallet ABI ──────────────────────────────────────────────
-// Source of truth: frontend/utils/contracts/abi/KiteAAWalletABI.ts
+// ── Legacy KiteAAWallet ABI (deprecated) ──────────────────────────
+// Kept for backward compatibility while migrating fully to AA wallet flows.
 
 export const kiteAAWalletAbi = parseAbi([
   // Write
@@ -63,6 +63,99 @@ export const kiteAAWalletAbi = parseAbi([
   "event PaymentChannelUpdated(address indexed channel)",
   "event ChannelFundsWithdrawn(address indexed user, address indexed token, uint256 amount)",
   "event ChannelFundsRefunded(address indexed user, address indexed token, uint256 amount)",
+]);
+
+// ── ClientAgentVault ABI (GokiteAccount) ─────────────────────────
+// UUPS upgradeable ERC-4337 account with session-based spending rules.
+//
+// sessionId   = keccak256(abi.encodePacked(sessionKey, agentId, validUntil))
+// provider    = keccak256(abi.encodePacked(providerAddress))  (bytes32 in all spending rule fields)
+
+export const clientAgentVaultAbi = parseAbi([
+  // ── Session management ─────────────────────────────────────────────────────
+  "function createSession(bytes32 sessionId, address agent, (uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders)[] rules) external",
+  "function addSpendingRules(bytes32 sessionId, (uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders)[] rules) external",
+  "function removeSpendingRules(bytes32 sessionId, uint256[] indices) external",
+  "function setSpendingRules(bytes32 sessionId, (uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders)[] rules) external",
+  "function configureSpendingRule(bytes32 sessionId, uint256[] indicesToRemove, (uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders)[] rulesToAdd) external",
+  "function setSessionAgent(bytes32 sessionId, address agent) external",
+  "function removeSession(bytes32 sessionId) external",
+
+  // ── Session queries ────────────────────────────────────────────────────────
+  "function sessionExists(bytes32 sessionId) external view returns (bool)",
+  "function getSessionAgent(bytes32 sessionId) external view returns (address)",
+  "function getSpendingRules(bytes32 sessionId) external view returns ((uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders, uint128 amountUsed, uint128 currentTimeWindowStartTime)[])",
+  "function checkSpendingRules(bytes32 sessionId, uint256 normalizedAmount, bytes32 serviceProvider) external view returns (bool)",
+  "function getUsage(bytes32 sessionId, uint256 index) external view returns (uint256)",
+
+  // ── Master budget rules ────────────────────────────────────────────────────
+  "function addMasterBudgetRule(uint256 timeWindow, uint160 budget) external",
+  "function removeMasterBudgetRule(uint256 index) external",
+  "function clearMasterBudgetRules() external",
+  "function setMasterBudgetRules(uint256[] timeWindows, uint160[] budgets) external",
+  "function getMasterBudgetRules() external view returns ((uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders, uint128 amountUsed, uint128 currentTimeWindowStartTime)[])",
+  "function getMasterBudgetRuleCount() external view returns (uint256)",
+
+  // ── Token management ───────────────────────────────────────────────────────
+  "function addSupportedToken(address token) external",
+  "function removeSupportedToken(address token) external",
+  "function isTokenSupported(address token) external view returns (bool)",
+  "function getTokenDecimals(address token) external view returns (uint8)",
+  "function getAvailableBalance(address token) external view returns (uint256)",
+
+  // ── Transfers (via UserOperation) ─────────────────────────────────────────
+  "function executeTransferWithAuthorization(bytes32 sessionId, (address from, address to, address token, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce) auth, bytes signature, bytes metadata) external",
+  "function executeTransferWithAuthorizationAndProvider(bytes32 sessionId, (address from, address to, address token, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce) auth, bytes signature, bytes32 serviceProvider, bytes metadata) external",
+
+  // ── ERC-4337 execution ─────────────────────────────────────────────────────
+  "function execute(address dest, uint256 value, bytes func) external",
+  "function executeBatch((address target, uint256 value, bytes data)[] calls) external",
+  "function executeBatch(address[] dest, uint256[] value, bytes[] func) external",
+  "function validateUserOp((address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature) userOp, bytes32 userOpHash, uint256 missingAccountFunds) external returns (uint256 validationData)",
+
+  // ── ERC-4337 deposit ──────────────────────────────────────────────────────
+  "function addDeposit() external payable",
+  "function withdrawDepositTo(address withdrawAddress, uint256 amount) external",
+  "function getDeposit() external view returns (uint256)",
+  "function getNonce() external view returns (uint256)",
+  "function isNonceUsed(bytes32 nonce) external view returns (bool)",
+
+  // ── UUPS / ownership ──────────────────────────────────────────────────────
+  "function initialize(address anOwner) external",
+  "function upgradeToAndCall(address newImplementation, bytes data) external payable",
+  "function transferOwnership(address newOwner) external",
+  "function owner() external view returns (address)",
+  "function entryPoint() external view returns (address)",
+  "function proxiableUUID() external view returns (bytes32)",
+
+  // ── Constants ─────────────────────────────────────────────────────────────
+  "function DOMAIN_NAME() external view returns (string)",
+  "function DOMAIN_VERSION() external view returns (string)",
+  "function DOMAIN_SEPARATOR() external view returns (bytes32)",
+  "function DOMAIN_TYPEHASH() external view returns (bytes32)",
+  "function TRANSFER_WITH_AUTHORIZATION_TYPEHASH() external view returns (bytes32)",
+  "function STANDARD_DECIMALS() external view returns (uint256)",
+  "function UPGRADE_INTERFACE_VERSION() external view returns (string)",
+
+  // ── Events ────────────────────────────────────────────────────────────────
+  "event GokiteAccountInitialized(address indexed entryPoint, address indexed owner)",
+  "event SessionCreated(bytes32 indexed sessionId, address agent)",
+  "event SessionRemoved(bytes32 indexed sessionId)",
+  "event SessionAgentUpdated(bytes32 indexed sessionId, address agent)",
+  "event SpendingRuleAdded(bytes32 indexed sessionId, uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders)",
+  "event SpendingRuleRemoved(bytes32 indexed sessionId, uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders)",
+  "event SpendingRulesCleared(bytes32 indexed sessionId)",
+  "event TransferExecuted(bytes32 indexed sessionId, address indexed token, address indexed to, uint256 amount, bytes32 nonce, bytes metadata)",
+  "event UsageUpdated(bytes32 indexed sessionId, uint256 amountUsed, uint256 currentTimeWindowStartTime, uint256 chargedAmount)",
+  "event MasterBudgetRuleAdded(uint256 timeWindow, uint160 budget)",
+  "event MasterBudgetRuleRemoved(uint256 timeWindow, uint160 budget)",
+  "event MasterBudgetRulesCleared()",
+  "event MasterBudgetUsageUpdated(uint256 indexed ruleIndex, uint256 amountUsed, uint256 chargedAmount)",
+  "event SupportedTokenAdded(address indexed token, uint8 decimals)",
+  "event SupportedTokenRemoved(address indexed token)",
+  "event OwnershipTransferred(address indexed previousOwner, address indexed newOwner)",
+  "event Upgraded(address indexed implementation)",
+  "event Initialized(uint64 version)",
 ]);
 
 // ── PaymentChannel ABI ────────────────────────────────────────────

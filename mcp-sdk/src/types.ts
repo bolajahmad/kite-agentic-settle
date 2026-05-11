@@ -1,6 +1,10 @@
 export interface KiteConfig {
   rpcUrl: string;
   chainId: number;
+  /** Network name used by GokiteAASDK (e.g. "kite_testnet"). */
+  networkName?: string;
+  /** Bundler service URL used by GokiteAASDK. */
+  bundlerUrl?: string;
   contracts: {
     identityRegistry: string;
     attestationRegistry: string;

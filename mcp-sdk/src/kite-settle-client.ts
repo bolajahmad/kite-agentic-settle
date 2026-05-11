@@ -740,7 +740,7 @@ export class KiteSettleClient {
       .catch(() => 0n);
   }
 
-  /** Deposit tokens into KiteAAWallet. Requires EOA credential (wallet owner). */
+  /** Deposit tokens into the configured wallet contract. Requires EOA credential. */
   async deposit(amount: bigint, token?: string): Promise<string> {
     return this.requireEoaClient().depositToWallet(
       amount,
@@ -748,7 +748,7 @@ export class KiteSettleClient {
     );
   }
 
-  /** Withdraw tokens from KiteAAWallet back to the EOA. Requires EOA credential. */
+  /** Withdraw tokens from the configured wallet contract back to the EOA. Requires EOA credential. */
   async withdraw(amount: bigint, token?: string): Promise<string> {
     return this.requireEoaClient().withdrawFromWallet(
       amount,
@@ -759,8 +759,8 @@ export class KiteSettleClient {
   // ── Identity / Registration Status ──────────────────────────
 
   /**
-   * Check whether an address (default: EOA) is registered on-chain.
-   * Read-only — works in agent mode and EOA mode; not available in read-only mode.
+  * Check legacy KiteAAWallet registration status for an address.
+  * Note: onboarding no longer depends on this flag.
    */
   async isRegistered(address?: string): Promise<boolean> {
     return this.requirePaymentClient()
@@ -771,8 +771,8 @@ export class KiteSettleClient {
   // ── Agent & Session Registration ─────────────────────────────
 
   /**
-   * Full one-step onboarding: register EOA → create agent → register
-   * session key → optionally fund wallet. Requires EOA credential.
+  * Full onboarding: ensure AA wallet → register agentId → create session key + session rule.
+  * Requires EOA credential.
    */
   async onboard(
     options: OnboardOptions,
@@ -792,23 +792,40 @@ export class KiteSettleClient {
       .registerAgentOnRegistry(metadata);
   }
 
-  /** Register a session key for an agent on KiteAAWallet. Requires EOA credential. */
+  /**
+   * Register a session key rule on IdentityRegistry for an existing agent.
+   * The session key must already exist on the vault.
+   */
   async registerSessionKey(
     agentId: bigint,
     sessionKey: string,
     sessionIndex: number,
     validUntil: number,
   ): Promise<string> {
-    return this.requireEoaClient()
-      .getContractService()
-      .addSessionKeyRule(
-        agentId,
-        sessionKey,
-        BigInt(0),
-        BigInt(0),
-        BigInt(validUntil),
-        [],
+    const cs = this.requireEoaClient().getContractService();
+    let walletContract = this.config.contracts.kiteAAWallet;
+
+    if (this.config.contracts.walletFactory) {
+      const resolved = await cs.getWalletFromFactory(this.eoaAddress);
+      if (resolved && resolved !== "0x0000000000000000000000000000000000000000") {
+        walletContract = resolved;
+      }
+    }
+
+    if (!walletContract) {
+      throw new Error(
+        "Unable to resolve wallet contract for session registration. Configure contracts.walletFactory or contracts.kiteAAWallet.",
       );
+    }
+
+    return cs.registerSessionOnRegistry({
+      agentId,
+      sessionKey,
+      user: this.eoaAddress,
+      walletContract,
+      validUntil: BigInt(validUntil),
+      blockedAgents: [],
+    });
   }
 
   /** Resolve an agent by its on-chain ID → owner address. */

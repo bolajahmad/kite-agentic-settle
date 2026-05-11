@@ -46,11 +46,14 @@ export {
 } from "./indexer.js";
 
 export {
+  clientAgentVaultAbi,
   erc20Abi,
+  identityRegistryAbi,
   kiteAAWalletAbi,
   paymentChannelAbi,
   walletFactoryAbi,
 } from "./abis.js";
+export { deriveSessionId, hashProvider } from "./utils/session-id.js";
 export {
   deleteVar,
   getKiteDir,
