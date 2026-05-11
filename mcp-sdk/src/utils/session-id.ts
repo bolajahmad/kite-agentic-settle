@@ -1,4 +1,4 @@
-import { keccak256, encodeAbiParameters, parseAbiParameters } from "viem";
+import { keccak256, encodePacked } from "viem";
 
 /**
  * Derive the deterministic sessionId used by ClientAgentVault and IdentityRegistry.
@@ -15,8 +15,8 @@ export function deriveSessionId(
   validUntil: bigint
 ): `0x${string}` {
   return keccak256(
-    encodeAbiParameters(
-      parseAbiParameters("address, uint256, uint256"),
+    encodePacked(
+      ["address", "uint256", "uint256"],
       [sessionKey, agentId, validUntil]
     )
   );
@@ -32,8 +32,8 @@ export function deriveSessionId(
  */
 export function hashProvider(providerAddress: `0x${string}`): `0x${string}` {
   return keccak256(
-    encodeAbiParameters(
-      parseAbiParameters("address"),
+    encodePacked(
+      ["address"],
       [providerAddress]
     )
   );

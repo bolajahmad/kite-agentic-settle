@@ -1,19 +1,20 @@
 /**
- * Demo: Gokite AA SDK — E2E Smoke Test (Native Transfer via UserOperation)
+ * Demo: Gokite AA SDK — E2E Smoke Test (Batch Token Transfer Comparison)
  *
  * GOAL:
  * Verify the Gokite AA SDK works end-to-end on kite_testnet by constructing
- * and sending a minimal UserOperation (0-value native transfer to self).
+ * and sending batch UserOperations that compare two token source models:
+ *   A) funds leave the AA wallet via transfer()
+ *   B) funds leave the EOA via transferFrom() after EOA approve()
  *
  * FLOW:
  *  1. Derive AA wallet from EOA private key
- *  2. Check deployment + balance state
- *  3. Check paymaster sponsorship
- *     ─ If sponsorships remain: use sponsored path (ZERO_ADDRESS token)
- *     ─ If exhausted: fund AA wallet with DmUSDT via direct EOA tx, then
- *       send a token-payment UserOp (SDK adds approve calls automatically)
- *  4. Sign and send UserOp via bundler
- *  5. Poll for receipt and confirm on-chain success
+ *  2. Check deployment + balances (gas payment token + DmUSDT)
+ *  3. Build and execute two batch requests (AA-source and EOA-source)
+ *  4. Check paymaster sponsorship
+ *     - If sponsorships remain: sponsored path
+ *     - If exhausted: token-payment path with settlement token (USDT)
+ *  5. Sign, send, and verify both UserOps
  *
  * REQUIREMENTS:
  * - PRIVATE_KEY env var set (`npx kite init`)
@@ -43,9 +44,13 @@ const PAYMASTER = "0x9Adcbf85D5c724611a490Ba9eDc4d38d6F39e92d" as const;
 // Address from: GokiteAASDK config kite_testnet.settlementToken
 const PAYMENT_TOKEN =
   "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63" as `0x${string}`; // Test USD (USDT)
+const DM_USDT = KITE_TESTNET.token as `0x${string}`;
+const RECIPIENT = "0x34017FF894d74DAE0e37083E11c8cd4f001D52C1" as `0x${string}`;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 // Amount of USDT to transfer to AA wallet to cover paymaster gas fees (token-payment path)
 const FUNDING_AMOUNT = parseUnits("1", 18); // 1 USDT
+const AA_SOURCE_TRANSFER = parseUnits("1", 18); // 1 DmUSDT leaves AA wallet
+const EOA_SOURCE_TRANSFER = parseUnits("0.5", 18); // 0.5 DmUSDT leaves EOA via transferFrom
 
 const PAYMASTER_ABI = parseAbi([
   "function maxSponsoredTransactions() view returns (uint256)",
@@ -54,7 +59,10 @@ const PAYMASTER_ABI = parseAbi([
 ]);
 const ERC20_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
   "function transfer(address to, uint256 amount) returns (bool)",
+  "function transferFrom(address from, address to, uint256 amount) returns (bool)",
 ]);
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -64,7 +72,7 @@ export async function run() {
 
   logger.header(
     "Gokite AA SDK — E2E Smoke Test",
-    "Construct and send a minimal UserOperation; handle sponsored + token-payment paths",
+    "Compare AA-source transfer vs EOA-source transferFrom (with EOA approve)",
   );
 
   // ── Step 1: Load credential ──────────────────────────────────────────────
@@ -102,7 +110,13 @@ export async function run() {
     transport: http(KITE_TESTNET.rpcUrl),
   });
 
-  const [isDeployed, kiteBalance, tokenBalance] = await Promise.all([
+  const [
+    isDeployed,
+    kiteBalance,
+    paymentTokenBalance,
+    dmUsdtBalance,
+    eoaDmUsdtBalance,
+  ] = await Promise.all([
     aaSdk.isAccountDeloyed(aaWallet),
     pubClient.getBalance({ address: aaWallet }),
     pubClient.readContract({
@@ -111,12 +125,26 @@ export async function run() {
       functionName: "balanceOf",
       args: [aaWallet],
     }) as Promise<bigint>,
+    pubClient.readContract({
+      address: DM_USDT,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [aaWallet],
+    }) as Promise<bigint>,
+    pubClient.readContract({
+      address: DM_USDT,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [ownerAddress],
+    }) as Promise<bigint>,
   ]);
 
   logger.data("AA Wallet state", {
     deployed: isDeployed,
     kiteBalance: `${formatEther(kiteBalance)} KITE`,
-    usdtBalance: `${formatUnits(tokenBalance, 18)} USDT`,
+    usdtBalance: `${formatUnits(paymentTokenBalance, 18)} USDT`,
+    dmUsdtBalance: `${formatUnits(dmUsdtBalance, 18)} DmUSDT`,
+    eoaDmUsdtBalance: `${formatUnits(eoaDmUsdtBalance, 18)} DmUSDT`,
   });
 
   // ── Step 4: Check paymaster sponsorship ─────────────────────────────────
@@ -143,37 +171,164 @@ export async function run() {
     maxSponsoredTransactions: maxSponsored.toString(),
     usedSponsorships: usedSponsored.toString(),
     remainingSponsorships: remaining.toString(),
-    path: sponsored ? "sponsored (KITE paymaster)" : "token-payment (DmUSDT)",
+    path: sponsored ? "sponsored (KITE paymaster)" : "token-payment (USDT)",
   });
 
-  // ── Step 5: Define the UserOp request ───────────────────────────────────
-  // Simplest possible op: 0-value call to self with empty calldata
-  const request = {
-    target: ownerAddress, // send to EOA — harmless, no value
-    value: 0n,
-    callData: "0x" as `0x${string}`,
+  // ── Step 5: Ensure source balances for both comparison cases ─────────────
+  if (dmUsdtBalance < AA_SOURCE_TRANSFER) {
+    logger.step("Fund AA wallet with DmUSDT for AA-source transfer");
+    logger.info(
+      `AA wallet has ${formatUnits(dmUsdtBalance, 18)} DmUSDT — transferring ${formatUnits(AA_SOURCE_TRANSFER, 18)} DmUSDT from EOA...`,
+    );
+
+    if (eoaDmUsdtBalance < AA_SOURCE_TRANSFER) {
+      throw new Error(
+        `EOA has insufficient DmUSDT: ${formatUnits(eoaDmUsdtBalance, 18)}. Need at least ${formatUnits(AA_SOURCE_TRANSFER, 18)} to fund AA wallet source path.`,
+      );
+    }
+
+    const kiteChain = {
+      id: KITE_TESTNET.chainId,
+      name: "Kite AI Testnet",
+      nativeCurrency: { name: "KITE", symbol: "KITE", decimals: 18 },
+      rpcUrls: { default: { http: [KITE_TESTNET.rpcUrl] } },
+    } as const;
+
+    const walletClient = createWalletClient({
+      account: eoaAccount,
+      chain: kiteChain,
+      transport: http(KITE_TESTNET.rpcUrl),
+    });
+
+    const fundDmUsdtData = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "transfer",
+      args: [aaWallet, AA_SOURCE_TRANSFER],
+    });
+
+    const fundDmUsdtTx = await walletClient.sendTransaction({
+      to: DM_USDT,
+      value: 0n,
+      data: fundDmUsdtData,
+    });
+
+    logger.info(`DmUSDT funding tx: ${fundDmUsdtTx}`);
+    logger.info("Waiting for transfer receipt...");
+    await pubClient.waitForTransactionReceipt({ hash: fundDmUsdtTx });
+    logger.info("Transfer confirmed.");
+  }
+
+  // For the EOA-source path, AA wallet spends EOA funds via transferFrom.
+  // This requires EOA -> AA wallet allowance to be set first (outside UserOp).
+  const eoaToAaAllowance = await pubClient.readContract({
+    address: DM_USDT,
+    abi: ERC20_ABI,
+    functionName: "allowance",
+    args: [ownerAddress, aaWallet],
+  });
+
+  logger.data("EOA -> AA allowance (DmUSDT)", {
+    allowance: `${formatUnits(eoaToAaAllowance, 18)} DmUSDT`,
+    required: `${formatUnits(EOA_SOURCE_TRANSFER, 18)} DmUSDT`,
+  });
+
+  if (eoaToAaAllowance < EOA_SOURCE_TRANSFER) {
+    logger.step("Approve AA wallet to spend EOA DmUSDT");
+    logger.info(
+      "EOA signs a direct approve tx. This cannot be done by UserOp because approve() must be called by token owner (EOA).",
+    );
+
+    const kiteChain = {
+      id: KITE_TESTNET.chainId,
+      name: "Kite AI Testnet",
+      nativeCurrency: { name: "KITE", symbol: "KITE", decimals: 18 },
+      rpcUrls: { default: { http: [KITE_TESTNET.rpcUrl] } },
+    } as const;
+
+    const walletClient = createWalletClient({
+      account: eoaAccount,
+      chain: kiteChain,
+      transport: http(KITE_TESTNET.rpcUrl),
+    });
+
+    const approveData = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [aaWallet, EOA_SOURCE_TRANSFER],
+    });
+
+    const approveTxHash = await walletClient.sendTransaction({
+      to: DM_USDT,
+      value: 0n,
+      data: approveData,
+    });
+
+    logger.info(`EOA approve tx: ${approveTxHash}`);
+    await pubClient.waitForTransactionReceipt({ hash: approveTxHash });
+    logger.info("Approval confirmed.");
+  }
+
+  // ── Step 6: Define the two batch requests to compare ─────────────────────
+  const aaSourceBatchRequest = {
+    targets: [DM_USDT],
+    values: [0n],
+    callDatas: [
+      encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: "transfer",
+        args: [RECIPIENT, AA_SOURCE_TRANSFER],
+      }),
+    ],
   };
 
-  // ── Step 6: Sign function ────────────────────────────────────────────────
+  const eoaSourceBatchRequest = {
+    targets: [DM_USDT],
+    values: [0n],
+    callDatas: [
+      encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: "transferFrom",
+        args: [ownerAddress, RECIPIENT, EOA_SOURCE_TRANSFER],
+      }),
+    ],
+  };
+
+  logger.data("Comparison requests", {
+    recipient: RECIPIENT,
+    aaSource: `${formatUnits(AA_SOURCE_TRANSFER, 18)} DmUSDT via transfer()`,
+    eoaSource: `${formatUnits(EOA_SOURCE_TRANSFER, 18)} DmUSDT via transferFrom()`,
+  });
+
+  // ── Step 7: Sign function ────────────────────────────────────────────────
   const signFunction = async (userOpHash: string): Promise<string> =>
     eoaAccount.signMessage({ message: { raw: userOpHash as Hex } });
 
-  // ── Step 7: Send UserOp via appropriate path ─────────────────────────────
+  // ── Step 8: Send UserOps via appropriate path ────────────────────────────
   logger.step(
     sponsored
-      ? "Send sponsored UserOp (sendUserOperationAndWait)"
-      : "Fund AA wallet with DmUSDT, then send token-payment UserOp",
+      ? "Send sponsored comparison UserOps"
+      : "Send token-payment comparison UserOps",
   );
 
-  let result: { userOpHash: string; status: any };
+  let aaSourceResult: { userOpHash: string; status: any };
+  let eoaSourceResult: { userOpHash: string; status: any };
 
   if (sponsored) {
     // ── Path A: Sponsored ──────────────────────────────────────────────────
     logger.info("Sponsorship available — using sponsored path...");
 
-    result = await aaSdk.sendUserOperationAndWait(
+    aaSourceResult = await aaSdk.sendUserOperationAndWait(
       ownerAddress,
-      request,
+      aaSourceBatchRequest,
+      signFunction,
+      undefined,
+      undefined,
+      { maxRetries: 60, interval: 5000 },
+    );
+
+    eoaSourceResult = await aaSdk.sendUserOperationAndWait(
+      ownerAddress,
+      eoaSourceBatchRequest,
       signFunction,
       undefined,
       undefined, // SDK uses config.paymaster
@@ -181,19 +336,19 @@ export async function run() {
     );
   } else {
     // ── Path B: Token payment ──────────────────────────────────────────────
-    // 1. Ensure AA wallet has DmUSDT to cover gas
-    if (tokenBalance < FUNDING_AMOUNT) {
+    // 1. Ensure AA wallet has settlement token (USDT) to cover gas
+    if (paymentTokenBalance < FUNDING_AMOUNT) {
       logger.info(
-        `AA wallet has ${formatUnits(tokenBalance, 18)} USDT — transferring ${formatUnits(FUNDING_AMOUNT, 18)} USDT from EOA...`,
+        `AA wallet has ${formatUnits(paymentTokenBalance, 18)} USDT — transferring ${formatUnits(FUNDING_AMOUNT, 18)} USDT from EOA...`,
       );
 
       // Check EOA has enough USDT
-      const eoaUsdt = (await pubClient.readContract({
+      const eoaUsdt = await pubClient.readContract({
         address: PAYMENT_TOKEN,
         abi: ERC20_ABI,
         functionName: "balanceOf",
         args: [ownerAddress],
-      })) as bigint;
+      });
 
       if (eoaUsdt < FUNDING_AMOUNT) {
         throw new Error(
@@ -227,39 +382,62 @@ export async function run() {
         data: transferData,
       });
 
-      logger.info(`DmUSDT transfer tx: ${fundTxHash}`);
+      logger.info(`USDT funding tx: ${fundTxHash}`);
       logger.info("Waiting for transfer receipt...");
       await pubClient.waitForTransactionReceipt({ hash: fundTxHash });
       logger.info("Transfer confirmed.");
     } else {
       logger.info(
-        `AA wallet already has ${formatUnits(tokenBalance, 18)} USDT — no funding needed.`,
+        `AA wallet already has ${formatUnits(paymentTokenBalance, 18)} USDT — no funding needed.`,
       );
     }
 
     // 2. Build base UserOp from SDK (no bundler estimation — just constructs calldata + gas defaults)
-    logger.info("Building UserOp (no bundler estimation)...");
-    const baseUserOp = await (aaSdk as any).createUserOperation(
+    logger.info("Building batch UserOp (no bundler estimation)...");
+    const aaSourceBaseUserOp = await (aaSdk as any).createUserOperation(
       ownerAddress,
-      request,
+      aaSourceBatchRequest,
     );
 
-    logger.data("Base UserOp gas params", {
-      accountGasLimits: baseUserOp.accountGasLimits,
-      preVerificationGas: baseUserOp.preVerificationGas?.toString(),
-      gasFees: baseUserOp.gasFees,
+    const eoaSourceBaseUserOp = await (aaSdk as any).createUserOperation(
+      ownerAddress,
+      eoaSourceBatchRequest,
+    );
+
+    logger.data("AA-source base UserOp gas params", {
+      accountGasLimits: aaSourceBaseUserOp.accountGasLimits,
+      preVerificationGas: aaSourceBaseUserOp.preVerificationGas?.toString(),
+      gasFees: aaSourceBaseUserOp.gasFees,
     });
 
-    // 3. Send with token payment — SDK prepends approve(0)+approve(MAX) to calldata
-    //    so the paymaster can do transferFrom in postOp
+    logger.data("EOA-source base UserOp gas params", {
+      accountGasLimits: eoaSourceBaseUserOp.accountGasLimits,
+      preVerificationGas: eoaSourceBaseUserOp.preVerificationGas?.toString(),
+      gasFees: eoaSourceBaseUserOp.gasFees,
+    });
+
     logger.info(
-      "Sending UserOp with DmUSDT payment (includes approve calls)...",
+      "Sending AA-source batch UserOp with USDT payment (includes paymaster approve calls)...",
     );
 
-    result = await aaSdk.sendUserOperationWithPayment(
+    aaSourceResult = await aaSdk.sendUserOperationWithPayment(
       ownerAddress,
-      request,
-      baseUserOp,
+      aaSourceBatchRequest,
+      aaSourceBaseUserOp,
+      PAYMENT_TOKEN,
+      signFunction,
+      undefined,
+      { maxRetries: 60, interval: 5000 },
+    );
+
+    logger.info(
+      "Sending EOA-source batch UserOp with USDT payment (includes paymaster approve calls)...",
+    );
+
+    eoaSourceResult = await aaSdk.sendUserOperationWithPayment(
+      ownerAddress,
+      eoaSourceBatchRequest,
+      eoaSourceBaseUserOp,
       PAYMENT_TOKEN,
       signFunction,
       undefined,
@@ -267,28 +445,49 @@ export async function run() {
     );
   }
 
-  // ── Step 8: Verify result ────────────────────────────────────────────────
+  // ── Step 9: Verify result ────────────────────────────────────────────────
   logger.step("Verify UserOp result");
 
-  logger.data("UserOp result", {
-    userOpHash: result.userOpHash,
-    status: result.status.status,
-    transactionHash: result.status.transactionHash ?? "—",
-    blockNumber: result.status.blockNumber ?? "—",
-    gasUsed: result.status.gasUsed ?? "—",
-    reason: result.status.reason ?? "—",
+  logger.data("AA-source UserOp result", {
+    userOpHash: aaSourceResult.userOpHash,
+    status: aaSourceResult.status.status,
+    transactionHash: aaSourceResult.status.transactionHash ?? "—",
+    blockNumber: aaSourceResult.status.blockNumber ?? "—",
+    gasUsed: aaSourceResult.status.gasUsed ?? "—",
+    reason: aaSourceResult.status.reason ?? "—",
   });
 
-  if (result.status.status !== "success") {
+  logger.data("EOA-source UserOp result", {
+    userOpHash: eoaSourceResult.userOpHash,
+    status: eoaSourceResult.status.status,
+    transactionHash: eoaSourceResult.status.transactionHash ?? "—",
+    blockNumber: eoaSourceResult.status.blockNumber ?? "—",
+    gasUsed: eoaSourceResult.status.gasUsed ?? "—",
+    reason: eoaSourceResult.status.reason ?? "—",
+  });
+
+  if (aaSourceResult.status.status !== "success") {
     throw new Error(
-      `UserOp did not succeed: ${result.status.reason ?? result.status.status}`,
+      `AA-source UserOp did not succeed: ${aaSourceResult.status.reason ?? aaSourceResult.status.status}`,
     );
   }
 
-  // ── Step 9: Check post-op balances ──────────────────────────────────────
+  if (eoaSourceResult.status.status !== "success") {
+    throw new Error(
+      `EOA-source UserOp did not succeed: ${eoaSourceResult.status.reason ?? eoaSourceResult.status.status}`,
+    );
+  }
+
+  // ── Step 10: Check post-op balances ─────────────────────────────────────
   logger.step("Confirm final AA wallet state");
 
-  const [kiteAfter, tokenAfter] = await Promise.all([
+  const [
+    kiteAfter,
+    tokenAfter,
+    dmUsdtAfter,
+    eoaDmUsdtAfter,
+    recipientDmUsdtAfter,
+  ] = await Promise.all([
     pubClient.getBalance({ address: aaWallet }),
     pubClient.readContract({
       address: PAYMENT_TOKEN,
@@ -296,15 +495,36 @@ export async function run() {
       functionName: "balanceOf",
       args: [aaWallet],
     }) as Promise<bigint>,
+    pubClient.readContract({
+      address: DM_USDT,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [aaWallet],
+    }) as Promise<bigint>,
+    pubClient.readContract({
+      address: DM_USDT,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [ownerAddress],
+    }) as Promise<bigint>,
+    pubClient.readContract({
+      address: DM_USDT,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [RECIPIENT],
+    }) as Promise<bigint>,
   ]);
 
   logger.data("AA Wallet after", {
     kiteBalance: `${formatEther(kiteAfter)} KITE`,
     usdtBalance: `${formatUnits(tokenAfter, 18)} USDT`,
+    dmUsdtBalance: `${formatUnits(dmUsdtAfter, 18)} DmUSDT`,
+    eoaDmUsdtBalance: `${formatUnits(eoaDmUsdtAfter, 18)} DmUSDT`,
+    recipientDmUsdtBalance: `${formatUnits(recipientDmUsdtAfter, 18)} DmUSDT`,
   });
 
   logger.complete(
-    `AA SDK E2E verified ✓  UserOp ${result.userOpHash} confirmed in block ${result.status.blockNumber}.`,
+    `AA SDK comparison verified ✓  AA-source UserOp ${aaSourceResult.userOpHash}; EOA-source UserOp ${eoaSourceResult.userOpHash}`,
   );
 }
 
