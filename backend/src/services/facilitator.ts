@@ -1,7 +1,9 @@
 import {
-  executePaymentOnChain,
-  isNonceUsedOnChain,
+  executeTransferWithAuthorizationOnChain,
+  isVaultNonceUsedOnChain,
+  validateSessionOnChain,
 } from "./contract-service.js";
+import { ethers } from "ethers";
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -9,14 +11,19 @@ export interface X402PaymentPayload {
   scheme: "kite-programmable";
   version: string;
   chainId: number;
-  settlementContract?: string;
-  agentId?: string;
+  walletContract: string;
+  sessionId: string;
+  agentId: string;
   sessionKey: string;
-  recipient: string;
-  token: string;
-  amount: string;
-  nonce: string;
-  deadline: string;
+  auth: {
+    from: string;
+    to: string;
+    token: string;
+    value: string;
+    validAfter: string;
+    validBefore: string;
+    nonce: string;
+  };
   /** Full ECDSA signature (65-byte hex, from signTypedData) */
   signature: `0x${string}`;
   /** Legacy nested authorization shape (also supported) */
@@ -28,6 +35,9 @@ export interface X402PaymentPayload {
       amount: bigint | string;
       nonce: bigint | string;
       deadline: bigint | string;
+      walletContract?: string;
+      sessionId?: string;
+      validAfter?: bigint | string;
     };
     signature: `0x${string}`;
   };
@@ -64,18 +74,30 @@ export function decodeX402Header(header: string): X402PaymentPayload {
     );
   }
 
-  // Normalize: if flat fields are missing, extract from nested authorization.message
-  if (!payload.sessionKey && payload.authorization?.message) {
+  // Normalize legacy nested payload (version 1).
+  if (!payload.auth && payload.authorization?.message) {
     const msg = payload.authorization.message;
     payload.sessionKey = msg.sessionKey;
-    payload.recipient = msg.recipient;
-    payload.token = msg.token;
-    payload.amount = String(msg.amount);
-    payload.nonce = String(msg.nonce);
-    payload.deadline = String(msg.deadline);
+    payload.walletContract = msg.walletContract ?? payload.walletContract;
+    payload.sessionId = msg.sessionId ?? payload.sessionId;
+    payload.auth = {
+      from: msg.walletContract ?? payload.walletContract ?? ethers.ZeroAddress,
+      to: msg.recipient,
+      token: msg.token,
+      value: String(msg.amount),
+      validAfter: String(msg.validAfter ?? 0),
+      validBefore: String(msg.deadline),
+      nonce: String(msg.nonce),
+    };
   }
   if (!payload.signature && payload.authorization?.signature) {
     payload.signature = payload.authorization.signature;
+  }
+
+  if (!payload.walletContract || !payload.sessionId || !payload.auth) {
+    throw new Error(
+      "Invalid X-PAYMENT payload: walletContract, sessionId, and auth are required",
+    );
   }
 
   return payload;
@@ -89,13 +111,21 @@ export async function validatePaymentPayload(
   expectedToken: string,
   expectedMinAmount: bigint,
 ): Promise<void> {
-  const amount = BigInt(payload.amount);
-  const deadline = BigInt(payload.deadline);
+  const amount = BigInt(payload.auth.value);
+  const validAfter = BigInt(payload.auth.validAfter);
+  const validBefore = BigInt(payload.auth.validBefore);
 
-  // Deadline check
+  // Time window check
   const nowSec = BigInt(Math.floor(Date.now() / 1000));
-  if (deadline < nowSec) {
-    throw new Error(`Payment signature expired at ${deadline} (now ${nowSec})`);
+  if (nowSec < validAfter) {
+    throw new Error(
+      `Payment signature not yet valid at ${nowSec} (validAfter=${validAfter})`,
+    );
+  }
+  if (validBefore < nowSec) {
+    throw new Error(
+      `Payment signature expired at ${validBefore} (now ${nowSec})`,
+    );
   }
 
   // Amount check — reject before touching the chain
@@ -106,28 +136,65 @@ export async function validatePaymentPayload(
   }
 
   // Recipient check (case-insensitive)
-  if (payload.recipient.toLowerCase() !== expectedRecipient.toLowerCase()) {
+  if (payload.auth.to.toLowerCase() !== expectedRecipient.toLowerCase()) {
     throw new Error(
-      `Payment recipient ${payload.recipient} does not match expected ${expectedRecipient}`,
+      `Payment recipient ${payload.auth.to} does not match expected ${expectedRecipient}`,
     );
   }
 
   // Token check
-  if (payload.token.toLowerCase() !== expectedToken.toLowerCase()) {
+  if (payload.auth.token.toLowerCase() !== expectedToken.toLowerCase()) {
     throw new Error(
-      `Payment token ${payload.token} does not match expected ${expectedToken}`,
+      `Payment token ${payload.auth.token} does not match expected ${expectedToken}`,
     );
   }
 
-  // On-chain nonce check — reject replays before touching the chain
-  const nonceUsed = await isNonceUsedOnChain(
-    payload.sessionKey,
-    BigInt(payload.nonce),
+  if (payload.auth.from.toLowerCase() !== payload.walletContract.toLowerCase()) {
+    throw new Error(
+      `auth.from ${payload.auth.from} must equal walletContract ${payload.walletContract}`,
+    );
+  }
+
+  // IdentityRegistry session checks
+  const session = await validateSessionOnChain(payload.sessionKey);
+  if (!session.active) {
+    throw new Error(`Session ${payload.sessionKey} is not active`);
+  }
+  if (
+    session.walletContract.toLowerCase() !== payload.walletContract.toLowerCase()
+  ) {
+    throw new Error(
+      `Session wallet mismatch: payload=${payload.walletContract}, onchain=${session.walletContract}`,
+    );
+  }
+  if (session.validUntil < nowSec) {
+    throw new Error(
+      `Session ${payload.sessionKey} expired at ${session.validUntil.toString()}`,
+    );
+  }
+  if (BigInt(payload.agentId) !== session.agentId) {
+    throw new Error(
+      `AgentId mismatch: payload=${payload.agentId}, onchain=${session.agentId.toString()}`,
+    );
+  }
+
+  const derivedSessionId = ethers.solidityPackedKeccak256(
+    ["address", "uint256", "uint256"],
+    [payload.sessionKey, session.agentId, session.validUntil],
+  );
+  if (derivedSessionId.toLowerCase() !== payload.sessionId.toLowerCase()) {
+    throw new Error(
+      `SessionId mismatch: payload=${payload.sessionId}, derived=${derivedSessionId}`,
+    );
+  }
+
+  // On-chain nonce check — reject replay before touching the chain.
+  const nonceUsed = await isVaultNonceUsedOnChain(
+    payload.walletContract,
+    payload.auth.nonce,
   );
   if (nonceUsed) {
-    throw new Error(
-      `Nonce ${payload.nonce} has already been used for session key ${payload.sessionKey}`,
-    );
+    throw new Error(`Nonce ${payload.auth.nonce} has already been used`);
   }
 }
 
@@ -141,26 +208,29 @@ export async function settleX402Payment(
     payload.signature ?? payload.authorization?.signature;
   if (!sig) throw new Error("No signature found in X-PAYMENT payload");
 
-  const amount = BigInt(payload.amount);
-  const nonce = BigInt(payload.nonce);
-  const deadline = BigInt(payload.deadline);
+  const amount = BigInt(payload.auth.value);
 
-  const result = await executePaymentOnChain(
-    BigInt(payload.agentId ?? "0"),
-    payload.sessionKey,
-    payload.recipient,
-    payload.token,
-    amount,
-    nonce,
-    deadline,
+  const result = await executeTransferWithAuthorizationOnChain(
+    payload.walletContract,
+    payload.sessionId,
+    {
+      from: payload.auth.from,
+      to: payload.auth.to,
+      token: payload.auth.token,
+      value: amount,
+      validAfter: BigInt(payload.auth.validAfter),
+      validBefore: BigInt(payload.auth.validBefore),
+      nonce: payload.auth.nonce,
+    },
     sig,
+    "0x",
   );
 
   return {
     txHash: result.txHash,
     blockNumber: result.blockNumber,
     sessionKey: payload.sessionKey,
-    recipient: payload.recipient,
+    recipient: payload.auth.to,
     amount,
   };
 }

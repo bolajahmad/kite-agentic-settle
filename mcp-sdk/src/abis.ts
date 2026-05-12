@@ -17,6 +17,7 @@ export const identityRegistryAbi = parseAbi([
   "function getAgentSessions(uint256 agentId) external view returns (address[])",
   "function isAgentBlocked(address sessionKey, uint256 agentId) external view returns (bool)",
   // Read (agents / ERC-721)
+  "function getAgentWallet(uint256 agentId) external view returns (address walletContract, address user)",
   "function ownerOf(uint256 tokenId) external view returns (address)",
   "function balanceOf(address owner) external view returns (uint256)",
   "function totalAgents() external view returns (uint256)",

@@ -109,7 +109,7 @@ export interface IndexedChannel {
 
 export interface IndexedUserRegistered {
   address: string;
-  wallet: string;
+  aaWallets: any;
   id: string;
   blockTimestamp: string;
   transactionHash: string;
@@ -194,7 +194,6 @@ export async function getSessionsByAgent(
         blockedAgents
         createdAt
         maxLimit
-        metadataHash
         sessionKey
         updatedAt
         valueLimit
@@ -219,7 +218,6 @@ export async function getSessionByKey(
         blockedAgents
         createdAt
         maxLimit
-        metadataHash
         sessionKey
         updatedAt
         valueLimit
@@ -368,7 +366,9 @@ export async function getUserAgentsWithActiveSessions(
             status
           }
         }
-        wallet
+        aaWallets {
+          address
+        }
       }
     }
   `,

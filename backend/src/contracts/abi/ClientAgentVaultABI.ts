@@ -1,0 +1,68 @@
+export const ClientAgentVaultABI = [
+  {
+    name: "executeTransferWithAuthorization",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "sessionId", type: "bytes32" },
+      {
+        name: "auth",
+        type: "tuple",
+        components: [
+          { name: "from", type: "address" },
+          { name: "to", type: "address" },
+          { name: "token", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "validAfter", type: "uint256" },
+          { name: "validBefore", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      },
+      { name: "signature", type: "bytes" },
+      { name: "metadata", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "isNonceUsed",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "nonce", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "sessionExists",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "sessionId", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "DOMAIN_NAME",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
+  {
+    name: "DOMAIN_VERSION",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
+  {
+    name: "DOMAIN_SEPARATOR",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "bytes32" }],
+  },
+  {
+    name: "TRANSFER_WITH_AUTHORIZATION_TYPEHASH",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "bytes32" }],
+  },
+] as const;

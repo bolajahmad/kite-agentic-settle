@@ -197,6 +197,7 @@ export async function decide(
 
   // Tier 1: Rules
   const rulesResult = checkRules(ctx);
+  console.log({ rulesResult });
   if (rulesResult.decision !== "unclear") {
     return {
       decision: rulesResult.decision,

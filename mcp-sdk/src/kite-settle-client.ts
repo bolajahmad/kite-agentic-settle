@@ -391,7 +391,7 @@ export class KiteSettleClient {
     }
 
     const indexedSessions = await getSessionsByAgent(
-      `0x${agentId}`,
+      `0x${agentId.toString(16)}`,
       onchainSessions.length,
       0,
     ).catch(() => [] as IndexedSession[]);
@@ -759,8 +759,8 @@ export class KiteSettleClient {
   // ── Identity / Registration Status ──────────────────────────
 
   /**
-  * Check legacy KiteAAWallet registration status for an address.
-  * Note: onboarding no longer depends on this flag.
+   * Check legacy KiteAAWallet registration status for an address.
+   * Note: onboarding no longer depends on this flag.
    */
   async isRegistered(address?: string): Promise<boolean> {
     return this.requirePaymentClient()
@@ -771,8 +771,8 @@ export class KiteSettleClient {
   // ── Agent & Session Registration ─────────────────────────────
 
   /**
-  * Full onboarding: ensure AA wallet → register agentId → create session key + session rule.
-  * Requires EOA credential.
+   * Full onboarding: ensure AA wallet → register agentId → create session key + session rule.
+   * Requires EOA credential.
    */
   async onboard(
     options: OnboardOptions,
@@ -807,7 +807,10 @@ export class KiteSettleClient {
 
     if (this.config.contracts.walletFactory) {
       const resolved = await cs.getWalletFromFactory(this.eoaAddress);
-      if (resolved && resolved !== "0x0000000000000000000000000000000000000000") {
+      if (
+        resolved &&
+        resolved !== "0x0000000000000000000000000000000000000000"
+      ) {
         walletContract = resolved;
       }
     }

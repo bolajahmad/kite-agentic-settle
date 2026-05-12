@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import { AttestationRegistryABI } from "../contracts/abi/AttestationRegistry.js";
+import { ClientAgentVaultABI } from "../contracts/abi/ClientAgentVaultABI.js";
 import { IdentityRegistryABI } from "../contracts/abi/IdentityRegistryABI.js";
 import { KiteAAWalletABI } from "../contracts/abi/KiteAAWalletABI.js";
 import { PaymentChannelABI } from "../contracts/abi/PaymentChannelABI.js";
@@ -60,6 +61,17 @@ export function getKiteAAWallet(
   return new ethers.Contract(
     getContractAddress("KITE_AA_WALLET_ADDRESS"),
     KiteAAWalletABI,
+    signerOrProvider ?? getSigner(),
+  );
+}
+
+export function getClientAgentVault(
+  walletContract: string,
+  signerOrProvider?: ethers.Signer | ethers.Provider,
+) {
+  return new ethers.Contract(
+    walletContract,
+    ClientAgentVaultABI,
     signerOrProvider ?? getSigner(),
   );
 }
@@ -191,6 +203,45 @@ export async function executePaymentOnChain(
   return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
 }
 
+export interface TransferAuthorization {
+  from: string;
+  to: string;
+  token: string;
+  value: bigint;
+  validAfter: bigint;
+  validBefore: bigint;
+  nonce: string;
+}
+
+/**
+ * Settle via ClientAgentVault using session-scoped TransferWithAuthorization.
+ */
+export async function executeTransferWithAuthorizationOnChain(
+  walletContract: string,
+  sessionId: string,
+  auth: TransferAuthorization,
+  sig: string,
+  metadata: string = "0x",
+) {
+  const vault = getClientAgentVault(walletContract);
+  const tx = await vault.executeTransferWithAuthorization(
+    sessionId,
+    {
+      from: auth.from,
+      to: auth.to,
+      token: auth.token,
+      value: auth.value,
+      validAfter: auth.validAfter,
+      validBefore: auth.validBefore,
+      nonce: auth.nonce,
+    },
+    sig,
+    metadata,
+  );
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
+}
+
 /** Pre-flight replay check — returns true when the nonce was already consumed. */
 export async function isNonceUsedOnChain(
   sessionKey: string,
@@ -198,6 +249,35 @@ export async function isNonceUsedOnChain(
 ): Promise<boolean> {
   const wallet = getKiteAAWallet(getProvider());
   return Boolean(await wallet.isNonceUsed(sessionKey, nonce));
+}
+
+/** Pre-flight replay check for vault TransferWithAuthorization nonces (bytes32). */
+export async function isVaultNonceUsedOnChain(
+  walletContract: string,
+  nonce: string,
+): Promise<boolean> {
+  const vault = getClientAgentVault(walletContract, getProvider());
+  return Boolean(await vault.isNonceUsed(nonce));
+}
+
+/** Read session status from IdentityRegistry. */
+export async function validateSessionOnChain(sessionKey: string): Promise<{
+  active: boolean;
+  agentId: bigint;
+  user: string;
+  walletContract: string;
+  validUntil: bigint;
+}> {
+  const registry = getIdentityRegistry(getProvider());
+  const [active, agentId, user, walletContract, validUntil] =
+    await registry.validateSession(sessionKey);
+  return {
+    active: Boolean(active),
+    agentId: BigInt(agentId),
+    user,
+    walletContract,
+    validUntil: BigInt(validUntil),
+  };
 }
 
 export async function getSessionRuleFromChain(sessionKeyAddress: string) {

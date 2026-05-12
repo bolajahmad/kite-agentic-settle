@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { formatUnits, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { BatchManager } from "./batch";
@@ -9,6 +10,7 @@ import type {
   PaymentResult,
 } from "./types.js";
 import { UsageTracker } from "./usage.js";
+import { deriveSessionId } from "./utils/session-id.js";
 
 interface X402Offer {
   scheme: string;
@@ -37,6 +39,26 @@ function parseX402Response(body: string): PaymentRequirements | null {
     }
   } catch {}
   return null;
+}
+
+function selectOffer(offers: X402Offer[]): X402Offer {
+  const preferredAsset = process.env.SETTLEMENT_TOKEN_ADDRESS?.toLowerCase();
+  if (preferredAsset) {
+    const preferred = offers.find(
+      (offer) => offer.asset.toLowerCase() === preferredAsset,
+    );
+    if (preferred) return preferred;
+  }
+
+  return [...offers].sort(
+    (a, b) => {
+      const aAmount = BigInt(a.maxAmountRequired);
+      const bAmount = BigInt(b.maxAmountRequired);
+      if (aAmount < bAmount) return -1;
+      if (aAmount > bAmount) return 1;
+      return 0;
+    },
+  )[0];
 }
 
 export class PaymentInterceptor {
@@ -110,11 +132,14 @@ export class PaymentInterceptor {
       throw new Error(`402 but could not parse payment requirements: ${body}`);
     }
 
-    const offer = requirements.offers[0];
-    const price = Number(formatUnits(BigInt(offer.maxAmountRequired), 18));
+    const offer = selectOffer(requirements.offers);
+    const offerAmount = BigInt(offer.maxAmountRequired);
+    const price = Number(formatUnits(offerAmount, 18));
 
-    if (opts.maxPaymentPerCall && price > opts.maxPaymentPerCall) {
-      throw new Error(`Price ${price} exceeds max ${opts.maxPaymentPerCall}`);
+    if (opts.maxPaymentPerCall && offerAmount > opts.maxPaymentPerCall) {
+      throw new Error(
+        `Price ${offerAmount.toString()} exceeds max ${opts.maxPaymentPerCall.toString()}`,
+      );
     }
 
     // If onPaymentRequired callback is set, ask before paying
@@ -128,8 +153,8 @@ export class PaymentInterceptor {
         description: offer.description,
         merchantName: offer.merchantName,
       };
+      console.log({ paymentRequest });
       const approved = await opts.onPaymentRequired(paymentRequest);
-      console.log({ approved });
       if (!approved) {
         return response;
       }
@@ -156,6 +181,7 @@ export class PaymentInterceptor {
       result = await this.payViaX402(offer, opts);
     }
 
+    console.log({ result });
     opts.onPayment?.(result);
 
     this.usage.log({
@@ -236,65 +262,92 @@ export class PaymentInterceptor {
       );
     }
 
-    // Generate a random bitmap nonce (any unique uint256; bitmap-based replay protection)
-    const nonce =
-      BigInt(Date.now()) * BigInt(1_000_000) +
-      BigInt(Math.floor(Math.random() * 1_000_000));
-    // 5-minute deadline
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
-
     const chainId = this.contractService.getChainId();
-    const kiteAAWallet =
-      this.contractService.getKiteAAWalletAddress() as `0x${string}`;
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    const validAfter = 0n;
+    const validBefore = nowSec + 300n;
+
+    const session = (await this.contractService.validateSession(
+      sessionKey,
+    )) as readonly [boolean, bigint, `0x${string}`, `0x${string}`, bigint];
+    const [active, agentId, _user, walletContract, validUntil] = session;
+    if (!active) {
+      throw new Error(
+        `Session ${sessionKey} is not active on IdentityRegistry`,
+      );
+    }
+    if (validUntil <= nowSec) {
+      throw new Error(
+        `Session ${sessionKey} expired at ${validUntil.toString()}`,
+      );
+    }
+    if (
+      !walletContract ||
+      walletContract.toLowerCase() ===
+        "0x0000000000000000000000000000000000000000"
+    ) {
+      throw new Error(
+        `Session ${sessionKey} has invalid walletContract in IdentityRegistry`,
+      );
+    }
+
+    const sessionId = deriveSessionId(
+      sessionKey as `0x${string}`,
+      agentId,
+      validUntil,
+    );
+    const nonce = toHex(randomBytes(32));
 
     // Build EIP-712 typed data and sign with the session key's private key
     const account = privateKeyToAccount(toHex(this.privateKey, { size: 32 }));
     const signature = await account.signTypedData({
       domain: {
-        name: "KiteAAWallet",
+        name: "GokiteAccount",
         version: "1",
         chainId: BigInt(chainId),
-        verifyingContract: kiteAAWallet,
+        verifyingContract: walletContract,
       },
       types: {
-        Payment: [
-          { name: "agentId", type: "uint256" },
-          { name: "sessionKey", type: "address" },
-          { name: "recipient", type: "address" },
+        TransferWithAuthorization: [
+          { name: "from", type: "address" },
+          { name: "to", type: "address" },
           { name: "token", type: "address" },
-          { name: "amount", type: "uint256" },
-          { name: "nonce", type: "uint256" },
-          { name: "deadline", type: "uint256" },
+          { name: "value", type: "uint256" },
+          { name: "validAfter", type: "uint256" },
+          { name: "validBefore", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
         ],
       },
-      primaryType: "Payment",
+      primaryType: "TransferWithAuthorization",
       message: {
-        agentId: BigInt(this.agentId),
-        sessionKey: sessionKey as `0x${string}`,
-        recipient: offer.payTo as `0x${string}`,
+        from: walletContract,
+        to: offer.payTo as `0x${string}`,
         token: offer.asset as `0x${string}`,
-        amount,
+        value: amount,
+        validAfter,
+        validBefore,
         nonce,
-        deadline,
       },
     });
 
-    // Encode as base64 JSON — the facilitator decodes this and calls
-    // KiteAAWallet.executePayment(sessionKey, recipient, token, amount, nonce, deadline, sig)
-    //
-    // Flat top-level fields match the facilitator's X402PaymentPayload interface.
+    // Encode as base64 JSON for x402 programmable settlement.
     const payload = {
       scheme: "kite-programmable",
-      version: "1",
+      version: "2",
       chainId,
-      settlementContract: kiteAAWallet,
-      agentId: this.agentId,
+      walletContract,
+      sessionId,
+      agentId: agentId.toString(),
       sessionKey,
-      recipient: offer.payTo,
-      token: offer.asset,
-      amount,
-      nonce,
-      deadline,
+      auth: {
+        from: walletContract,
+        to: offer.payTo,
+        token: offer.asset,
+        value: amount,
+        validAfter,
+        validBefore,
+        nonce,
+      },
       signature,
     };
     const x402Payload = Buffer.from(

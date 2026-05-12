@@ -49,19 +49,46 @@ export class ContractService {
   async resolveWalletContractForSession(
     sessionKey: string,
   ): Promise<`0x${string}` | null> {
-    const session = (await this.getSessionFromRegistry(sessionKey)) as readonly [
-      bigint,
-      `0x${string}`,
-      `0x${string}`,
-      bigint,
-      readonly bigint[],
-      boolean,
-    ];
-    const walletContract = session[2];
-    if (!walletContract || walletContract === "0x0000000000000000000000000000000000000000") {
+    try {
+      const session = (await this.validateSession(sessionKey)) as readonly [
+        boolean,
+        bigint,
+        `0x${string}`,
+        `0x${string}`,
+        bigint,
+      ];
+      const walletContract = session[3];
+      if (
+        walletContract &&
+        walletContract !== "0x0000000000000000000000000000000000000000"
+      ) {
+        return walletContract;
+      }
+    } catch {
+      // Session may not exist yet. Callers can fall back to agent-level wallet resolution.
+    }
+    return null;
+  }
+
+  async getAgentWalletFromRegistry(
+    agentId: bigint,
+  ): Promise<{ walletContract: `0x${string}`; user: `0x${string}` } | null> {
+    const result = (await this.client.readContract({
+      address: this.config.contracts.identityRegistry as `0x${string}`,
+      abi: identityRegistryAbi,
+      functionName: "getAgentWallet",
+      args: [agentId],
+    })) as readonly [`0x${string}`, `0x${string}`];
+
+    const walletContract = result[0];
+    const user = result[1];
+    if (
+      !walletContract ||
+      walletContract === "0x0000000000000000000000000000000000000000"
+    ) {
       return null;
     }
-    return walletContract;
+    return { walletContract, user };
   }
 
   async getWalletUserBalance(
@@ -184,6 +211,20 @@ export class ContractService {
     return result.hash;
   }
 
+  /** Revoke a session on IdentityRegistry. */
+  async revokeSessionOnRegistry(sessionKey: string): Promise<string> {
+    const data = encodeFunctionData({
+      abi: identityRegistryAbi,
+      functionName: "revokeSession",
+      args: [sessionKey as `0x${string}`],
+    });
+    const result = await this.sendTx(
+      this.config.contracts.identityRegistry,
+      data,
+    );
+    return result.hash;
+  }
+
   /** Get the URI for an agent NFT. */
   async getAgentURI(agentId: bigint): Promise<string> {
     return (await this.client.readContract({
@@ -232,12 +273,26 @@ export class ContractService {
 
   /** Full session rule*/
   async getSessionFromRegistry(sessionKey: string) {
-    return await this.client.readContract({
-      address: this.config.contracts.identityRegistry as `0x${string}`,
-      abi: identityRegistryAbi,
-      functionName: "getSession",
-      args: [sessionKey as `0x${string}`],
-    });
+    try {
+      return await this.client.readContract({
+        address: this.config.contracts.identityRegistry as `0x${string}`,
+        abi: identityRegistryAbi,
+        functionName: "getSession",
+        args: [sessionKey as `0x${string}`],
+      });
+    } catch {
+      // Some deployed versions expose a different getSession return shape.
+      // Fall back to validateSession and normalize to the expected tuple shape.
+      const [active, agentId, user, walletContract, validUntil] =
+        (await this.validateSession(sessionKey)) as readonly [
+          boolean,
+          bigint,
+          `0x${string}`,
+          `0x${string}`,
+          bigint,
+        ];
+      return [agentId, user, walletContract, validUntil, [], active] as const;
+    }
   }
 
   /** All session keys ever registered for the given agent (by IdentityRegistry tokenId). */
@@ -302,10 +357,7 @@ export class ContractService {
       functionName: "deposit",
       args: [token as `0x${string}`, amount],
     });
-    const result = await this.sendTx(
-      walletContract,
-      depositData,
-    );
+    const result = await this.sendTx(walletContract, depositData);
     return result.hash;
   }
 
@@ -316,10 +368,7 @@ export class ContractService {
       functionName: "withdraw",
       args: [token as `0x${string}`, amount],
     });
-    const result = await this.sendTx(
-      walletContract,
-      withdrawData,
-    );
+    const result = await this.sendTx(walletContract, withdrawData);
     return result.hash;
   }
 
@@ -430,15 +479,16 @@ export class ContractService {
     let walletContract = walletContractOverride as `0x${string}` | undefined;
 
     if (!walletContract) {
-      const resolvedWallet = await this.resolveWalletContractForSession(
-        signerAddress,
-      );
+      const resolvedWallet =
+        await this.resolveWalletContractForSession(signerAddress);
       if (resolvedWallet) {
         walletContract = resolvedWallet;
       }
     }
     if (!walletContract) {
-      walletContract = this.config.contracts.kiteAAWallet as `0x${string}` | undefined;
+      walletContract = this.config.contracts.kiteAAWallet as
+        | `0x${string}`
+        | undefined;
     }
     if (!walletContract) {
       throw new Error(
@@ -783,6 +833,47 @@ export class ContractService {
     });
 
     const result = await this.sendTx(params.walletContract, data);
+    return result.hash;
+  }
+
+  /** Remove a session from the vault (revoke). */
+  async removeVaultSession(
+    walletContract: string,
+    sessionId: `0x${string}`,
+  ): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "removeSession",
+      args: [sessionId],
+    });
+    const result = await this.sendTx(walletContract, data);
+    return result.hash;
+  }
+
+  /** Check whether a token is enabled on the ClientAgentVault. */
+  async isVaultTokenSupported(
+    walletContract: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<boolean> {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: clientAgentVaultAbi,
+      functionName: "isTokenSupported",
+      args: [token],
+    })) as boolean;
+  }
+
+  /** Enable an ERC-20 token on the ClientAgentVault (owner-only). */
+  async addVaultSupportedToken(
+    walletContract: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "addSupportedToken",
+      args: [token],
+    });
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
