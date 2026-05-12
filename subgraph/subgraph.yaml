@@ -103,3 +103,26 @@ dataSources:
           handler: handleMerkleRootAnchored
       file: ./src/attestation-registry.ts
 
+templates:
+  - kind: ethereum
+    name: ClientVault
+    network: kite-ai-testnet
+    source:
+      abi: ClientAgentVault
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Payment
+        - Session
+        - SessionIndex
+        - User
+      abis:
+        - name: ClientAgentVault
+          file: ./abis/ClientAgentVaultABI.json
+      eventHandlers:
+        - event: TransferExecuted(indexed bytes32,indexed address,indexed address,uint256,bytes32,bytes)
+          handler: handleTransferExecuted
+      file: ./src/client-vault.ts
+

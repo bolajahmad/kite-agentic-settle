@@ -7,6 +7,7 @@ type AAWallet @entity(immutable: false) {
   id: ID! # aaWalletAddress-chainId or similar
   address: Bytes!
   owner: User!
+  indexed: Boolean! # Whether dynamic ClientVault template is already created
   agents: [Agent!]! @derivedFrom(field: "aaWallet")
   sessions: [Session!]! @derivedFrom(field: "aaWallet")
   createdAt: BigInt!
@@ -33,6 +34,7 @@ type Agent @entity(immutable: false) {
 type Session @entity(immutable: false) {
   id: ID! # sessionKey address as hex
   sessionKey: Bytes!
+  sessionId: Bytes! # keccak256(abi.encodePacked(sessionKey, agentId, validUntil))
   user: User!
   agent: Agent!
   aaWallet: AAWallet # The AA wallet contract this session uses for payments
@@ -47,6 +49,17 @@ type Session @entity(immutable: false) {
   payments: [Payment!]! @derivedFrom(field: "session")
   channels: [Channel!]! @derivedFrom(field: "session")
   
+  createdAt: BigInt!
+  updatedAt: BigInt!
+}
+
+"""
+Lookup from on-chain sessionId (bytes32) to Session entity (id=sessionKey hex).
+Used by ClientVault TransferExecuted(sessionId, ...) dynamic mappings.
+"""
+type SessionIndex @entity(immutable: false) {
+  id: ID! # sessionId as hex
+  session: Session!
   createdAt: BigInt!
   updatedAt: BigInt!
 }

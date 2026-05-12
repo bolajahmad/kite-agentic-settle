@@ -1,4 +1,4 @@
-import { BigInt, Bytes } from "@graphprotocol/graph-ts";
+import { BigInt, Bytes, crypto } from "@graphprotocol/graph-ts";
 import {
   Registered as AgentRegisteredEvent,
   AgentWalletSet as AgentWalletSetEvent,
@@ -6,7 +6,37 @@ import {
   SessionRevoked as SessionRevokedEvent,
   URIUpdated as URIUpdatedEvent,
 } from "../generated/IdentityRegistry/IdentityRegistry";
-import { Agent, AAWallet, Session, User } from "../generated/schema";
+import { ClientVault as ClientVaultTemplate } from "../generated/templates";
+import {
+  Agent,
+  AAWallet,
+  Session,
+  SessionIndex,
+  User,
+} from "../generated/schema";
+
+function toBytes32(value: BigInt): Bytes {
+  let hex = value.toHexString().slice(2);
+  while (hex.length < 64) {
+    hex = "0" + hex;
+  }
+  return Bytes.fromHexString("0x" + hex) as Bytes;
+}
+
+function deriveSessionId(
+  sessionKey: Bytes,
+  agentId: BigInt,
+  validUntil: BigInt,
+): Bytes {
+  const packedHex =
+    "0x" +
+    sessionKey.toHexString().slice(2) +
+    toBytes32(agentId).toHexString().slice(2) +
+    toBytes32(validUntil).toHexString().slice(2);
+  return changetype<Bytes>(
+    crypto.keccak256(Bytes.fromHexString(packedHex) as Bytes),
+  );
+}
 
 /**
  * Handle agent NFT registration.
@@ -73,7 +103,13 @@ export function handleAgentWalletSet(event: AgentWalletSetEvent): void {
     aaWallet = new AAWallet(aaWalletId);
     aaWallet.address = event.params.walletContract;
     aaWallet.owner = event.params.user.toHex();
+    aaWallet.indexed = false;
     aaWallet.createdAt = event.block.timestamp;
+  }
+
+  if (!aaWallet.indexed) {
+    ClientVaultTemplate.create(event.params.walletContract);
+    aaWallet.indexed = true;
   }
   aaWallet.save();
 
@@ -132,13 +168,26 @@ export function handleSessionRegistered(event: SessionRegisteredEvent): void {
     aaWallet = new AAWallet(aaWalletId);
     aaWallet.address = event.params.walletContract;
     aaWallet.owner = userId;
+    aaWallet.indexed = false;
     aaWallet.createdAt = event.block.timestamp;
-    aaWallet.save();
   }
+
+  if (!aaWallet.indexed) {
+    ClientVaultTemplate.create(event.params.walletContract);
+    aaWallet.indexed = true;
+  }
+  aaWallet.save();
+
+  const sessionId = deriveSessionId(
+    Bytes.fromHexString(event.params.sessionKey.toHexString()) as Bytes,
+    event.params.agentId,
+    event.params.validUntil,
+  );
 
   // Create or update Session
   let session = new Session(sessionKeyHex);
   session.sessionKey = event.params.sessionKey;
+  session.sessionId = sessionId;
   session.user = userId;
   session.agent = agentId;
   session.aaWallet = aaWalletId;
@@ -153,6 +202,12 @@ export function handleSessionRegistered(event: SessionRegisteredEvent): void {
   session.createdAt = event.block.timestamp;
   session.updatedAt = event.block.timestamp;
   session.save();
+
+  let index = new SessionIndex(sessionId.toHexString());
+  index.session = session.id;
+  index.createdAt = event.block.timestamp;
+  index.updatedAt = event.block.timestamp;
+  index.save();
 }
 
 /**
@@ -170,6 +225,11 @@ export function handleSessionRevoked(event: SessionRevokedEvent): void {
     // Edge case: session not yet indexed (shouldn't happen with proper ordering)
     let newSession = new Session(sessionKeyHex);
     newSession.sessionKey = event.params.sessionKey;
+    newSession.sessionId = deriveSessionId(
+      Bytes.fromHexString(event.params.sessionKey.toHexString()) as Bytes,
+      event.params.agentId,
+      BigInt.zero(),
+    );
     newSession.agent = event.params.agentId.toHex();
     newSession.user = ""; // unknown at revocation time
     newSession.aaWallet = ""; // unknown at revocation time
