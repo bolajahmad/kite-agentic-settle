@@ -29,7 +29,8 @@ export async function callApi(args: string[]) {
     findFlag(args, "--session-key") ??
     findFlag(args, "--key");
 
-  const maxCalls = Number.parseInt(findFlag(args, "--max-calls") || "100", 10);
+  const maxCallsFlag = findFlag(args, "--max-calls");
+  const parsedMaxCalls = Number.parseInt(maxCallsFlag || "100", 10);
   const durationSecs = Number.parseInt(
     findFlag(args, "--duration") || "60",
     10,
@@ -46,6 +47,10 @@ export async function callApi(args: string[]) {
     | "batch"
     | "stream"
     | "auto";
+  const maxCalls =
+    mode === "stream" && !maxCallsFlag
+      ? Number.MAX_SAFE_INTEGER
+      : parsedMaxCalls;
 
   const token = await resolveTokenMetadata(
     tokenFlag ||
@@ -269,7 +274,7 @@ export async function callApi(args: string[]) {
         sessionKeyAddress: sessionKeyAddress as `0x${string}` | undefined,
         sessionRemainingSeconds,
         sessionRemainingCapacity,
-      });
+      }, channelIdFlag);
       return;
     }
 

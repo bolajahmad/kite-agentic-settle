@@ -13,18 +13,47 @@ import {
   type ChannelFlowOpts,
   type PayOffer,
 } from "./shared.js";
+import { ChannelStatus } from "../../../types.js";
 
 async function runChannelCallLoop(
   { client, url, token, decide, onPayment }: ChannelFlowOpts,
   channelId: `0x${string}`,
   offer: PayOffer,
-  shouldStop: () => boolean,
+  options: { maxCalls: number; streamDeadlineMs: number },
 ) {
   const ratePerCall = BigInt(offer.maxAmountRequired);
   let callCount = 0;
   let lastReceipt: ChannelCallReceipt | null = null;
 
-  while (!shouldStop()) {
+  while (true) {
+    if (callCount >= options.maxCalls) {
+      console.log(`  Reached max calls (${options.maxCalls}). Stopping stream.`);
+      break;
+    }
+
+    const nowMs = Date.now();
+    if (nowMs >= options.streamDeadlineMs) {
+      console.log("  Stream duration reached. Stopping stream.");
+      break;
+    }
+
+    const channel = await client.getContractService().getChannel(channelId);
+    if (
+      channel.status !== ChannelStatus.Open &&
+      channel.status !== ChannelStatus.Active
+    ) {
+      console.log(
+        `  Channel status is ${channel.status} (not open/active). Stopping stream.`,
+      );
+      break;
+    }
+
+    const nowSec = Math.floor(nowMs / 1000);
+    if (channel.expiresAt > 0 && nowSec >= channel.expiresAt) {
+      console.log("  Channel has reached on-chain expiry. Stopping stream.");
+      break;
+    }
+
     callCount++;
 
     if (decide === "cli") {
@@ -400,19 +429,19 @@ export async function runBatchApiCallsFlow(
   }
 }
 
-export async function runStreamCallsFlow(opts: ChannelFlowOpts) {
+export async function runStreamCallsFlow(
+  opts: ChannelFlowOpts,
+  existingChannelId?: `0x${string}`,
+) {
   const {
     client,
     url,
     token,
     durationSecs,
-    maxCalls,
     ratePerCallOverride,
     depositOverride,
   } = opts;
-  console.log(
-    `  Stream mode: ${durationSecs}s window, up to ${maxCalls} calls`,
-  );
+  console.log(`  Stream mode: single call using a time-bounded channel (${durationSecs}s).`);
   console.log("");
 
   const probeResult = await probeApi402Offer(url, token?.address);
@@ -425,13 +454,25 @@ export async function runStreamCallsFlow(opts: ChannelFlowOpts) {
     return;
   }
 
-  const { offer } = probeResult;
+  const { offer, raw } = probeResult;
+  const acceptsChannel =
+    raw?.channelOptions?.acceptsChannel === true ||
+    offer.scheme === "kite-programmable";
+  if (!acceptsChannel) {
+    throw new Error(
+      "Provider does not accept channel payments for this route. Use --mode perCall instead.",
+    );
+  }
+
   const maxPerCall =
     ratePerCallOverride ??
     (offer.maxRatePerCall
       ? BigInt(offer.maxRatePerCall)
       : BigInt(offer.maxAmountRequired));
-  const requestedDeposit = depositOverride ?? maxPerCall * BigInt(maxCalls);
+  const recommendedDeposit = raw?.channelOptions?.recommendedDeposit
+    ? BigInt(raw.channelOptions.recommendedDeposit)
+    : maxPerCall * 10n;
+  const requestedDeposit = depositOverride ?? recommendedDeposit;
   const constrained = clampChannelOpenToSession(
     durationSecs,
     requestedDeposit,
@@ -453,84 +494,179 @@ export async function runStreamCallsFlow(opts: ChannelFlowOpts) {
       `  (probe price was ${formatUnits(BigInt(offer.maxAmountRequired), token?.decimals || 18)} — overridden)`,
     );
   }
-  console.log(`  Stream:        ${durationSecs}s`);
-  console.log(`  Max calls:     ${maxCalls}`);
+  console.log(`  Stream:        ${effectiveDurationSecs}s`);
   console.log(
     `  Deposit:       ${formatUnits(deposit, token?.decimals || 18)} ${token?.symbol}`,
   );
   console.log("");
 
-  if (!walletContract || !opts.sessionKeyAddress) {
-    throw new Error(
-      "sessionKeyAddress and walletContract are required to open a channel.",
-    );
-  }
+  let channelId: `0x${string}`;
 
-  console.log("  Opening payment channel on-chain (via ClientVault batch)...");
-  const { txHash: openTxHash, channelId: rawChannelId } =
-    await client.getContractService().openChannelViaVaultBatch(
-      opts.sessionKeyAddress,
-      walletContract,
-      offer.payTo,
-      offer.asset,
-      0, // prepaid mode
-      deposit,
-      deposit, // maxSpend == deposit
-      effectiveDurationSecs,
-      maxPerCall,
-    );
-  if (!rawChannelId) {
-    throw new Error("openChannelViaVaultBatch did not return a channelId — check ChannelOpened event");
-  }
-  const channelId: `0x${string}` = rawChannelId;
-  console.log(`  Channel ID:   ${channelId}`);
-  console.log(`  Open tx:      ${openTxHash}`);
+  if (existingChannelId) {
+    channelId = existingChannelId;
+    const existing = await client.getContractService().getChannel(channelId);
+    if (existing.provider.toLowerCase() !== offer.payTo.toLowerCase()) {
+      throw new Error(
+        `Provided channel ${channelId} belongs to provider ${existing.provider}, expected ${offer.payTo}. Stream calls must reuse a channel for the same provider.`,
+      );
+    }
+    if (
+      existing.status !== ChannelStatus.Open &&
+      existing.status !== ChannelStatus.Active
+    ) {
+      throw new Error(
+        `Provided channel ${channelId} is not open/active (status=${existing.status}).`,
+      );
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (existing.expiresAt <= nowSec) {
+      throw new Error(
+        `Provided channel ${channelId} is expired at ${existing.expiresAt}. Open a new stream channel.`,
+      );
+    }
 
-  if (opts.agentIndex !== undefined && opts.eoaAddress) {
-    createChannelRecord({
-      channelId,
-      provider: offer.payTo,
-      token: offer.asset,
-      openUrl: url,
-      agentAddress: opts.eoaAddress,
-      agentIndex: opts.agentIndex,
-      maxPerCall: maxPerCall.toString(),
-      deposit: deposit.toString(),
-      maxSpend: deposit.toString(),
-      durationSecs: effectiveDurationSecs,
-      openedAt: Date.now(),
-      openTxHash,
-      providerMaxRatePerCall: offer.maxRatePerCall,
-    });
-    console.log(
-      `  Saved local channel state: ~/.kite-agent-pay/channels/${channelId}.json`,
-    );
+    console.log(`  Reusing channel: ${channelId}`);
+    console.log(`  Expires at:      ${existing.expiresAt} (unix)`);
+    console.log("");
+  } else {
+    if (!walletContract || !opts.sessionKeyAddress) {
+      throw new Error(
+        "sessionKeyAddress and walletContract are required to open a channel.",
+      );
+    }
+
+    console.log("  Opening payment channel on-chain (via ClientVault batch)...");
+    const { txHash: openTxHash, channelId: rawChannelId } =
+      await client.getContractService().openChannelViaVaultBatch(
+        opts.sessionKeyAddress,
+        walletContract,
+        offer.payTo,
+        offer.asset,
+        0, // prepaid mode
+        deposit,
+        deposit, // maxSpend == deposit
+        effectiveDurationSecs,
+        maxPerCall,
+      );
+    if (!rawChannelId) {
+      throw new Error("openChannelViaVaultBatch did not return a channelId — check ChannelOpened event");
+    }
+    channelId = rawChannelId;
+    console.log(`  Channel ID:   ${channelId}`);
+    console.log(`  Open tx:      ${openTxHash}`);
+
+    if (opts.agentIndex !== undefined && opts.eoaAddress) {
+      createChannelRecord({
+        channelId,
+        provider: offer.payTo,
+        token: offer.asset,
+        openUrl: url,
+        agentAddress: opts.eoaAddress,
+        agentIndex: opts.agentIndex,
+        maxPerCall: maxPerCall.toString(),
+        deposit: deposit.toString(),
+        maxSpend: deposit.toString(),
+        durationSecs: effectiveDurationSecs,
+        openedAt: Date.now(),
+        openTxHash,
+        providerMaxRatePerCall: offer.maxRatePerCall,
+      });
+      console.log(
+        `  Saved local channel state: ~/.kite-agent-pay/channels/${channelId}.json`,
+      );
+    }
+
+    console.log("  Waiting for provider to activate the channel (up to 90 s)...");
+    const activated = await waitForChannelActive(client, channelId);
+    if (activated) {
+      console.log("  Channel is Active.");
+    } else {
+      console.log("  Provider did not activate in time. Proceeding anyway.");
+    }
+    console.log("");
   }
 
   client.setChannelForProvider(offer.payTo, channelId);
-  console.log(`  Interceptor notified of channel.`);
-  console.log("");
 
-  console.log("  Waiting for provider to activate the channel (up to 90 s)...");
-  const activated = await waitForChannelActive(client, channelId);
-  if (activated) {
-    console.log("  Channel is Active.");
-  } else {
-    console.log("  Provider did not activate in time. Proceeding anyway.");
+  const latest = await client.getContractService().getChannel(channelId);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (latest.expiresAt <= nowSec) {
+    throw new Error(`Channel ${channelId} has expired. Open a new stream channel.`);
   }
+  if (
+    latest.status !== ChannelStatus.Open &&
+    latest.status !== ChannelStatus.Active
+  ) {
+    throw new Error(
+      `Channel ${channelId} is not open for calls (status=${latest.status}).`,
+    );
+  }
+
+  console.log("  Making API call via stream channel...");
+  const headers = buildChannelHeaders(channelId, null);
+  const t0 = Date.now();
+  const response = await client.fetch(url, { headers });
+  const elapsed = Date.now() - t0;
+
+  if (response.status === 402) {
+    const errBody = await response.text();
+    let errDetail = errBody;
+    try {
+      errDetail = JSON.stringify(JSON.parse(errBody));
+    } catch {}
+    throw new Error(`Channel rejected by provider: ${errDetail}`);
+  }
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`API call failed: ${response.status} — ${errText}`);
+  }
+
+  const body = (await response.json()) as any;
+  console.log(`  Status:  ${response.status} OK  (${elapsed}ms)`);
+  console.log(`  Data:    ${JSON.stringify(body.data ?? body, null, 2)}`);
+
+  const received = extractChannelReceipt(body, response.headers);
+  if (received) {
+    if (received.channelId.toLowerCase() !== channelId.toLowerCase()) {
+      console.log(
+        `  Warning: receipt channelId mismatch — got ${received.channelId}`,
+      );
+    } else {
+      const valid = await validateChannelReceipt(received, offer.payTo);
+      if (valid) {
+        opts.onPayment({
+          success: true,
+          method: "channel",
+          amount: maxPerCall,
+          receipt: {
+            requestHash: "",
+            responseHash: "",
+            callCost: maxPerCall,
+            cumulativeCost: BigInt(received.cumulativeCost),
+            nonce: received.sequenceNumber,
+            timestamp: received.timestamp,
+            sessionId: channelId,
+            provider: offer.payTo,
+            consumer: client.address,
+            signature: received.providerSignature,
+          },
+        });
+      } else {
+        console.log("  Warning: receipt signature is invalid.");
+      }
+    }
+  } else {
+    console.log(
+      "  Warning: provider did not return a channel receipt for this call.",
+    );
+  }
+
   console.log("");
-
-  const streamDeadline = Date.now() + effectiveDurationSecs * 1000;
-  let callsMade = 0;
-  const { callCount, lastReceipt } = await runChannelCallLoop(
-    opts,
-    channelId,
-    offer,
-    () => {
-      callsMade++;
-      return Date.now() >= streamDeadline || callsMade > maxCalls;
-    },
-  );
-
-  await finalizeChannelFlow(client, channelId, callCount, lastReceipt);
+  console.log("── Stream Channel ──────────────────────────────────────");
+  console.log(`  Channel:     ${channelId}`);
+  console.log("  Status:      call complete; channel left open.");
+  console.log(`  Reuse call:  npx kite call --url <URL> --mode stream --channel ${channelId} --agent ${opts.agentIndex ?? "<agent>"} --session ${opts.sessionKeyAddress ?? "<session>"}`);
+  console.log("  Note:        Calls will fail once this channel duration expires.");
+  console.log("────────────────────────────────────────────────────────");
 }
