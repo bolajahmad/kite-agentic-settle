@@ -8,9 +8,9 @@ export const KITE_TESTNET: KiteConfig = {
   networkName: "kite_testnet",
   bundlerUrl: "https://bundler-service.staging.gokite.ai/rpc/",
   contracts: {
-    attestationRegistry: "0x5a9BE0D79F5ed3906f6Dcc0E5679D318AC85e61f",
-    identityRegistry: "0x986A171fd6CE1Dc89d104E2b2a424Df9d4ef7524",
-    paymentChannel: "0xa00dDA4C326e045aF948cc1dD45A464c09db3Af8",
+    attestationRegistry: "0x2F72b719679FD0b92712D03a1E16909F18d55660",
+    identityRegistry: "0xE4C30627C02791bF12241021f2fC320b43991cb1",
+    paymentChannel: "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb",
   },
   token: "0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489",
 };

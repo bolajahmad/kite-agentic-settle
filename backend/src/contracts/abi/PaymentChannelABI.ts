@@ -744,6 +744,11 @@ export const PaymentChannelABI = [
         type: "bytes32",
       },
       {
+        internalType: "address",
+        name: "sessionKey",
+        type: "address",
+      },
+      {
         internalType: "uint256",
         name: "sequenceNumber",
         type: "uint256",
@@ -819,6 +824,11 @@ export const PaymentChannelABI = [
   },
   {
     inputs: [
+      {
+        internalType: "address",
+        name: "sessionKey",
+        type: "address",
+      },
       {
         internalType: "address",
         name: "provider",

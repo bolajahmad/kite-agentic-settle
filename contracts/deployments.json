@@ -1,8 +1,8 @@
 {
   "kiteTestnet": {
-    "IdentityRegistry": "0x986A171fd6CE1Dc89d104E2b2a424Df9d4ef7524",
-    "PaymentChannel": "0xa00dDA4C326e045aF948cc1dD45A464c09db3Af8",
-    "AttestationRegistry": "0x5a9BE0D79F5ed3906f6Dcc0E5679D318AC85e61f"
+    "IdentityRegistry": "0xE4C30627C02791bF12241021f2fC320b43991cb1",
+    "PaymentChannel": "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb",
+    "AttestationRegistry": "0x2F72b719679FD0b92712D03a1E16909F18d55660"
   },
   "usdt": {
     "address": "0x43408C22242fa6A59DE28ab7128Ea4aC121C5569"

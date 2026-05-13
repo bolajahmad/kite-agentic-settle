@@ -8,7 +8,7 @@ dataSources:
     name: IdentityRegistry
     network: kite-ai-testnet
     source:
-      address: "0x986A171fd6CE1Dc89d104E2b2a424Df9d4ef7524"
+      address: "0xE4C30627C02791bF12241021f2fC320b43991cb1"
       abi: IdentityRegistry
       startBlock: 21096127
     mapping:
@@ -40,7 +40,7 @@ dataSources:
     name: PaymentChannel
     network: kite-ai-testnet
     source:
-      address: "0xa00dDA4C326e045aF948cc1dD45A464c09db3Af8"
+      address: "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb"
       abi: PaymentChannel
       startBlock: 21096127
     mapping:
@@ -73,7 +73,7 @@ dataSources:
     name: AttestationRegistry
     network: kite-ai-testnet
     source:
-      address: "0x95b4e0e5A4F7d10F77f5FB4C1E9Ea3a5e0e5C5C1" # Updated with actual address when deployed
+      address: "0x2F72b719679FD0b92712D03a1E16909F18d55660"
       abi: AttestationRegistry
       startBlock: 21096127
     mapping:
@@ -125,4 +125,3 @@ templates:
         - event: TransferExecuted(indexed bytes32,indexed address,indexed address,uint256,bytes32,bytes)
           handler: handleTransferExecuted
       file: ./src/client-vault.ts
-

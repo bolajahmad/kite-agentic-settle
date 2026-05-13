@@ -199,6 +199,7 @@ contract PaymentChannel is ReentrancyGuard {
       * @param walletContract The AA wallet where msg.sender is a registered session key
      */
     function openChannel(
+        address sessionKey,
         address provider,
         address token,
         PaymentMode mode,
@@ -208,8 +209,13 @@ contract PaymentChannel is ReentrancyGuard {
         uint256 maxPerCall,
         address walletContract
     ) external nonReentrant returns (bytes32 channelId) {
+        require(sessionKey != address(0), "Invalid session key");
         require(
-            provider != address(0) && provider != msg.sender,
+            msg.sender == sessionKey || msg.sender == walletContract,
+            "Caller must be session key or wallet"
+        );
+        require(
+            provider != address(0) && provider != sessionKey,
             "Invalid provider"
         );
         require(token != address(0), "Invalid token");
@@ -225,7 +231,7 @@ contract PaymentChannel is ReentrancyGuard {
             address user,
             address sessionWallet,
             uint256 validUntil
-        ) = registry.validateSession(msg.sender);
+        ) = registry.validateSession(sessionKey);
 
         require(active, "Session key is not active");
         require(block.timestamp <= validUntil, "Session key expired");
@@ -233,8 +239,14 @@ contract PaymentChannel is ReentrancyGuard {
             sessionWallet == walletContract,
             "Session not registered to this wallet"
         );
+        if (msg.sender == walletContract) {
+            require(
+                sessionWallet == msg.sender,
+                "Wallet caller does not match session wallet"
+            );
+        }
         bytes32 sessionId = keccak256(
-            abi.encodePacked(msg.sender, agentId, validUntil)
+            abi.encodePacked(sessionKey, agentId, validUntil)
         );
         bytes32 hashedProvider = keccak256(abi.encodePacked(provider));
         require(
@@ -266,7 +278,7 @@ contract PaymentChannel is ReentrancyGuard {
         totalChannels++;
         channelId = keccak256(
             abi.encodePacked(
-                msg.sender,
+                sessionKey,
                 provider,
                 token,
                 totalChannels,
@@ -276,7 +288,7 @@ contract PaymentChannel is ReentrancyGuard {
 
         channels[channelId] = Channel({
             channelId: channelId,
-            consumer: msg.sender,
+            consumer: sessionKey,
             user: user,
             walletContract: walletContract,
             provider: provider,
@@ -300,7 +312,7 @@ contract PaymentChannel is ReentrancyGuard {
 
         emit ChannelOpened(
             channelId,
-            msg.sender,
+            sessionKey,
             provider,
             token,
             mode,
@@ -335,18 +347,60 @@ contract PaymentChannel is ReentrancyGuard {
      */
     function initiateSettlement(
         bytes32 channelId,
+        address sessionKey,
         uint256 sequenceNumber,
         uint256 cumulativeCost,
         uint256 timestamp,
         bytes calldata providerSignature,
         bytes32 merkleRoot
-    ) external nonReentrant onlyChannelParty(channelId) {
+    ) external nonReentrant {
         Channel storage ch = channels[channelId];
         require(
             ch.status == ChannelStatus.Active ||
                 ch.status == ChannelStatus.Open,
             "Channel not settleable"
         );
+
+        // Provider can always initiate. Consumer-side initiation can be sent
+        // directly by sessionKey or gas-sponsored via the registered wallet.
+        if (msg.sender != ch.provider) {
+            address effectiveSessionKey = sessionKey;
+
+            if (msg.sender == ch.consumer) {
+                effectiveSessionKey = ch.consumer;
+            } else {
+                require(msg.sender == ch.walletContract, "Not a channel party");
+                require(effectiveSessionKey != address(0), "Session key required");
+            }
+
+            require(
+                effectiveSessionKey == ch.consumer,
+                "Session key mismatch for channel"
+            );
+
+            IIdentityRegistry registry = IIdentityRegistry(identityRegistry);
+            (
+                bool active,
+                ,
+                ,
+                address sessionWallet,
+                uint256 validUntil
+            ) = registry.validateSession(effectiveSessionKey);
+
+            require(active, "Session key is not active");
+            require(block.timestamp <= validUntil, "Session key expired");
+            require(
+                sessionWallet == ch.walletContract,
+                "Session not registered to this wallet"
+            );
+
+            if (msg.sender == ch.walletContract) {
+                require(
+                    sessionWallet == msg.sender,
+                    "Wallet caller does not match session wallet"
+                );
+            }
+        }
 
         if (cumulativeCost > 0 || sequenceNumber > 0) {
             _verifyReceipt(

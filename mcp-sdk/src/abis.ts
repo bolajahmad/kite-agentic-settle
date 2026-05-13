@@ -85,7 +85,7 @@ export const clientAgentVaultAbi = parseAbi([
   // ── Session queries ────────────────────────────────────────────────────────
   "function sessionExists(bytes32 sessionId) external view returns (bool)",
   "function getSessionAgent(bytes32 sessionId) external view returns (address)",
-  "function getSpendingRules(bytes32 sessionId) external view returns ((uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders, uint128 amountUsed, uint128 currentTimeWindowStartTime)[])",
+  "function getSpendingRules(bytes32 sessionId) external view returns (((uint256 timeWindow, uint160 budget, uint96 initialWindowStartTime, bytes32[] targetProviders) rule, (uint128 amountUsed, uint128 currentTimeWindowStartTime) usage)[])",
   "function checkSpendingRules(bytes32 sessionId, uint256 normalizedAmount, bytes32 serviceProvider) external view returns (bool)",
   "function getUsage(bytes32 sessionId, uint256 index) external view returns (uint256)",
 
@@ -162,9 +162,9 @@ export const clientAgentVaultAbi = parseAbi([
 // ── PaymentChannel ABI ────────────────────────────────────────────
 
 export const paymentChannelAbi = parseAbi([
-  "function openChannel(address provider, address token, uint8 mode, uint256 deposit, uint256 maxSpend, uint256 maxDuration, uint256 maxPerCall, address walletContract) external returns (bytes32)",
+  "function openChannel(address sessionKey, address provider, address token, uint8 mode, uint256 deposit, uint256 maxSpend, uint256 maxDuration, uint256 maxPerCall, address walletContract) external returns (bytes32)",
   "function activateChannel(bytes32 channelId) external",
-  "function initiateSettlement(bytes32 channelId, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp, bytes providerSignature, bytes32 merkleRoot) external",
+  "function initiateSettlement(bytes32 channelId, address sessionKey, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp, bytes providerSignature, bytes32 merkleRoot) external",
   "function submitReceipt(bytes32 channelId, uint256 sequenceNumber, uint256 cumulativeCost, uint256 timestamp, bytes providerSignature) external",
   "function approveSettlement(bytes32 channelId) external",
   "function finalize(bytes32 channelId, bytes32 merkleRoot) external",

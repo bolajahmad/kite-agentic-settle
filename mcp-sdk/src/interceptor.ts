@@ -244,12 +244,12 @@ export class PaymentInterceptor {
     const amount = BigInt(offer.maxAmountRequired);
     const sessionKey = opts?.sessionKey || this.defaultOptions.sessionKey;
 
-    // x402 programmable settlement requires a KiteAAWallet session key.
+    // x402 programmable settlement requires a ClientVault session key.
     // The interceptor must be initialised with the session key's private key;
     // this.signerAddress is the session key address.
     if (!sessionKey) {
       throw new Error(
-        "x402 perCall payment requires a KiteAAWallet session key. " +
+        "x402 perCall payment requires a ClientVault session key. " +
           "Initialise PaymentInterceptor with the session key's private key and " +
           "pass sessionKey in InterceptorOptions.",
       );

@@ -154,8 +154,30 @@ export function formatReceipt(
   return lines.join("\n");
 }
 
+function selectOffer(
+  offers: PayOffer[],
+  preferredAsset?: string,
+): PayOffer {
+  const normalizedPreferredAsset = preferredAsset?.toLowerCase();
+
+  const scopedOffers = normalizedPreferredAsset
+    ? offers.filter(
+        (offer) => offer.asset.toLowerCase() === normalizedPreferredAsset,
+      )
+    : offers;
+
+  return [...scopedOffers].sort((a, b) => {
+    const aAmount = BigInt(a.maxAmountRequired);
+    const bAmount = BigInt(b.maxAmountRequired);
+    if (aAmount < bAmount) return -1;
+    if (aAmount > bAmount) return 1;
+    return 0;
+  })[0] ?? offers[0];
+}
+
 export async function probeApi402Offer(
   url: string,
+  preferredAsset?: string,
 ): Promise<null | { offer: PayOffer; raw: any }> {
   const probe = await globalThis.fetch(url);
   if (probe.status !== 402) return null;
@@ -173,17 +195,10 @@ export async function probeApi402Offer(
     throw new Error("402 response is missing accepts[]");
   }
 
-  const preferredAsset = process.env.SETTLEMENT_TOKEN_ADDRESS?.toLowerCase();
-  const offer = preferredAsset
-    ? offers.find((candidate) => candidate.asset.toLowerCase() === preferredAsset) ??
-      offers[0]
-    : [...offers].sort((a, b) => {
-        const aAmount = BigInt(a.maxAmountRequired);
-        const bAmount = BigInt(b.maxAmountRequired);
-        if (aAmount < bAmount) return -1;
-        if (aAmount > bAmount) return 1;
-        return 0;
-      })[0];
+  const offer = selectOffer(
+    offers,
+    preferredAsset ?? process.env.SETTLEMENT_TOKEN_ADDRESS,
+  );
 
   return { offer, raw: parsed };
 }

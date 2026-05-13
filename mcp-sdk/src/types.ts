@@ -103,9 +103,9 @@ export interface PaymentResult {
   txHash?: string;
   /**
    * Base64-encoded x402 programmable-settlement payload.
-   * Present for perCall payments made via KiteAAWallet session key.
-   * The facilitator (provider backend) decodes this and calls
-   * KiteAAWallet.executePaymentBySig(...) to settle on-chain.
+    * Present for perCall payments made via ClientVault session key.
+    * The facilitator (provider backend) decodes this and submits the
+    * authorization to the vault-backed settlement path on-chain.
    */
   x402Payload?: string;
   receipt?: Receipt;

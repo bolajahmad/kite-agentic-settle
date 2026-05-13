@@ -1,13 +1,15 @@
 import { formatUnits, parseUnits } from "viem";
+import {
+  DecisionMode,
+  SessionRules,
+  decide as decideCall,
+} from "../../../decide.js";
+import { getSessionsByAgent } from "../../../indexer.js";
 import { KiteSettleClient } from "../../../kite-settle-client.js";
 import { PaymentRequest, PaymentResult } from "../../../types.js";
-import {
-  prompt,
-  resolveTokenMetadata,
-} from "../../../utils/index.js";
+import { prompt, resolveTokenMetadata } from "../../../utils/index.js";
+import { deriveSessionId } from "../../../utils/session-id.js";
 import { getVar } from "../../../vars.js";
-import { DecisionMode, SessionRules, decide as decideCall } from "../../../decide.js";
-import { getSessionsByAgent } from "../../../indexer.js";
 import { findFlag } from "../../index.js";
 import { runBatchApiCallsFlow, runStreamCallsFlow } from "./channel-flow.js";
 import { formatReceipt, promptForPayment } from "./shared.js";
@@ -28,7 +30,10 @@ export async function callApi(args: string[]) {
     findFlag(args, "--key");
 
   const maxCalls = Number.parseInt(findFlag(args, "--max-calls") || "100", 10);
-  const durationSecs = Number.parseInt(findFlag(args, "--duration") || "60", 10);
+  const durationSecs = Number.parseInt(
+    findFlag(args, "--duration") || "60",
+    10,
+  );
   const ratePerCallFlag = findFlag(args, "--rate-per-call");
   const depositFlag = findFlag(args, "--deposit");
   const channelIdFlag = findFlag(args, "--channel") as
@@ -134,7 +139,8 @@ export async function callApi(args: string[]) {
     const selectedSession = sessionKeyAddress
       ? indexedSessions.find(
           (session) =>
-            session.sessionKey.toLowerCase() === sessionKeyAddress.toLowerCase(),
+            session.sessionKey.toLowerCase() ===
+            sessionKeyAddress.toLowerCase(),
         )
       : indexedSessions[0];
 
@@ -147,17 +153,51 @@ export async function callApi(args: string[]) {
           "No session key is attached to this client. Use --agent and --session.",
         );
       }
-      const contract = settle.getPaymentClient().getContractService();
-      const [active, , , , , maxValueAllowed, validUntil] =
-        (await contract.validateSession(sessionKeyAddress)) as any;
-      if (!active) {
-        throw new Error(`Session ${sessionKeyAddress} is not active.`);
+      if (!selectedSession) {
+        throw new Error(
+          "Session not found in indexer. Cannot determine session budget.",
+        );
       }
+
+      const contract = settle.getPaymentClient().getContractService();
+
+      // Compute sessionId from session data
+      const agentIdBigint = BigInt(selectedSession.agent.agentId);
+      const validUntilBigint = BigInt(selectedSession.validUntil);
+      const sessionId = deriveSessionId(
+        sessionKeyAddress as `0x${string}`,
+        agentIdBigint,
+        validUntilBigint,
+      );
+
+      // Resolve the ClientVault wallet contract for this session
+      const walletContract =
+        await contract.resolveWalletContractForSession(sessionKeyAddress);
+      if (!walletContract) {
+        throw new Error(
+          `Unable to resolve ClientVault wallet contract for session ${sessionKeyAddress}`,
+        );
+      }
+
+      // Fetch spending rules from ClientVault
+      const spendingRules = await contract.getVaultSpendingRules(
+        walletContract,
+        sessionId,
+      );
+      if (!spendingRules || spendingRules.length === 0) {
+        throw new Error(
+          `No spending rules found for session ${sessionKeyAddress}`,
+        );
+      }
+
+      const currentRules = spendingRules[0];
+      const budget = currentRules.rule.budget;
+      const spent = currentRules.usage.amountUsed;
+
+      sessionRemainingCapacity = budget > spent ? budget - spent : 0n;
+
       const nowSec = Math.floor(Date.now() / 1000);
-      sessionRemainingSeconds = Math.max(0, Number(validUntil) - nowSec);
-      const spent = await contract.getSessionSpent(sessionKeyAddress);
-      sessionRemainingCapacity =
-        maxValueAllowed > spent ? maxValueAllowed - spent : 0n;
+      sessionRemainingSeconds = Math.max(0, Number(validUntilBigint) - nowSec);
     }
 
     const defaultRule: SessionRules = selectedSession

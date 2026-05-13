@@ -45,6 +45,7 @@ describe("PaymentChannel", function () {
     const maxDur   = opts.maxDur  ?? HOUR;
     const perCall  = opts.perCall ?? PER_CALL;
     return channel.connect(sessionKey).openChannel(
+      sessionKey.address,
       providerSigner.address,
       await token.getAddress(),
       mode,
@@ -199,7 +200,7 @@ describe("PaymentChannel", function () {
 
     it("consumer can initiate settlement with zero claim", async function () {
       await expect(channel.connect(sessionKey).initiateSettlement(
-        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+        channelId, sessionKey.address, 0, 0, 0, "0x", ethers.ZeroHash
       )).to.emit(channel, "SettlementInitiated");
     });
 
@@ -210,7 +211,7 @@ describe("PaymentChannel", function () {
       const sig  = await signReceipt(channelId, seq, cost, ts, providerSigner);
 
       await channel.connect(sessionKey).initiateSettlement(
-        channelId, seq, cost, ts, sig, ethers.ZeroHash
+        channelId, sessionKey.address, seq, cost, ts, sig, ethers.ZeroHash
       );
 
       await time.increase(3601); // past challenge window
@@ -231,7 +232,7 @@ describe("PaymentChannel", function () {
     it("submitReceipt upgrades highest claim", async function () {
       // Start with zero claim
       await channel.connect(sessionKey).initiateSettlement(
-        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+        channelId, sessionKey.address, 0, 0, 0, "0x", ethers.ZeroHash
       );
 
       const seq  = 2n;
@@ -249,7 +250,7 @@ describe("PaymentChannel", function () {
 
     it("reverts finalize before challenge window closes", async function () {
       await channel.connect(sessionKey).initiateSettlement(
-        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+        channelId, sessionKey.address, 0, 0, 0, "0x", ethers.ZeroHash
       );
       await expect(channel.finalize(channelId, ethers.ZeroHash))
         .to.be.revertedWith("Challenge window still open");

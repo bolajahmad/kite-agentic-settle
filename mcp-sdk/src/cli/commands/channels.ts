@@ -315,8 +315,29 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
     throw new Error("Cannot parse 402 response body.");
   }
 
-  const offer = parsed.accepts?.[0];
-  if (!offer) throw new Error("402 response is missing accepts[]");
+  const offers = parsed.accepts as Array<{
+    payTo: `0x${string}`;
+    asset: `0x${string}`;
+    maxAmountRequired: string;
+    maxRatePerCall?: string;
+    scheme: string;
+    description?: string;
+    merchantName?: string;
+    resource?: string;
+  }> | undefined;
+  if (!offers || offers.length === 0) throw new Error("402 response is missing accepts[]");
+
+  const preferredAsset = token?.address.toLowerCase();
+  const scopedOffers = preferredAsset
+    ? offers.filter((candidate) => candidate.asset.toLowerCase() === preferredAsset)
+    : offers;
+  const offer = [...scopedOffers].sort((a, b) => {
+    const aAmount = BigInt(a.maxAmountRequired);
+    const bAmount = BigInt(b.maxAmountRequired);
+    if (aAmount < bAmount) return -1;
+    if (aAmount > bAmount) return 1;
+    return 0;
+  })[0] ?? offers[0];
 
   // Provider may declare maxRatePerCall in the 402 offer (the highest
   // per-call price any of their endpoints can charge). Use that as the

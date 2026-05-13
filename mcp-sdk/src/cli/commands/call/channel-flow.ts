@@ -9,9 +9,9 @@ import {
 } from "../../../utils/channel-helpers.js";
 import {
   clampChannelOpenToSession,
+  probeApi402Offer,
   type ChannelFlowOpts,
   type PayOffer,
-  probeApi402Offer,
 } from "./shared.js";
 
 async function runChannelCallLoop(
@@ -58,7 +58,9 @@ async function runChannelCallLoop(
 
     if (!response.ok) {
       const errText = await response.text();
-      console.log(`  Call #${callCount} failed: ${response.status} — ${errText}`);
+      console.log(
+        `  Call #${callCount} failed: ${response.status} — ${errText}`,
+      );
       break;
     }
 
@@ -138,6 +140,25 @@ async function settleChannelWithReceipt(
     );
 }
 
+async function resolveChannelWalletContract(
+  client: ChannelFlowOpts["client"],
+  sessionKeyAddress?: `0x${string}`,
+): Promise<`0x${string}` | undefined> {
+  if (!sessionKeyAddress) return undefined;
+
+  const walletContract = await client
+    .getContractService()
+    .resolveWalletContractForSession(sessionKeyAddress);
+
+  if (!walletContract) {
+    throw new Error(
+      `Unable to resolve ClientVault wallet contract for session ${sessionKeyAddress}`,
+    );
+  }
+
+  return walletContract;
+}
+
 async function finalizeChannelFlow(
   client: ChannelFlowOpts["client"],
   channelId: `0x${string}`,
@@ -172,7 +193,7 @@ export async function runBatchApiCallsFlow(
 ) {
   const { client, url, token, ratePerCallOverride, depositOverride } = opts;
 
-  const probeResult = await probeApi402Offer(url);
+  const probeResult = await probeApi402Offer(url, token?.address);
   if (!probeResult) {
     console.log("  No payment required — making a direct call.");
     const r = await globalThis.fetch(url);
@@ -198,6 +219,10 @@ export async function runBatchApiCallsFlow(
     (offer.maxRatePerCall
       ? BigInt(offer.maxRatePerCall)
       : BigInt(offer.maxAmountRequired));
+  const walletContract = await resolveChannelWalletContract(
+    client,
+    opts.sessionKeyAddress,
+  );
 
   console.log(`  Provider:         ${offer.payTo}`);
   console.log(
@@ -216,7 +241,8 @@ export async function runBatchApiCallsFlow(
       ? BigInt(raw.channelOptions.recommendedDeposit)
       : maxPerCall * 10n;
     const requestedDeposit = depositOverride ?? recommendedDeposit;
-    const requestedMaxDuration: number = raw?.channelOptions?.maxDuration ?? 3600;
+    const requestedMaxDuration: number =
+      raw?.channelOptions?.maxDuration ?? 3600;
     const constrained = clampChannelOpenToSession(
       requestedMaxDuration,
       requestedDeposit,
@@ -230,17 +256,28 @@ export async function runBatchApiCallsFlow(
     );
     console.log("");
 
-    console.log("  Opening payment channel on-chain...");
+    if (!walletContract || !opts.sessionKeyAddress) {
+      throw new Error(
+        "sessionKeyAddress and walletContract are required to open a channel.",
+      );
+    }
+
+    console.log("  Opening payment channel on-chain (via ClientVault batch)...");
     const { txHash: openTxHash, channelId: newChannelId } =
-      await client.openChannel({
-        provider: offer.payTo,
-        token: offer.asset,
-        mode: "prepaid",
+      await client.getContractService().openChannelViaVaultBatch(
+        opts.sessionKeyAddress,
+        walletContract,
+        offer.payTo,
+        offer.asset,
+        0, // prepaid mode
         deposit,
-        maxSpend: deposit,
+        deposit, // maxSpend == deposit
         maxDuration,
         maxPerCall,
-      });
+      );
+    if (!newChannelId) {
+      throw new Error("openChannelViaVaultBatch did not return a channelId — check ChannelOpened event");
+    }
     channelId = newChannelId;
     console.log(`  Channel ID:   ${channelId}`);
     console.log(`  Open tx:      ${openTxHash}`);
@@ -273,7 +310,9 @@ export async function runBatchApiCallsFlow(
     if (activated) {
       console.log("  Channel is Active.");
     } else {
-      console.log("  Provider did not activate within 90 s. Proceeding anyway.");
+      console.log(
+        "  Provider did not activate within 90 s. Proceeding anyway.",
+      );
     }
     console.log("");
   }
@@ -305,7 +344,9 @@ export async function runBatchApiCallsFlow(
   const received = extractChannelReceipt(body, response.headers);
   if (received) {
     if (received.channelId.toLowerCase() !== channelId.toLowerCase()) {
-      console.log(`  Warning: receipt channelId mismatch — got ${received.channelId}`);
+      console.log(
+        `  Warning: receipt channelId mismatch — got ${received.channelId}`,
+      );
     } else {
       const valid = await validateChannelReceipt(received, offer.payTo);
       if (valid) {
@@ -327,25 +368,35 @@ export async function runBatchApiCallsFlow(
           },
         });
         console.log("");
-        console.log("── Channel Receipt ──────────────────────────────────────");
+        console.log(
+          "── Channel Receipt ──────────────────────────────────────",
+        );
         console.log(`  Channel:     ${channelId}`);
         console.log(`  Sequence:    ${received.sequenceNumber}`);
         console.log(
           `  Spent:       ${formatUnits(BigInt(received.cumulativeCost), token?.decimals || 18)} ${token?.symbol} cumulative`,
         );
         console.log(`  Sig:         ${received.providerSignature}`);
-        console.log("─────────────────────────────────────────────────────────");
+        console.log(
+          "─────────────────────────────────────────────────────────",
+        );
         console.log(`  Channel is open — reuse it for the next call:`);
-        console.log(`    npx kite call --url <URL> --mode batch --channel ${channelId}`);
+        console.log(
+          `    npx kite call --url <URL> --mode batch --channel ${channelId}`,
+        );
         console.log(`  To settle and close the channel:`);
         console.log(`    npx kite finalize --channel ${channelId}`);
-        console.log("─────────────────────────────────────────────────────────");
+        console.log(
+          "─────────────────────────────────────────────────────────",
+        );
       } else {
         console.log("  Warning: receipt signature is invalid.");
       }
     }
   } else {
-    console.log("  Warning: provider did not return a channel receipt for this call.");
+    console.log(
+      "  Warning: provider did not return a channel receipt for this call.",
+    );
   }
 }
 
@@ -359,10 +410,12 @@ export async function runStreamCallsFlow(opts: ChannelFlowOpts) {
     ratePerCallOverride,
     depositOverride,
   } = opts;
-  console.log(`  Stream mode: ${durationSecs}s window, up to ${maxCalls} calls`);
+  console.log(
+    `  Stream mode: ${durationSecs}s window, up to ${maxCalls} calls`,
+  );
   console.log("");
 
-  const probeResult = await probeApi402Offer(url);
+  const probeResult = await probeApi402Offer(url, token?.address);
   if (!probeResult) {
     console.log("  No payment required — making a direct call.");
     const r = await globalThis.fetch(url);
@@ -386,6 +439,10 @@ export async function runStreamCallsFlow(opts: ChannelFlowOpts) {
   );
   const deposit = constrained.deposit;
   const effectiveDurationSecs = constrained.durationSecs;
+  const walletContract = await resolveChannelWalletContract(
+    client,
+    opts.sessionKeyAddress,
+  );
 
   console.log(`  Provider:      ${offer.payTo}`);
   console.log(
@@ -403,16 +460,29 @@ export async function runStreamCallsFlow(opts: ChannelFlowOpts) {
   );
   console.log("");
 
-  console.log("  Opening payment channel on-chain...");
-  const { txHash: openTxHash, channelId } = await client.openChannel({
-    provider: offer.payTo,
-    token: offer.asset,
-    mode: "prepaid",
-    deposit,
-    maxSpend: deposit,
-    maxDuration: effectiveDurationSecs,
-    maxPerCall,
-  });
+  if (!walletContract || !opts.sessionKeyAddress) {
+    throw new Error(
+      "sessionKeyAddress and walletContract are required to open a channel.",
+    );
+  }
+
+  console.log("  Opening payment channel on-chain (via ClientVault batch)...");
+  const { txHash: openTxHash, channelId: rawChannelId } =
+    await client.getContractService().openChannelViaVaultBatch(
+      opts.sessionKeyAddress,
+      walletContract,
+      offer.payTo,
+      offer.asset,
+      0, // prepaid mode
+      deposit,
+      deposit, // maxSpend == deposit
+      effectiveDurationSecs,
+      maxPerCall,
+    );
+  if (!rawChannelId) {
+    throw new Error("openChannelViaVaultBatch did not return a channelId — check ChannelOpened event");
+  }
+  const channelId: `0x${string}` = rawChannelId;
   console.log(`  Channel ID:   ${channelId}`);
   console.log(`  Open tx:      ${openTxHash}`);
 
@@ -450,7 +520,7 @@ export async function runStreamCallsFlow(opts: ChannelFlowOpts) {
   }
   console.log("");
 
-  const streamDeadline = Date.now() + durationSecs * 1000;
+  const streamDeadline = Date.now() + effectiveDurationSecs * 1000;
   let callsMade = 0;
   const { callCount, lastReceipt } = await runChannelCallLoop(
     opts,

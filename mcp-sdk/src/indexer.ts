@@ -54,6 +54,7 @@ export interface IndexedSession {
   status: string;
   createdAt: string;
   updatedAt: string;
+  agent: IndexedAgent;
 }
 
 export interface IndexedPayment {
@@ -199,6 +200,9 @@ export async function getSessionsByAgent(
         valueLimit
         status
         validUntil
+        agent {
+          agentId
+        }
       }
     }
   `,
