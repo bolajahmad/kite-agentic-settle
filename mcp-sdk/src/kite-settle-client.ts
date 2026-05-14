@@ -64,6 +64,7 @@ import type {
 } from "./types.js";
 import {
   deleteVar,
+  getCredential,
   getKiteDir,
   getVar,
   getVarsPath,
@@ -542,7 +543,7 @@ export class KiteSettleClient {
       // Useful for agents onboarded before the plain-key migration, or when
       // the session private key var was manually deleted.
       const eoaKeyCandidates = [
-        getVar("PRIVATE_KEY"),
+        getCredential(),
         getVar("DEPLOYER_KEY"),
       ].filter(Boolean) as string[];
 
@@ -638,15 +639,15 @@ export class KiteSettleClient {
   }
 
   /**
-   * Create a client from the EOA credential stored in the local vars store
-   * (set by `kite init` / `kite vars set PRIVATE_KEY`).
+   * Create a client from the EOA credential stored by `kite init`
+   * (~/.kite-agent-pay/config.json).
    */
   static async fromStoredCredential(
     options: Omit<KiteSettleClientOptions, "credential" | "agentId"> = {},
   ): Promise<KiteSettleClient> {
-    const credential = getVar("PRIVATE_KEY");
+    const credential = getCredential();
     if (!credential) {
-      throw new Error("No credential found in vars store. Run: npx kite init");
+      throw new Error("No credential found. Run: npx kite init");
     }
     return KiteSettleClient.create({ ...options, credential });
   }

@@ -10,7 +10,7 @@ import {
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { prompt } from "../../utils/index.js";
 import { deriveSessionId } from "../../utils/session-id.js";
-import { getVar, setVar } from "../../vars.js";
+import { getCredential, setVar } from "../../vars.js";
 import { findFlag } from "../index.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ async function resolveIndexedSession(
 // This ensures atomicity and prevents frontrunning.
 
 async function cmdSessionCreate(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   let agentIndexStr = findFlag(args, "--agent") ?? findFlag(args, "-aid");
@@ -419,7 +419,7 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
 // This prevents frontrunning by removing from vault first.
 
 async function cmdSessionRevoke(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const sessionKeyRaw =

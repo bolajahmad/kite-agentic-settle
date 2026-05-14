@@ -107,7 +107,8 @@ After installing globally, the `kite` binary is available:
 
 ```bash
 # One-time setup
-kite init
+kite init                              # store your EOA private key / seed phrase
+kite onboard --name "My Agent"         # register agent on-chain + create session key
 
 # Check identity
 kite whoami
@@ -128,12 +129,10 @@ kite channels close --id 0xChannelId
 # Session keys
 kite sessions register --agent 0 --session 0
 kite sessions list
-
-# Persist config values
-kite vars set PRIVATE_KEY 0xabcdef...
-kite vars get PRIVATE_KEY
-kite vars list
 ```
+
+> **Note:** Config values are written only by `kite init`, `kite onboard`, and `kite session create`.
+> There is no manual `kite vars` command — use those commands to manage credentials.
 
 ## KiteSettleClient API
 
@@ -143,7 +142,7 @@ kite vars list
 // From explicit credential
 KiteSettleClient.create(options: KiteSettleClientOptions): Promise<KiteSettleClient>
 
-// From ~/.kite-agent-pay/vars.json PRIVATE_KEY
+// From ~/.kite-agent-pay/config.json PRIVATE_KEY (stored by kite init)
 KiteSettleClient.fromStoredCredential(options?): Promise<KiteSettleClient>
 
 // Generate a new BIP-39 seed phrase

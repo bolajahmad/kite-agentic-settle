@@ -13,7 +13,7 @@ import {
   _tokenMetadataCache,
   resolveTokenMetadata,
 } from "../../utils/index.js";
-import { getVar } from "../../vars.js";
+import { getCredential } from "../../vars.js";
 import { findFlag } from "../index.js";
 import { callApi } from "./call.js";
 
@@ -43,7 +43,7 @@ async function showBalance(args: string[]) {
     targetAddress = addressFlag;
     displayLabel = targetAddress;
   } else {
-    const credential = getVar("PRIVATE_KEY");
+    const credential = getCredential();
     if (!credential) {
       throw new Error(
         "No address to check. Pass --address <addr>, --agent <id>, or run: npx kite init",
@@ -185,7 +185,7 @@ async function getIndexedPayments(
     label = `Agent #${agent}`;
   } else {
     // Fallback: derive EOA address from stored credential
-    const credential = getVar("PRIVATE_KEY");
+    const credential = getCredential();
     if (!credential) {
       throw new Error(
         "No address to query. Pass --agent <id>, --session <key>, or run: npx kite init",
@@ -392,7 +392,7 @@ async function showUsage(args: string[]) {
 }
 
 async function fundWallet(args: string[]) {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const tokenFlag = findFlag(args, "--token");
@@ -443,7 +443,7 @@ async function fundWallet(args: string[]) {
 }
 
 async function withdrawFunds(args: string[]) {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const tokenFlag = findFlag(args, "--token");

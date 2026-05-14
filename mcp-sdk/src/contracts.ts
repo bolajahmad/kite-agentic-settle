@@ -18,7 +18,7 @@ import {
   walletFactoryAbi,
 } from "./abis.js";
 import type { ChannelState, KiteConfig } from "./types.js";
-import { getVar } from "./vars.js";
+import { getCredential } from "./vars.js";
 
 export class ContractService {
   private readonly client: PublicClient;
@@ -742,7 +742,7 @@ export class ContractService {
 
     const ownerPkRaw =
       process.env.PRIVATE_KEY ??
-      getVar("PRIVATE_KEY") ??
+      getCredential() ??
       process.env.EOA_PRIVATE_KEY;
     if (ownerPkRaw) {
       const ownerPk = (
@@ -970,7 +970,7 @@ export class ContractService {
 
     const ownerPkRaw =
       process.env.PRIVATE_KEY ??
-      getVar("PRIVATE_KEY") ??
+      getCredential() ??
       process.env.EOA_PRIVATE_KEY;
     if (ownerPkRaw) {
       const ownerPk = (

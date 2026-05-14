@@ -55,13 +55,18 @@ export {
 } from "./abis.js";
 export { deriveSessionId, hashProvider } from "./utils/session-id.js";
 export {
+  clearCredential,
   deleteVar,
+  getConfigPath,
+  getCredential,
   getKiteDir,
   getVar,
   getVarsPath,
+  hasCredential,
   hasVar,
   listVars,
   resolveVar,
+  setCredential,
   setVar,
 } from "./vars.js";
 
