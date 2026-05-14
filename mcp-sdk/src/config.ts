@@ -36,9 +36,9 @@ export const TOKENS = [
   },
   {
     symbol: "USDT",
-    name: "USDT Bridged",
-    address: "0x3Fdd283C4c43A60398bf93CA01a8a8BD773a755b",
-    decimals: 6,
+    name: "USDT (Testnet)",
+    address: "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63",
+    decimals: 18,
   },
   {
     symbol: "KITE",

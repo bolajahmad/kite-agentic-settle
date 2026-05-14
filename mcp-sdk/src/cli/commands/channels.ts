@@ -18,11 +18,13 @@ import {
 import {
   getChannelById,
   getChannelsByAgent,
+  getSessionByKey,
   type IndexedChannel,
 } from "../../indexer.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { ChannelStatus } from "../../types.js";
 import { prompt, resolveTokenMetadata } from "../../utils/index.js";
+import { deriveSessionId } from "../../utils/session-id.js";
 import { getVar } from "../../vars.js";
 import { findFlag } from "../index.js";
 
@@ -80,6 +82,26 @@ function normalizeSessionKey(raw: string): `0x${string}` {
   ) as `0x${string}`;
 }
 
+async function resolveChannelWalletContract(
+  client: KiteSettleClient,
+  sessionKeyAddress?: `0x${string}`,
+): Promise<`0x${string}` | undefined> {
+  if (!sessionKeyAddress) return undefined;
+
+  const walletContract = await client
+    .getPaymentClient()
+    .getContractService()
+    .resolveWalletContractForSession(sessionKeyAddress);
+
+  if (!walletContract) {
+    throw new Error(
+      `Unable to resolve ClientVault wallet contract for session ${sessionKeyAddress}`,
+    );
+  }
+
+  return walletContract;
+}
+
 function toAgentEntityId(agentId: number): string {
   return `0x${BigInt(agentId).toString(16)}`;
 }
@@ -117,7 +139,20 @@ function safeBigInt(
   }
 }
 
-function indexedStatusLabel(status: string): string {
+function indexedStatusLabel(
+  status: string,
+  expiresAt?: string | number | null,
+): string {
+  const expiresAtNum = Number(expiresAt);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (
+    Number.isFinite(expiresAtNum) &&
+    expiresAtNum > 0 &&
+    expiresAtNum < nowSec
+  ) {
+    return "Expired";
+  }
+
   switch (status.toUpperCase()) {
     case "OPEN":
       return "Pending Activation";
@@ -153,7 +188,7 @@ function computeChannelSnapshot(
     : "in-memory";
 
   const status = hasIndexed
-    ? indexedStatusLabel(indexed.status)
+    ? indexedStatusLabel(indexed.status, indexed.expiresAt)
     : "In-memory only";
 
   const indexedSpent = hasIndexed
@@ -278,6 +313,8 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
     sessionKey,
     defaultPaymentMode: "channel",
   });
+  const sessionKeyAddress =
+    (client.sessionKeyAddress as `0x${string}` | undefined) ?? sessionKey;
   const eoaAddress = client.eoaAddress;
 
   const contract = client.getPaymentClient().getContractService();
@@ -286,8 +323,24 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   if (!active) {
     throw new Error(`Session ${sessionKey} is not active.`);
   }
+
+  let validUntilBigint: bigint;
+  try {
+    validUntilBigint = BigInt(validUntil);
+  } catch {
+    const indexedSessionForWindow = await getSessionByKey(sessionKey).catch(
+      () => null,
+    );
+    if (!indexedSessionForWindow) {
+      throw new Error(
+        `Session ${sessionKey} has invalid validUntil from validateSession and cannot be resolved from indexer.`,
+      );
+    }
+    validUntilBigint = BigInt(indexedSessionForWindow.validUntil);
+  }
+
   const nowSec = Math.floor(Date.now() / 1000);
-  const remainingSeconds = Math.max(0, Number(validUntil) - nowSec);
+  const remainingSeconds = Math.max(0, Number(validUntilBigint) - nowSec);
   if (remainingSeconds <= 0) {
     throw new Error(`Session ${sessionKey} is expired.`);
   }
@@ -315,29 +368,35 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
     throw new Error("Cannot parse 402 response body.");
   }
 
-  const offers = parsed.accepts as Array<{
-    payTo: `0x${string}`;
-    asset: `0x${string}`;
-    maxAmountRequired: string;
-    maxRatePerCall?: string;
-    scheme: string;
-    description?: string;
-    merchantName?: string;
-    resource?: string;
-  }> | undefined;
-  if (!offers || offers.length === 0) throw new Error("402 response is missing accepts[]");
+  const offers = parsed.accepts as
+    | Array<{
+        payTo: `0x${string}`;
+        asset: `0x${string}`;
+        maxAmountRequired: string;
+        maxRatePerCall?: string;
+        scheme: string;
+        description?: string;
+        merchantName?: string;
+        resource?: string;
+      }>
+    | undefined;
+  if (!offers || offers.length === 0)
+    throw new Error("402 response is missing accepts[]");
 
   const preferredAsset = token?.address.toLowerCase();
   const scopedOffers = preferredAsset
-    ? offers.filter((candidate) => candidate.asset.toLowerCase() === preferredAsset)
+    ? offers.filter(
+        (candidate) => candidate.asset.toLowerCase() === preferredAsset,
+      )
     : offers;
-  const offer = [...scopedOffers].sort((a, b) => {
-    const aAmount = BigInt(a.maxAmountRequired);
-    const bAmount = BigInt(b.maxAmountRequired);
-    if (aAmount < bAmount) return -1;
-    if (aAmount > bAmount) return 1;
-    return 0;
-  })[0] ?? offers[0];
+  const offer =
+    [...scopedOffers].sort((a, b) => {
+      const aAmount = BigInt(a.maxAmountRequired);
+      const bAmount = BigInt(b.maxAmountRequired);
+      if (aAmount < bAmount) return -1;
+      if (aAmount > bAmount) return 1;
+      return 0;
+    })[0] ?? offers[0];
 
   // Provider may declare maxRatePerCall in the 402 offer (the highest
   // per-call price any of their endpoints can charge). Use that as the
@@ -351,9 +410,60 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   const deposit = depositFlag
     ? parseUnits(depositFlag, tokenDecimals)
     : maxPerCall * BigInt(maxCalls);
-  const spent = await contract.getSessionSpent(sessionKey).catch(() => 0n);
-  const remainingCapacity =
-    maxValueAllowed > spent ? maxValueAllowed - spent : 0n;
+  const walletContractForSpending = await resolveChannelWalletContract(
+    client,
+    sessionKeyAddress,
+  );
+  if (!walletContractForSpending) {
+    throw new Error(
+      `Unable to resolve ClientVault wallet contract for session ${sessionKeyAddress}`,
+    );
+  }
+
+  // Try to get spending rules from ClientVault (preferred method for accurate spending capacity)
+  // Fall back to using maxValueAllowed from validateSession if spending rules are not available
+  let remainingCapacity: bigint;
+
+  try {
+    // Fetch session from indexer to get the agentId and validUntil for deriving sessionId
+    const indexedSession = await getSessionByKey(sessionKey).catch(() => null);
+    if (!indexedSession) {
+      throw new Error("Session not found in indexer");
+    }
+
+    // Derive the proper sessionId using agent ID and validUntil (required for spending rules lookup)
+    const agentIdBigint = BigInt(indexedSession.agent.agentId);
+    const validUntilBigint = BigInt(indexedSession.validUntil);
+    const derivedSessionId = deriveSessionId(
+      sessionKeyAddress,
+      agentIdBigint,
+      validUntilBigint,
+    );
+
+    // Get spending rules from ClientVault for this session
+    const spendingRules = await contract.getVaultSpendingRules(
+      walletContractForSpending,
+      derivedSessionId,
+    );
+
+    if (spendingRules && spendingRules.length > 0) {
+      const currentRule = spendingRules[0];
+      const totalBudget = currentRule.rule.budget;
+      const totalSpent = currentRule.usage.amountUsed;
+      remainingCapacity =
+        totalBudget > totalSpent ? totalBudget - totalSpent : 0n;
+      console.log(
+        `  Session spend:   ${formatUnits(totalSpent, tokenDecimals)}/${formatUnits(totalBudget, tokenDecimals)} ${token?.symbol}`,
+      );
+    } else {
+      throw new Error("No spending rules found");
+    }
+  } catch {
+    remainingCapacity = maxValueAllowed;
+    console.log(
+      `  Session spend:   using max session limit ${formatUnits(maxValueAllowed, tokenDecimals)} ${token?.symbol}`,
+    );
+  }
   if (remainingCapacity <= 0n) {
     throw new Error(
       `Session ${sessionKey} has no remaining capacity for opening a channel.`,
@@ -389,17 +499,27 @@ async function cmdChannelOpen(args: string[]): Promise<void> {
   }
   console.log("");
 
-  // Step 2: open channel on-chain
-  console.log("  Opening channel on-chain...");
-  const { txHash: openTxHash, channelId } = await client.openChannel({
-    provider: offer.payTo,
-    token: offer.asset,
-    mode: "prepaid",
-    deposit: effectiveDeposit,
-    maxSpend: effectiveDeposit,
-    maxDuration: effectiveDuration,
-    maxPerCall,
-  });
+  // Step 2: open channel on-chain via AA batch (prepaid mode = 0)
+  console.log(`  Wallet:       ${walletContractForSpending}`);
+  console.log("  Opening payment channel on-chain (via ClientVault batch)...");
+  const { txHash: openTxHash, channelId } =
+    await contract.openChannelViaVaultBatch(
+      sessionKeyAddress,
+      walletContractForSpending,
+      offer.payTo,
+      offer.asset,
+      0,
+      effectiveDeposit,
+      effectiveDeposit,
+      effectiveDuration,
+      maxPerCall,
+    );
+
+  if (!channelId) {
+    throw new Error(
+      `Channel open transaction submitted (${openTxHash}) but no channelId was returned`,
+    );
+  }
 
   // Step 3: persist channel in per-channel store immediately
   createChannelRecord({
@@ -676,6 +796,10 @@ async function cmdChannelClose(args: string[]): Promise<void> {
   const channelId = channelRaw.trim() as `0x${string}`;
   const agentIndex = parseAgentIndex(args);
   const client = await buildSessionClientForAgent(agentIndex, channelId);
+  const contract = client.getPaymentClient().getContractService();
+  const sessionKeyAddress = client.sessionKeyAddress as
+    | `0x${string}`
+    | undefined;
   const merkleRoot = resolveStoredMerkleRoot(channelId);
   const latestReceipt = resolveLatestStoredReceipt(channelId);
 
@@ -715,23 +839,100 @@ async function cmdChannelClose(args: string[]): Promise<void> {
   }
 
   console.log("  Initiating settlement on-chain...");
-  let settleTxHash: string;
+  let settleTxHash: string | undefined;
+  const sequenceNumber = latestReceipt?.sequenceNumber ?? 0;
+  const cumulativeCost = latestReceipt
+    ? BigInt(latestReceipt.cumulativeCost)
+    : 0n;
+  const timestamp = latestReceipt?.timestamp ?? 0;
+  const providerSignature =
+    latestReceipt?.providerSignature ?? ("0x" as `0x${string}`);
 
-  if (latestReceipt) {
-    settleTxHash = await client.initiateSettlementWithReceipt(
-      channelId,
-      latestReceipt.sequenceNumber,
-      BigInt(latestReceipt.cumulativeCost),
-      latestReceipt.timestamp,
-      latestReceipt.providerSignature,
-      merkleRoot,
-    );
+  let usedAaClose = false;
+  let usedReceiptClaim = !!latestReceipt;
+  if (sessionKeyAddress) {
+    const walletContractForSettlement = await resolveChannelWalletContract(
+      client,
+      sessionKeyAddress,
+    ).catch(() => undefined);
+
+    if (walletContractForSettlement) {
+      try {
+        settleTxHash = await contract.initiateSettlementViaVaultAA(
+          sessionKeyAddress,
+          walletContractForSettlement,
+          channelId,
+          sequenceNumber,
+          cumulativeCost,
+          timestamp,
+          providerSignature,
+          merkleRoot,
+        );
+        usedAaClose = true;
+      } catch (aaErr: any) {
+        const reason = aaErr?.message ?? String(aaErr);
+        console.log(`  AA close path failed (${reason}).`);
+
+        if (latestReceipt) {
+          try {
+            console.log(
+              "  Retrying AA close with zero-claim settlement (no local receipt claim)...",
+            );
+            settleTxHash = await contract.initiateSettlementViaVaultAA(
+              sessionKeyAddress,
+              walletContractForSettlement,
+              channelId,
+              0,
+              0n,
+              0,
+              "0x" as `0x${string}`,
+              merkleRoot,
+            );
+            usedAaClose = true;
+            usedReceiptClaim = false;
+          } catch (aaZeroErr: any) {
+            const zeroReason = aaZeroErr?.message ?? String(aaZeroErr);
+            console.log(
+              `  AA zero-claim close also failed (${zeroReason}). Falling back...`,
+            );
+          }
+        } else {
+          console.log("  Falling back...");
+        }
+      }
+    }
+  }
+
+  if (!usedAaClose) {
+    if (latestReceipt) {
+      settleTxHash = await client.initiateSettlementWithReceipt(
+        channelId,
+        latestReceipt.sequenceNumber,
+        BigInt(latestReceipt.cumulativeCost),
+        latestReceipt.timestamp,
+        latestReceipt.providerSignature,
+        merkleRoot,
+      );
+      usedReceiptClaim = true;
+    } else {
+      settleTxHash = await client.initiateSettlement(channelId, merkleRoot);
+      usedReceiptClaim = false;
+    }
+  }
+
+  if (!settleTxHash) {
+    throw new Error("Failed to initiate settlement.");
+  }
+
+  if (usedReceiptClaim && latestReceipt) {
     console.log(
       `  Claimed with receipt: seq=${latestReceipt.sequenceNumber} cumulative=${latestReceipt.cumulativeCost}`,
     );
   } else {
-    settleTxHash = await client.initiateSettlement(channelId, merkleRoot);
     console.log("  No local receipt found. Initiated with zero claim.");
+  }
+  if (usedAaClose) {
+    console.log("  Settlement submitted via AA wallet (gasless path).");
   }
 
   const state = await client.getSettlementState(channelId);
@@ -868,7 +1069,7 @@ async function cmdChannelList(args: string[]): Promise<void> {
 
     return {
       channelId: indexed.channelId.toLowerCase(),
-      status: indexedStatusLabel(indexed.status),
+      status: indexedStatusLabel(indexed.status, indexed.expiresAt),
       provider: indexed.provider,
       deposit: formatUnits(safeBigInt(indexed.deposit), 18),
       maxPerCall: formatUnits(safeBigInt(indexed.maxPerCall), 18),
@@ -964,102 +1165,7 @@ async function cmdChannelList(args: string[]): Promise<void> {
   console.log(`  Returned: ${visible.length} channel(s)`);
 }
 
-// ── channel resume ────────────────────────────────────────────────────────────
-async function cmdChannelResume(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
-  if (!credential) throw new Error("No credential found. Run: npx kite init");
-
-  const channelRaw = findFlag(args, "--channel");
-
-  const { client, eoaAddress } = await buildAgentClient(credential);
-
-  const all = listChannels();
-
-  // Resolve channel: explicit flag → first active channel
-  let stored: StoredChannel | null = null;
-  if (channelRaw) {
-    stored = loadChannel(channelRaw);
-    if (!stored) {
-      throw new Error(
-        `Channel ${channelRaw} not found in local channel store. ` +
-          "Check with: npx kite channel list",
-      );
-    }
-  } else {
-    // Pick the most recent Active channel
-    const agentSessions = [...all].sort((a, b) => b.openedAt - a.openedAt);
-
-    for (const s of agentSessions) {
-      try {
-        const ch = await client.getChannel(s.channelId);
-        if (ch.status === ChannelStatus.Active) {
-          stored = s;
-          break;
-        }
-      } catch {
-        // skip unreachable
-      }
-    }
-
-    if (!stored) {
-      throw new Error(
-        "No active channel found for this agent. " +
-          "Open one with: npx kite channel open --url <api>",
-      );
-    }
-  }
-
-  const channelId = stored.channelId;
-
-  console.log("");
-  console.log("── Resuming Channel ──────────────────────────────────────");
-  console.log(`  Channel ID:  ${channelId}`);
-  console.log(`  EOA:         ${eoaAddress}`);
-  console.log(`  Provider:    ${stored.provider}`);
-  console.log(`  URL:         ${stored.openTxHash}`);
-  console.log("");
-
-  // Verify ownership
-  const ch = await client.getChannel(channelId);
-
-  if (ch.status === ChannelStatus.Closed) {
-    console.log("  Channel is Closed — cannot resume. Open a new one with:");
-    console.log(`    npx kite channel open --url <endpoint>`);
-    return;
-  }
-
-  if (ch.status === ChannelStatus.SettlementPending) {
-    console.log(
-      "  Channel is in SettlementPending — it is being closed, not resumed.",
-    );
-    return;
-  }
-
-  // Re-register with the interceptor so client.fetch() routes through this channel
-  client.setChannelForProvider(stored.provider, stored.channelId);
-  console.log("  Interceptor re-registered with channel.");
-
-  console.log(`  Status:      ${channelStatusLabel(ch.status)}`);
-  console.log(`  Deposit:     ${formatUnits(ch.deposit, 18)}`);
-  console.log(
-    `  Remaining:   ~${formatUnits(ch.deposit - ch.highestClaimedCost, 18)}`,
-  );
-  if (ch.expiresAt > 0) {
-    const secsLeft = ch.expiresAt - Math.floor(Date.now() / 1000);
-    console.log(
-      `  Expires:     ${new Date(ch.expiresAt * 1000).toISOString()} (${secsLeft > 0 ? secsLeft + "s left" : "EXPIRED"})`,
-    );
-  }
-  console.log("");
-  console.log("  Channel is ready. Make calls with:");
-  console.log(
-    `    npx kite channel call --channel ${stored.channelId} --url <endpoint>`,
-  );
-  console.log("──────────────────────────────────────────────────────────");
-}
-
 // ── channel call ─────────────────────────────────────────────────────────────
-
 /**
  * Make a single API call on an existing payment channel.
  * Appends the receipts to the channel's local Merkle receipt tree.
@@ -1123,15 +1229,7 @@ async function cmdChannelCall(args: string[]): Promise<void> {
   const resp = await globalThis.fetch(url, fetchInit);
   const elapsed = Date.now() - t0;
 
-  // Extract channel receipt from response headers
-  const seqStr = resp.headers.get("X-Sequence-Number");
-  const callCostStr = resp.headers.get("X-Call-Cost");
-  const cumCostStr = resp.headers.get("X-Cumulative-Cost");
-  const providerSig = resp.headers.get("X-Provider-Signature") as
-    | `0x${string}`
-    | null;
-
-  // Extract audit receipt from response
+  // Extract response body first (stream routes return channelReceipt in JSON)
   let responseBody: any = null;
   let auditReceiptRaw: any = null;
   try {
@@ -1149,13 +1247,29 @@ async function cmdChannelCall(args: string[]): Promise<void> {
     console.log(`  Response:  ${JSON.stringify(responseBody, null, 2)}`);
   }
 
-  if (
-    !seqStr ||
-    !callCostStr ||
-    !cumCostStr ||
-    !providerSig ||
-    !auditReceiptRaw
-  ) {
+  // Accept both legacy header names and stream channel header names.
+  const seqStr =
+    resp.headers.get("X-Sequence-Number") ??
+    resp.headers.get("X-Channel-Receipt-Seq") ??
+    (responseBody?.channelReceipt?.sequenceNumber != null
+      ? String(responseBody.channelReceipt.sequenceNumber)
+      : null);
+  const cumCostStr =
+    resp.headers.get("X-Cumulative-Cost") ??
+    resp.headers.get("X-Channel-Cumulative-Cost") ??
+    responseBody?.channelReceipt?.cumulativeCost ??
+    null;
+  const providerSig = (resp.headers.get("X-Provider-Signature") ??
+    resp.headers.get("X-Channel-Receipt-Sig") ??
+    responseBody?.channelReceipt?.providerSignature ??
+    null) as `0x${string}` | null;
+  const timestampHeader =
+    resp.headers.get("X-Channel-Receipt-Timestamp") ??
+    (responseBody?.channelReceipt?.timestamp != null
+      ? String(responseBody.channelReceipt.timestamp)
+      : null);
+
+  if (!seqStr || !cumCostStr || !providerSig) {
     console.log("");
     console.log(
       "  Warning: provider did not return full receipt headers/body — receipts not recorded.",
@@ -1164,12 +1278,49 @@ async function cmdChannelCall(args: string[]): Promise<void> {
     return;
   }
 
+  // Derive call cost when provider only returns cumulative cost.
+  const previousCumulativeCost =
+    stored.calls.length > 0
+      ? BigInt(
+          stored.calls[stored.calls.length - 1]!.channelReceipt.cumulativeCost,
+        )
+      : 0n;
+  const currentCumulativeCost = BigInt(cumCostStr);
+  const callCostStr =
+    currentCumulativeCost > previousCumulativeCost
+      ? (currentCumulativeCost - previousCumulativeCost).toString()
+      : "0";
+
+  // Stream routes usually omit __auditReceipt; synthesize deterministic hashes.
+  if (!auditReceiptRaw) {
+    const requestHash = keccak256(
+      encodePacked(
+        ["string", "string", "string"],
+        [method, url, bodyRaw ?? ""],
+      ),
+    );
+    const responseHash = keccak256(
+      encodePacked(
+        ["string"],
+        [JSON.stringify(responseBody?.data ?? responseBody ?? null)],
+      ),
+    );
+
+    auditReceiptRaw = {
+      requestHash,
+      responseHash,
+      providerSignature: providerSig,
+    };
+  }
+
   const channelReceipt: ChannelCallReceipt = {
     channelId,
     sequenceNumber: Number(seqStr),
     callCost: callCostStr,
     cumulativeCost: cumCostStr,
-    timestamp: Math.floor(Date.now() / 1000),
+    timestamp: timestampHeader
+      ? Number(timestampHeader)
+      : Math.floor(Date.now() / 1000),
     providerSignature: providerSig,
   };
 
@@ -1233,8 +1384,6 @@ export async function cmdChannels(args: string[]): Promise<void> {
       return cmdChannelForceClose(args.slice(1));
     case "list":
       return cmdChannelList(args.slice(1));
-    case "resume":
-      return cmdChannelResume(args.slice(1));
     default:
       console.log("");
       console.log("Usage:");

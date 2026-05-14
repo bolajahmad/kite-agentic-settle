@@ -67,8 +67,8 @@ type SessionIndex @entity(immutable: false) {
 type User @entity(immutable: false) {
   id: ID! # EOA address as hex
   address: Bytes! # EOA address
-  
-  aaWallets: [AAWallet!]! @derivedFrom(field: "owner")
+
+  aaWallet: AAWallet
   agents: [Agent!]! @derivedFrom(field: "owner")
   sessions: [Session!]! @derivedFrom(field: "user")
   

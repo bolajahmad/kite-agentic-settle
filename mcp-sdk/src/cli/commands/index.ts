@@ -7,6 +7,7 @@
 
 import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { TOKENS } from "../../config.js";
+import { ContractService } from "../../contracts.js";
 import { KITE_TESTNET, KiteSettleClient } from "../../index.js";
 import {
   _tokenMetadataCache,
@@ -55,10 +56,39 @@ async function showBalance(args: string[]) {
   }
 
   // ── Build a client for RPC calls (credential optional) ─────────────
-  const credential = getVar("PRIVATE_KEY");
-  const client = credential
-    ? await KiteSettleClient.create({ credential })
-    : KiteSettleClient.createReadOnly();
+  const contract = new ContractService(
+    KITE_TESTNET,
+    { getAddress: () => targetAddress } as any,
+  );
+
+  async function resolveAaWallet(address: string): Promise<string> {
+    const normalized = address.toLowerCase();
+
+    const { getAgentById, getUserById } = await import("../../indexer.js");
+
+    if (agentFlag !== undefined) {
+      const agent = await getAgentById(`0x${BigInt(agentFlag).toString(16)}`);
+      const walletAddress =
+        agent?.aaWallet?.address ??
+        (agent?.owner?.id
+          ? (await getUserById(agent.owner.id))?.aaWallet?.address
+          : undefined);
+      if (!walletAddress) {
+        throw new Error(
+          `Agent ${agentFlag} does not have an indexed AA wallet yet.`,
+        );
+      }
+      return walletAddress;
+    }
+
+    const user = await getUserById(normalized);
+    if (user?.aaWallet?.address) {
+      return user.aaWallet.address;
+    }
+
+    // If the provided address is already the wallet contract, use it directly.
+    return address;
+  }
 
   // ── Resolve token list ──────────────────────────────────────────────
   let tokens: string[] = [];
@@ -80,6 +110,10 @@ async function showBalance(args: string[]) {
   console.log(`  Address:  ${displayLabel}`);
   console.log("");
 
+  const walletContract = await resolveAaWallet(targetAddress);
+  console.log(`  AA Wallet: ${walletContract}`);
+  console.log("");
+
   const agentBalance = await Promise.all(
     tokens.map(async (t) => {
       const token = TOKENS.find(
@@ -88,14 +122,17 @@ async function showBalance(args: string[]) {
           symbol.toLowerCase() === t.toLowerCase(),
       );
 
-      const depBalance = await client.getDepositedBalance(
-        token?.address,
-        targetAddress,
-      );
+      const depBalance =
+        token?.address === zeroAddress
+          ? await contract.getDeposit(walletContract as `0x${string}`)
+          : await contract.getAvailableBalance(
+              walletContract as `0x${string}`,
+              token?.address as `0x${string}`,
+            );
       const balance =
         token?.address === zeroAddress
           ? undefined
-          : await client.getWalletBalance(token?.address, targetAddress);
+          : await contract.getDeposit(walletContract as `0x${string}`);
       return {
         ...token,
         balance: formatUnits(depBalance, token?.decimals || 18),

@@ -107,6 +107,27 @@ export class ContractService {
     })) as bigint;
   }
 
+  async getAvailableBalance(
+    walletContract: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<bigint> {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: clientAgentVaultAbi,
+      functionName: "getAvailableBalance",
+      args: [token],
+    })) as bigint;
+  }
+
+  async getDeposit(walletContract: `0x${string}`): Promise<bigint> {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: clientAgentVaultAbi,
+      functionName: "getDeposit",
+      args: [],
+    })) as bigint;
+  }
+
   // -- Helpers --
 
   private async sendTx(
@@ -834,6 +855,204 @@ export class ContractService {
       data,
     );
     return result.hash;
+  }
+
+  /**
+   * Initiate settlement through AA wallet via UserOp so session consumers do not pay native gas.
+   * The wallet executes PaymentChannel.initiateSettlement(...) as msg.sender.
+   */
+  async initiateSettlementViaVaultAA(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    channelId: `0x${string}`,
+    sequenceNumber: number,
+    cumulativeCost: bigint,
+    timestamp: number,
+    providerSignature: `0x${string}`,
+    merkleRoot: `0x${string}` =
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
+  ): Promise<string> {
+    const { GokiteAASDK } = await import("gokite-aa-sdk");
+    const aaSdk = new GokiteAASDK(
+      this.config.networkName || "kite_testnet",
+      this.config.rpcUrl,
+      this.config.bundlerUrl || "",
+    );
+
+    const derivedAaWallet = aaSdk.getAccountAddress(
+      this.eoaAddress as `0x${string}`,
+    ) as `0x${string}`;
+    if (derivedAaWallet.toLowerCase() !== walletContract.toLowerCase()) {
+      throw new Error(
+        `AA wallet mismatch: session resolves to ${walletContract}, but GokiteAASDK(owner=${this.eoaAddress}) derives ${derivedAaWallet}`,
+      );
+    }
+
+    const batchRequest = {
+      targets: [this.config.contracts.paymentChannel as `0x${string}`],
+      values: [0n],
+      callDatas: [
+        encodeFunctionData({
+          abi: paymentChannelAbi,
+          functionName: "initiateSettlement",
+          args: [
+            channelId,
+            sessionKeyAddress,
+            BigInt(sequenceNumber),
+            cumulativeCost,
+            BigInt(timestamp),
+            providerSignature,
+            merkleRoot,
+          ],
+        }),
+      ],
+    };
+
+    const keyPair = (this.wdkAccount as any)?.keyPair;
+    if (!keyPair?.privateKey) {
+      throw new Error(
+        "Session key private key not available for UserOp signing",
+      );
+    }
+    const pkHex =
+      `0x${Buffer.from(keyPair.privateKey).toString("hex")}` as `0x${string}`;
+    const sessionAccount = privateKeyToAccount(pkHex);
+
+    const signerStrategies: Array<{
+      label: string;
+      sign: (userOpHash: string) => Promise<string>;
+    }> = [
+      {
+        label: "session-key",
+        sign: async (userOpHash: string) =>
+          sessionAccount.signMessage({ message: { raw: userOpHash as Hex } }),
+      },
+    ];
+
+    const ownerPkRaw =
+      process.env.PRIVATE_KEY ??
+      getVar("PRIVATE_KEY") ??
+      process.env.EOA_PRIVATE_KEY;
+    if (ownerPkRaw) {
+      const ownerPk = (
+        ownerPkRaw.startsWith("0x") ? ownerPkRaw : `0x${ownerPkRaw}`
+      ) as `0x${string}`;
+      const ownerAccount = privateKeyToAccount(ownerPk);
+      if (
+        ownerAccount.address.toLowerCase() === this.eoaAddress.toLowerCase()
+      ) {
+        signerStrategies.push({
+          label: "owner-eoa",
+          sign: async (userOpHash: string) =>
+            ownerAccount.signMessage({
+              message: { raw: userOpHash as Hex },
+            }),
+        });
+      }
+    }
+
+    let lastError: Error | null = null;
+    for (const strategy of signerStrategies) {
+      try {
+        console.log(
+          `  Sending UserOp to bundler for gasless channel close via AA (signer=${strategy.label})...`,
+        );
+
+        const sponsoredResult = await aaSdk.sendUserOperationAndWait(
+          this.eoaAddress as `0x${string}`,
+          batchRequest,
+          strategy.sign,
+          undefined,
+          undefined,
+          { maxRetries: 60, interval: 5000 },
+        );
+        const sponsoredStatus = (sponsoredResult as any).status as
+          | {
+              status?: string;
+              transactionHash?: `0x${string}`;
+              reason?: string;
+            }
+          | undefined;
+        if (sponsoredStatus?.status && sponsoredStatus.status !== "success") {
+          throw new Error(
+            sponsoredStatus.reason ??
+              `Sponsored UserOp did not succeed (${sponsoredStatus.status})`,
+          );
+        }
+
+        const txHash =
+          sponsoredStatus?.transactionHash ?? sponsoredResult.userOpHash;
+        console.log(`  UserOp included. Receipt tx: ${txHash}`);
+        return txHash;
+      } catch (sponsoredErr: any) {
+        const sponsoredReason =
+          sponsoredErr?.cause?.reason ??
+          sponsoredErr?.cause?.shortMessage ??
+          sponsoredErr?.shortMessage ??
+          sponsoredErr?.message ??
+          String(sponsoredErr);
+
+        const shouldFallbackToTokenPayment =
+          /timeout|timed out|sponsor|paymaster|aa21|aa31|rejected/i.test(
+            sponsoredReason,
+          );
+        if (!shouldFallbackToTokenPayment) {
+          lastError = new Error(sponsoredReason);
+          continue;
+        }
+
+        const paymentToken =
+          "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63" as `0x${string}`;
+        console.log(
+          `  Sponsored UserOp failed (${sponsoredReason}). Retrying with token-payment fallback using ${paymentToken} (signer=${strategy.label})...`,
+        );
+
+        try {
+          const baseUserOp = await (aaSdk as any).createUserOperation(
+            this.eoaAddress as `0x${string}`,
+            batchRequest,
+          );
+          const tokenResult = await aaSdk.sendUserOperationWithPayment(
+            this.eoaAddress as `0x${string}`,
+            batchRequest,
+            baseUserOp,
+            paymentToken,
+            strategy.sign,
+            undefined,
+            { maxRetries: 60, interval: 5000 },
+          );
+          const tokenStatus = (tokenResult as any).status as
+            | {
+                status?: string;
+                transactionHash?: `0x${string}`;
+                reason?: string;
+              }
+            | undefined;
+          if (tokenStatus?.status && tokenStatus.status !== "success") {
+            throw new Error(
+              tokenStatus.reason ??
+                `Token-payment UserOp did not succeed (${tokenStatus.status})`,
+            );
+          }
+
+          const txHash = tokenStatus?.transactionHash ?? tokenResult.userOpHash;
+          console.log(`  UserOp included. Receipt tx: ${txHash}`);
+          return txHash;
+        } catch (tokenErr: any) {
+          const tokenReason =
+            tokenErr?.cause?.reason ??
+            tokenErr?.cause?.shortMessage ??
+            tokenErr?.shortMessage ??
+            tokenErr?.message ??
+            String(tokenErr);
+          lastError = new Error(
+            `AA settle failed (signer=${strategy.label}) sponsored=[${sponsoredReason}] token=[${tokenReason}]`,
+          );
+        }
+      }
+    }
+
+    throw lastError ?? new Error("Unknown UserOp failure while initiating settlement");
   }
 
   async initiateSettlement(

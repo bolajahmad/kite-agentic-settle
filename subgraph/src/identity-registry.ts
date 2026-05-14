@@ -127,6 +127,10 @@ export function handleAgentWalletSet(event: AgentWalletSetEvent): void {
     user.save();
   }
 
+  user.aaWallet = aaWalletId;
+  user.updatedAt = event.block.timestamp;
+  user.save();
+
   // Link agent to AA wallet
   let agent = Agent.load(agentId);
   if (agent) {
@@ -177,6 +181,10 @@ export function handleSessionRegistered(event: SessionRegisteredEvent): void {
     aaWallet.indexed = true;
   }
   aaWallet.save();
+
+  user.aaWallet = aaWalletId;
+  user.updatedAt = event.block.timestamp;
+  user.save();
 
   const sessionId = deriveSessionId(
     Bytes.fromHexString(event.params.sessionKey.toHexString()) as Bytes,
