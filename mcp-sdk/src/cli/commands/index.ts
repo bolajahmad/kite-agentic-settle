@@ -56,10 +56,9 @@ async function showBalance(args: string[]) {
   }
 
   // ── Build a client for RPC calls (credential optional) ─────────────
-  const contract = new ContractService(
-    KITE_TESTNET,
-    { getAddress: () => targetAddress } as any,
-  );
+  const contract = new ContractService(KITE_TESTNET, {
+    getAddress: () => targetAddress,
+  } as any);
 
   async function resolveAaWallet(address: string): Promise<string> {
     const normalized = address.toLowerCase();
@@ -421,7 +420,9 @@ async function fundWallet(args: string[]) {
       token!.address as `0x${string}`,
     );
     if (!supported) {
-      console.log(`  Token:    enabling ${token?.symbol || token?.address} on ClientVault`);
+      console.log(
+        `  Token:    enabling ${token?.symbol || token?.address} on ClientVault`,
+      );
     }
   }
 
@@ -510,19 +511,5 @@ export async function runAppCommand(command: string, args: string[]) {
     case "withdraw":
       await withdrawFunds(args);
       break;
-    case "simulate": {
-      // Run simulate as a subprocess (it lives outside src/)
-      const { execFileSync } = await import("node:child_process");
-      const { resolve: pathResolve } = await import("node:path");
-      const script = pathResolve(
-        import.meta.dirname || ".",
-        "../examples/simulate.ts",
-      );
-      execFileSync("npx", ["tsx", script], {
-        stdio: "inherit",
-        env: process.env,
-      });
-      break;
-    }
   }
 }

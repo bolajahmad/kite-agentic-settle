@@ -20,6 +20,8 @@
  */
 
 import { KiteSettleClient } from "../kite-settle-client.js";
+import { KITE_TESTNET } from "../config.js";
+import { ContractService } from "../contracts.js";
 import { prompt } from "../utils/index.js";
 import {
   deleteVar,
@@ -55,6 +57,58 @@ export function findFlag(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   if (idx !== -1 && args[idx + 1]) return args[idx + 1];
   return undefined;
+}
+
+function truncateText(text: string, maxLen = 120): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen - 1)}...`;
+}
+
+function decodeAgentMetadataURI(
+  agentURI: string,
+): { name?: string; shortDescription?: string } | null {
+  const trimmed = agentURI.trim();
+  const parseObject = (
+    text: string,
+  ): { name?: string; shortDescription?: string } | null => {
+    try {
+      const parsed = JSON.parse(text);
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        return null;
+      }
+      const obj = parsed as Record<string, unknown>;
+      const name = typeof obj.name === "string" ? obj.name.trim() : undefined;
+      const descValue =
+        typeof obj.description === "string"
+          ? obj.description
+          : typeof obj.shortDescription === "string"
+            ? obj.shortDescription
+            : undefined;
+      const shortDescription = descValue?.replace(/\s+/g, " ").trim();
+      return {
+        name: name || undefined,
+        shortDescription: shortDescription || undefined,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  if (trimmed.startsWith("{")) {
+    return parseObject(trimmed);
+  }
+
+  const dataUriPrefix = "data:application/json;base64,";
+  if (trimmed.toLowerCase().startsWith(dataUriPrefix)) {
+    const b64 = trimmed.slice(dataUriPrefix.length);
+    return parseObject(Buffer.from(b64, "base64").toString("utf8"));
+  }
+
+  return parseObject(Buffer.from(trimmed, "base64").toString("utf8"));
 }
 
 // ── vars subcommand ────────────────────────────────────────────────
@@ -181,41 +235,97 @@ async function cmdInit() {
 
 // ── whoami subcommand ──────────────────────────────────────────────
 async function cmdWhoami(args: string[]) {
-  const agentIndexStr = findFlag(args, "--agent");
+  const agentIndexStr =
+    findFlag(args, "--agent") ??
+    findFlag(args, "--agent-id") ??
+    findFlag(args, "--agent-index") ??
+    findFlag(args, "-aid");
 
   try {
-    // Load credential from vars
+    // Load credential from vars (optional for agent-scoped whoami)
     const credential = getVar("PRIVATE_KEY");
-    if (!credential) die("No credential found. Run: npx kite init");
-
-    const client = await KiteSettleClient.create({ credential });
-
-    const isRegistered = await client.isRegistered();
+    if (!credential && agentIndexStr == undefined) {
+      die("No credential found. Run: npx kite init or pass --agent <id>");
+    }
 
     if (agentIndexStr == undefined) {
+      const client = await KiteSettleClient.create({ credential });
+      const aaWalletAddress = await client
+        .getOwnerAAWalletAddress()
+        .catch(() => undefined);
+      const ownedAgents = await client
+        .getAgentsByOwner(client.eoaAddress)
+        .catch(() => []);
+      const hasOnchainAgents = ownedAgents.length > 0;
+
       info(`  EOA Address:    ${client.eoaAddress}`);
+      info(`  AA Wallet:      ${aaWalletAddress ?? "Unable to resolve"}`);
       info(
-        `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
+        `  Identity Status: ${hasOnchainAgents ? `Registered (${ownedAgents.length} agent${ownedAgents.length === 1 ? "" : "s"})` : "No registered agents found"}`,
       );
     } else {
-      const agentId = Number.parseInt(agentIndexStr, 10);
-      if (Number.isNaN(agentId) || agentId < 0) {
+      let agentId: bigint;
+      try {
+        agentId = BigInt(agentIndexStr);
+      } catch {
+        die(
+          "Invalid --agent value. Must be a non-negative integer (on-chain agentId).",
+        );
+      }
+      if (agentId < 0n) {
         die(
           "Invalid --agent value. Must be a non-negative integer (on-chain agentId).",
         );
       }
 
-      // Agents are NFTs (IdentityRegistry tokenIds) — they have no derived
-      // address. Show the session key info stored during `kite onboard`.
+      const readContracts = new ContractService(KITE_TESTNET, null, "");
+      const ownerOnchain = await readContracts
+        .getAgentOwner(agentId)
+        .catch(() => null);
+      const agentURI = await readContracts.getAgentURI(agentId).catch(() => null);
+      const decoded = agentURI ? decodeAgentMetadataURI(agentURI) : null;
+      const walletFromRegistry = await readContracts
+        .getAgentWalletFromRegistry(agentId)
+        .catch(() => null);
+
+      const credentialClient = credential
+        ? await KiteSettleClient.create({ credential }).catch(() => null)
+        : null;
+      const aaWalletAddress = credentialClient
+        ? await credentialClient.getOwnerAAWalletAddress().catch(() => undefined)
+        : undefined;
+
+      // Agents are NFTs (IdentityRegistry tokenIds). Session keys are bound
+      // to the agent and stored locally during `kite onboard`.
       const sessionAddr = getVar(`SESSION_${agentId}_0_ADDRESS`);
       const ownerAddr = getVar(`AGENT_${agentId}_OWNER`);
+      const walletFromVars = getVar(`AGENT_${agentId}_WALLET`);
+      const resolvedOwner =
+        walletFromRegistry?.user ?? ownerOnchain ?? ownerAddr ?? "Unknown";
+      const resolvedWallet =
+        walletFromRegistry?.walletContract ??
+        walletFromVars ??
+        aaWalletAddress ??
+        "Unknown";
 
-      info(`  EOA Address:    ${ownerAddr ?? client.eoaAddress}`);
+      info(`  EOA Address:    ${resolvedOwner}`);
+      info(`  AA Wallet:      ${resolvedWallet}`);
       info(
-        `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
+        `  Agent Status:    ${ownerOnchain ? "Found on IdentityRegistry" : "Not found on IdentityRegistry"}`,
       );
       info("\n");
       info(`    Agent ID:       ${agentId}  (NFT on IdentityRegistry)`);
+      if (decoded?.name) {
+        info(`    Agent Name:     ${decoded.name}`);
+      }
+      if (decoded?.shortDescription) {
+        info(
+          `    Description:    ${truncateText(decoded.shortDescription, 140)}`,
+        );
+      }
+      if (!decoded && agentURI) {
+        info(`    Metadata URI:   Present (non-decodable format)`);
+      }
       if (sessionAddr) {
         info(`    Session Key:    ${sessionAddr}`);
         info(`    Session Status: Stored (run onboard to renew)`);
@@ -278,6 +388,7 @@ function showHelp() {
 
   Options:
     --agent-index <n>         Agent derivation index (default: 0)
+    --agent <id>              On-chain agentId (for whoami/session/channel)
     --decide <mode>           Decision mode: auto, rules, ai, cli
     --url <url>               Target a live API URL
 
@@ -288,7 +399,7 @@ function showHelp() {
     npx kite call --agent-index 0
     npx kite call --agent-index 0 --decide rules
     npx kite balance --token "" --show-native
-    npx kite whoami --agent-index 1
+    npx kite whoami --agent 1
 
   Config files:
     ~/.kite-agent-pay/vars.json  Secrets & credentials (local only, mode 0600)

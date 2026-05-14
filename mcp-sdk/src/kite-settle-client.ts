@@ -150,6 +150,12 @@ export interface KiteSettleClientOptions {
   allowUnavailableSession?: boolean;
 }
 
+export interface AgentMetadataSummary {
+  name?: string;
+  shortDescription?: string;
+  raw?: Record<string, unknown>;
+}
+
 // ── KiteSettleClient ───────────────────────────────────────────────
 
 export class KiteSettleClient {
@@ -845,11 +851,83 @@ export class KiteSettleClient {
       .catch(() => null);
   }
 
+  /** Derive owner AA wallet (ClientVault) from the active EOA address. */
+  async getOwnerAAWalletAddress(): Promise<string> {
+    return this.requirePaymentClient()
+      .getContractService()
+      .resolveOwnerVaultWalletAddress();
+  }
+
   /** Look up an agent by its on-chain ID (agentId = bigint tokenId). */
   async getAgent(agentId: bigint) {
     return this.requirePaymentClient()
       .getContractService()
       .getAgentURI(agentId);
+  }
+
+  /**
+   * Decode agentURI metadata when it is JSON, base64 JSON, or data URI with base64 JSON.
+   * Returns null when metadata cannot be decoded into a JSON object.
+   */
+  decodeAgentMetadataURI(agentURI: string): AgentMetadataSummary | null {
+    const trimmed = agentURI.trim();
+    const parseObject = (text: string): Record<string, unknown> | null => {
+      try {
+        const parsed = JSON.parse(text);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed)
+        ) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        // ignore parsing errors and try other decode paths
+      }
+      return null;
+    };
+
+    const extractSummary = (
+      obj: Record<string, unknown>,
+    ): AgentMetadataSummary => {
+      const name = typeof obj.name === "string" ? obj.name.trim() : undefined;
+      const descValue =
+        typeof obj.description === "string"
+          ? obj.description
+          : typeof obj.shortDescription === "string"
+            ? obj.shortDescription
+            : undefined;
+
+      const shortDescription = descValue?.replace(/\s+/g, " ").trim();
+      return {
+        name: name || undefined,
+        shortDescription: shortDescription || undefined,
+        raw: obj,
+      };
+    };
+
+    if (trimmed.startsWith("{")) {
+      const obj = parseObject(trimmed);
+      return obj ? extractSummary(obj) : null;
+    }
+
+    const dataUriPrefix = "data:application/json;base64,";
+    if (trimmed.toLowerCase().startsWith(dataUriPrefix)) {
+      const b64 = trimmed.slice(dataUriPrefix.length);
+      try {
+        const obj = parseObject(Buffer.from(b64, "base64").toString("utf8"));
+        return obj ? extractSummary(obj) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    try {
+      const obj = parseObject(Buffer.from(trimmed, "base64").toString("utf8"));
+      return obj ? extractSummary(obj) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Update the agentURI stored on IdentityRegistry. Requires EOA credential. */
