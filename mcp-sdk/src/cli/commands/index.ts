@@ -408,12 +408,22 @@ async function fundWallet(args: string[]) {
 
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
   const client = await KiteSettleClient.create({ credential });
+  const contractService = client.getContractService();
+  const vaultWallet = await contractService.resolveOwnerVaultWalletAddress();
 
   console.log(`  From:     ${client.eoaAddress}`);
-  console.log(
-    `  To:       KiteAAWallet (${KITE_TESTNET.contracts.kiteAAWallet})`,
-  );
+  console.log(`  To:       ClientVault (${vaultWallet})`);
   console.log(`  Amount:   ${amountFlag.trim()} ${token?.symbol || "KITE"}`);
+
+  if (token?.address !== zeroAddress) {
+    const supported = await contractService.isVaultTokenSupported(
+      vaultWallet,
+      token!.address as `0x${string}`,
+    );
+    if (!supported) {
+      console.log(`  Token:    enabling ${token?.symbol || token?.address} on ClientVault`);
+    }
+  }
 
   const balance =
     token?.address === zeroAddress
@@ -422,7 +432,7 @@ async function fundWallet(args: string[]) {
 
   if (balance < amount) {
     throw new Error(
-      `Deployer has insufficient tokens (${fmt(balance)} ${token?.symbol ?? "KITE"})`,
+      `Owner EOA has insufficient funds (${fmt(balance)} ${token?.symbol ?? "KITE"})`,
     );
   }
 
@@ -453,14 +463,26 @@ async function withdrawFunds(args: string[]) {
 
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
   const client = await KiteSettleClient.create({ credential });
+  const contractService = client.getContractService();
+  const vaultWallet = await contractService.resolveOwnerVaultWalletAddress();
 
-  console.log(
-    `  Withdrawing ${amountFlag.trim()} ${token?.symbol || "KITE"} to owner`,
-  );
-  console.log(`   Owner Address: ${client.eoaAddress}`);
-  console.log(
-    "  Note: This will transfer tokens from the AA wallet to your EOA",
-  );
+  const availableToWithdraw =
+    token?.address === zeroAddress
+      ? await contractService.getDeposit(vaultWallet)
+      : await contractService.getAvailableBalance(
+          vaultWallet,
+          token!.address as `0x${string}`,
+        );
+
+  if (availableToWithdraw < amount) {
+    throw new Error(
+      `ClientVault has insufficient funds (${fmt(availableToWithdraw)} ${token?.symbol ?? "KITE"})`,
+    );
+  }
+
+  console.log(`  From:     ClientVault (${vaultWallet})`);
+  console.log(`  To:       ${client.eoaAddress}`);
+  console.log(`  Amount:   ${amountFlag.trim()} ${token?.symbol || "KITE"}`);
 
   const data = await client.withdraw(amount, token?.address);
 

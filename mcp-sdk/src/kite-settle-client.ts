@@ -740,6 +740,11 @@ export class KiteSettleClient {
       .catch(() => 0n);
   }
 
+  /** Access low-level contract helpers for advanced CLI and SDK flows. */
+  getContractService(): ContractService {
+    return this.requirePaymentClient().getContractService();
+  }
+
   /** Deposit tokens into the configured wallet contract. Requires EOA credential. */
   async deposit(amount: bigint, token?: string): Promise<string> {
     return this.requireEoaClient().depositToWallet(

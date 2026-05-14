@@ -4,6 +4,7 @@ import {
   encodeFunctionData,
   formatUnits,
   http,
+  zeroAddress,
   type Hex,
   type PublicClient,
 } from "viem";
@@ -365,34 +366,73 @@ export class ContractService {
     return result.hash;
   }
 
-  async depositToWallet(token: string, amount: bigint): Promise<string> {
-    const walletContract = this.getKiteAAWalletAddress();
-    // First approve
-    const approveData = encodeFunctionData({
-      abi: erc20Abi,
-      functionName: "approve",
-      args: [walletContract as `0x${string}`, amount],
-    });
-    await this.sendTx(token, approveData);
+  async resolveOwnerVaultWalletAddress(): Promise<`0x${string}`> {
+    const { GokiteAASDK } = await import("gokite-aa-sdk");
+    const aaSdk = new GokiteAASDK(
+      this.config.networkName || "kite_testnet",
+      this.config.rpcUrl,
+      this.config.bundlerUrl || "",
+    );
 
-    // Then deposit
-    const depositData = encodeFunctionData({
-      abi: kiteAAWalletAbi,
-      functionName: "deposit",
-      args: [token as `0x${string}`, amount],
+    return aaSdk.getAccountAddress(
+      this.eoaAddress as `0x${string}`,
+    ) as `0x${string}`;
+  }
+
+  async depositToWallet(token: string, amount: bigint): Promise<string> {
+    const walletContract = await this.resolveOwnerVaultWalletAddress();
+
+    if ((token as `0x${string}`) === zeroAddress) {
+      const depositData = encodeFunctionData({
+        abi: clientAgentVaultAbi,
+        functionName: "addDeposit",
+        args: [],
+      });
+      const result = await this.sendTx(walletContract, depositData, amount);
+      return result.hash;
+    }
+
+    const supported = await this.isVaultTokenSupported(
+      walletContract,
+      token as `0x${string}`,
+    );
+    if (!supported) {
+      await this.addVaultSupportedToken(walletContract, token as `0x${string}`);
+    }
+
+    const transferData = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [walletContract, amount],
     });
-    const result = await this.sendTx(walletContract, depositData);
+    const result = await this.sendTx(token, transferData);
     return result.hash;
   }
 
   async withdrawFromWallet(token: string, amount: bigint): Promise<string> {
-    const walletContract = this.getKiteAAWalletAddress();
-    const withdrawData = encodeFunctionData({
-      abi: kiteAAWalletAbi,
-      functionName: "withdraw",
-      args: [token as `0x${string}`, amount],
+    const walletContract = await this.resolveOwnerVaultWalletAddress();
+
+    if ((token as `0x${string}`) === zeroAddress) {
+      const withdrawData = encodeFunctionData({
+        abi: clientAgentVaultAbi,
+        functionName: "withdrawDepositTo",
+        args: [this.eoaAddress as `0x${string}`, amount],
+      });
+      const result = await this.sendTx(walletContract, withdrawData);
+      return result.hash;
+    }
+
+    const transferOutData = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [this.eoaAddress as `0x${string}`, amount],
     });
-    const result = await this.sendTx(walletContract, withdrawData);
+    const executeData = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "execute",
+      args: [token as `0x${string}`, 0n, transferOutData],
+    });
+    const result = await this.sendTx(walletContract, executeData);
     return result.hash;
   }
 
@@ -869,8 +909,7 @@ export class ContractService {
     cumulativeCost: bigint,
     timestamp: number,
     providerSignature: `0x${string}`,
-    merkleRoot: `0x${string}` =
-      "0x0000000000000000000000000000000000000000000000000000000000000000",
+    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000",
   ): Promise<string> {
     const { GokiteAASDK } = await import("gokite-aa-sdk");
     const aaSdk = new GokiteAASDK(
@@ -1052,7 +1091,10 @@ export class ContractService {
       }
     }
 
-    throw lastError ?? new Error("Unknown UserOp failure while initiating settlement");
+    throw (
+      lastError ??
+      new Error("Unknown UserOp failure while initiating settlement")
+    );
   }
 
   async initiateSettlement(
