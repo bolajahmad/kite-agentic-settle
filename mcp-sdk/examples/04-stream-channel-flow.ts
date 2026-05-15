@@ -16,7 +16,7 @@
  * PREREQUISITES:
  * - Run `npx kite init` to store your EOA seed phrase
  * - Run `npx kite onboard` to register an agent and create a session key
- * - Fund your KiteAAWallet with test USDC
+ * - Fund your ClientAgentVault with test USDC: npx kite fund --amount <amount>
  * - Start backend server at http://localhost:4000
  */
 
@@ -33,8 +33,8 @@ import { createLogger } from "./lib/logger.js";
 import { createDemoClient, formatUsdc } from "./lib/setup.js";
 
 // Demo configuration
-const AGENT_ID = "2";
-const SESSION_KEY = "0x2DEb5Dc8C9EB1D06BfFad7D808a56C46089e78aF";
+const AGENT_ID = "3";
+const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
 const STREAM_DURATION_SECONDS = 30; // 30 second window for demo
 const CALL_INTERVAL_MS = 3000; // Call every 3 seconds
 
@@ -71,8 +71,13 @@ export async function run() {
     logger.info(`Session key: ${client.sessionKeyAddress}`);
 
     // ── Check balance before ──────────────────────────────────────────
-    logger.step("Check wallet balance before opening channel");
-    const balanceBefore = await client.getDepositedBalance();
+    logger.step("Check ClientAgentVault balance before opening channel");
+    const vaultAddress = await client.getOwnerAAWalletAddress();
+    logger.info(`ClientAgentVault: ${vaultAddress}`);
+    const balanceBefore = await client.getDepositedBalance(
+      undefined,
+      vaultAddress,
+    );
     logger.data("Balance Before", {
       formatted: formatUsdc(balanceBefore),
       raw: balanceBefore.toString(),
@@ -80,7 +85,7 @@ export async function run() {
 
     if (balanceBefore === 0n) {
       logger.warn(
-        "Wallet balance is zero. Fund your wallet: npx kite fund --amount <amount>",
+        "Vault balance is zero. Fund your vault: npx kite fund --amount <amount>",
       );
       logger.info("Demo will continue but channel opening may fail");
     }
@@ -136,17 +141,30 @@ export async function run() {
       maxPerCall: formatUsdc(maxPerCall),
     });
 
-    const { txHash: openTxHash, channelId } = await client.openChannel({
-      provider: providerAddress,
-      token: tokenAddress,
-      mode: "prepaid",
-      deposit: depositAmount,
-      maxSpend: depositAmount,
-      maxDuration: STREAM_DURATION_SECONDS,
-      maxPerCall,
-    });
+    const { txHash: openTxHash, channelId: newChannelId } = await client
+      .getContractService()
+      .openChannelViaVaultBatch(
+        client.sessionKeyAddress as `0x${string}`,
+        vaultAddress as `0x${string}`,
+        providerAddress,
+        tokenAddress,
+        0, // prepaid mode
+        depositAmount,
+        depositAmount, // maxSpend == deposit
+        STREAM_DURATION_SECONDS,
+        maxPerCall,
+      );
 
-    logger.success("Stream channel opened on-chain");
+    if (!newChannelId) {
+      throw new Error(
+        "openChannelViaVaultBatch did not return a channelId — check ChannelOpened event",
+      );
+    }
+    const channelId = newChannelId;
+
+    logger.success(
+      "Stream channel opened on-chain (via ClientAgentVault batch — gas sponsored)",
+    );
     logger.data("Channel Info", {
       channelId: channelId,
       txHash: openTxHash,
@@ -354,8 +372,11 @@ export async function run() {
     });
 
     // ── Check balance after ───────────────────────────────────────────
-    logger.step("Check wallet balance after stream");
-    const balanceAfter = await client.getDepositedBalance();
+    logger.step("Check ClientAgentVault balance after stream");
+    const balanceAfter = await client.getDepositedBalance(
+      undefined,
+      vaultAddress,
+    );
     logger.data("Balance After", {
       formatted: formatUsdc(balanceAfter),
       raw: balanceAfter.toString(),

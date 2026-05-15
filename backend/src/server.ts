@@ -7,6 +7,7 @@ import agentRoutes from "./routes/agent";
 import channelRoutes from "./routes/channel";
 import streamRoutes from "./routes/channel-data.js";
 import dataRoutes from "./routes/data";
+import flexRoutes from "./routes/flex-data.js";
 import paymentRoutes from "./routes/payment";
 import registryRoutes from "./routes/registry";
 import serviceRoutes from "./routes/service";
@@ -62,6 +63,11 @@ app.use("/api/data", dataRoutes);
 // channel metadata; subsequent calls carry X-Channel-Id and accumulate cost
 // via provider-signed receipts that anchor to the PaymentChannel contract.
 app.use("/api/stream", streamRoutes);
+
+// ─── Flex (dual-mode) data API ─────────────────────────────────────────
+// Routes under /api/flex accept EITHER x402 (per-call) OR channel payment.
+// The consumer picks the mode; the combined 402 challenge advertises both.
+app.use("/api/flex", flexRoutes);
 
 // ─── MCP + Function-calling + HTTP proxy tool API ─────────────────────
 // Three-fold AI agent integration surface:

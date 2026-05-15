@@ -2,239 +2,221 @@
  * Demo 6: Multi-Provider Agent Workflow
  *
  * SCALABILITY PROOF:
- * This demo shows how a single agent identity (NFT) can interact with multiple
- * providers simultaneously using the same session key. This demonstrates the
- * scalability of Kite's agent-based architecture compared to per-provider
- * credential management.
+ * This demo shows how a single agent identity can interact with multiple
+ * providers simultaneously using the same session key. Two payment modes
+ * are exercised in the same run:
+ *
+ *   • x402 per-call  — real localhost:4000 endpoints (/api/data/*)
+ *   • x402 per-call  — lightweight mock provider (no on-chain infra needed)
  *
  * WHAT YOU'LL LEARN:
- * - How one agent identity works across multiple providers
+ * - How one agent identity authenticates to multiple providers
  * - How session keys enable multi-provider concurrency
- * - How to track costs per provider while using single identity
- * - How agent-based auth simplifies credential management
+ * - How to track costs per provider with a single agent identity
+ * - How agent-based auth eliminates per-provider API keys
  *
  * PREREQUISITES:
  * - Run `npx kite init` to store your EOA seed phrase
  * - Run `npx kite onboard` to register an agent and create a session key
- * - Fund your KiteAAWallet with test USDC
+ * - Fund your ClientAgentVault with test USDC
+ * - Start backend server at http://localhost:4000
  */
 
 import { createLogger } from "./lib/logger.js";
-import { createMockProvider } from "./lib/mock-provider.js";
-import {
-  createDemoClient,
-  formatUsdc,
-  parseUsdc,
-  wait,
-} from "./lib/setup.js";
+import { MockProvider } from "./lib/mock-provider.js";
+import { createDemoClient, formatUsdc, parseUsdc, wait } from "./lib/setup.js";
+
+const AGENT_ID = "3";
+const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
+const BACKEND_BASE = "http://localhost:4000";
 
 export async function run() {
   const logger = createLogger();
 
   logger.header(
     "Demo 6: Multi-Provider Agent Workflow",
-    "One agent identity across many providers"
+    "One agent identity across many providers (x402 per-call)",
   );
 
   try {
     // ── Setup ────────────────────────────────────────────────────────
-    logger.step("Initialize Kite client");
-    const client = await createDemoClient({ logger });
+    logger.step("Initialize Kite client in agent mode");
+    logger.info(`Agent ID: ${AGENT_ID}`);
+    logger.info(`Session key: ${SESSION_KEY}`);
+
+    const client = await createDemoClient({
+      logger,
+      agentId: AGENT_ID,
+      sessionKey: SESSION_KEY,
+      allowUnavailableSession: true,
+    });
 
     if (!client.sessionKeyAddress) {
-      logger.error(
-        "No session key found. Run 'npx kite onboard' to create one."
-      );
+      logger.error("No session key found. Run 'npx kite onboard' to create one.");
       throw new Error("Session key required for multi-provider demo");
     }
 
     logger.success("Client initialized");
-    logger.info(`Agent (EOA): ${client.eoaAddress}`);
-    logger.info(`Session key: ${client.sessionKeyAddress}`);
-    logger.info(
-      "This SINGLE identity will authenticate to multiple providers"
-    );
+    logger.info(`EOA (owner):  ${client.eoaAddress}`);
+    logger.info(`Session key:  ${client.sessionKeyAddress}`);
+    logger.info("This SINGLE identity will authenticate to every provider below.");
 
-    // ── Start multiple mock providers ─────────────────────────────────
-    logger.step("Start multiple API providers");
+    // ── Check vault balance ───────────────────────────────────────────
+    logger.step("Check ClientAgentVault balance");
+    const vaultAddress = await client.getOwnerAAWalletAddress();
+    const balanceBefore = await client.getDepositedBalance(undefined, vaultAddress);
+    logger.data("Balance Before", {
+      formatted: formatUsdc(balanceBefore),
+      raw: balanceBefore.toString(),
+    });
 
-    const providers = [
+    if (balanceBefore === 0n) {
+      logger.warn("Vault balance is zero. Fund: npx kite fund --amount <amount>");
+      logger.info("Demo continues — on-chain settlement may fail.");
+    }
+
+    // ── Start mock provider ───────────────────────────────────────────
+    logger.step("Start mock analytics provider (x402 per-call)");
+    const MOCK_PORT = 3420;
+    const MOCK_PRICE = parseUsdc("0.03");
+    const mockProvider = new MockProvider({
+      port: MOCK_PORT,
+      agentAddress: client.eoaAddress,
+      pricePerCall: MOCK_PRICE,
+    });
+    await mockProvider.start();
+    logger.success(`Mock AnalyticsAPI started on port ${MOCK_PORT}`);
+
+    // ── Provider catalogue ────────────────────────────────────────────
+    const providers: Array<{
+      name: string;
+      url: string;
+      description: string;
+      mock?: boolean;
+    }> = [
       {
-        name: "WeatherAPI",
-        price: parseUsdc("0.01"),
-        port: 3410,
-        service: "Weather forecasting",
+        name: "Kite Intelligence",
+        url: `${BACKEND_BASE}/api/data/intelligence`,
+        description: "AI on-chain intelligence signals",
       },
       {
-        name: "MarketDataAPI",
-        price: parseUsdc("0.05"),
-        port: 3411,
-        service: "Real-time market prices",
+        name: "Kite Market Data",
+        url: `${BACKEND_BASE}/api/data/market/BTCUSDT`,
+        description: "Real-time BTC/USDT market feed",
       },
       {
-        name: "TranslationAPI",
-        price: parseUsdc("0.02"),
-        port: 3412,
-        service: "Language translation",
+        name: "Kite Protocol Report",
+        url: `${BACKEND_BASE}/api/data/protocol-report`,
+        description: "DeFi protocol analytics",
       },
       {
-        name: "AnalyticsAPI",
-        price: parseUsdc("0.10"),
-        port: 3413,
-        service: "Data analytics",
+        name: "Mock AnalyticsAPI",
+        url: `http://localhost:${MOCK_PORT}`,
+        description: "Third-party analytics provider (mock)",
+        mock: true,
       },
     ];
 
-    const mockProviders = await Promise.all(
-      providers.map((p) =>
-        createMockProvider({
-          port: p.port,
-          agentAddress: client.eoaAddress,
-          pricePerCall: p.price,
-        })
-      )
-    );
-
-    logger.success(`Started ${providers.length} providers`);
-    for (const p of providers) {
-      logger.info(`  - ${p.name}: ${formatUsdc(p.price)}/call (${p.service})`);
-    }
-
-    // ── Make calls to different providers ─────────────────────────────
-    logger.step("Make API calls across multiple providers");
-    logger.info("Using SAME agent identity and session key for all providers\n");
-
-    const providerCosts = new Map<string, bigint>();
-
-    for (const provider of providers) {
-      logger.info(`  📞 Calling ${provider.name}...`);
-
-      const startTime = Date.now();
-      const response = await client.fetchWithPayment(
-        `http://localhost:${provider.port}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: `Request to ${provider.name}`,
-          }),
-          mode: "perCall",
-        }
-      );
-
-      const result = await response.json();
-      const elapsed = Date.now() - startTime;
-
-      providerCosts.set(
-        provider.name,
-        (providerCosts.get(provider.name) || 0n) + provider.price
-      );
-
-      logger.success(`  ${provider.name} responded in ${elapsed}ms`);
-      logger.info(`  Cost: ${formatUsdc(provider.price)}`);
-      logger.info(`  Session: ${client.sessionKeyAddress?.slice(0, 10)}...`);
-
-      await wait(300); // Brief pause between calls
-    }
-
-    // ── Cost attribution per provider ─────────────────────────────────
-    logger.step("Cost attribution by provider");
-
-    const totalCost = Array.from(providerCosts.values()).reduce(
-      (sum, cost) => sum + cost,
-      0n
-    );
-
-    logger.data("Cost Breakdown", {
-      providers: Array.from(providerCosts.entries()).map(([name, cost]) => ({
-        provider: name,
-        cost: formatUsdc(cost),
-        percentage: `${((Number(cost) / Number(totalCost)) * 100).toFixed(1)}%`,
+    logger.data("Provider Catalogue", {
+      providers: providers.map((p) => ({
+        name: p.name,
+        url: p.url,
+        type: p.mock ? "mock x402" : "kite x402",
       })),
-      total: formatUsdc(totalCost),
     });
 
-    logger.info("\n💡 Key insight:");
-    logger.info(
-      "  Single agent identity + session key worked across ALL providers"
-    );
-    logger.info("  No per-provider API keys or credentials needed");
-    logger.info("  All payments traceable to same agent in indexer");
+    // ── Call each provider ────────────────────────────────────────────
+    logger.step("Make API calls across all providers");
+    logger.info("Same session key is used for every call — no per-provider keys.\n");
 
-    // ── Compare to traditional approach ───────────────────────────────
-    logger.step("Compare: Agent-based vs Traditional Auth");
+    const costPerProvider = new Map<string, bigint>();
+    let totalCalls = 0;
 
-    logger.info("❌ Traditional approach (per-provider credentials):");
-    logger.info(`  - Need ${providers.length} separate API keys`);
-    logger.info("  - Manage expiry/rotation for each key");
-    logger.info("  - Separate billing/tracking per provider");
-    logger.info("  - Risk: key leakage affects that provider only");
-    logger.info("  - Complexity: O(n) credentials for n providers");
+    for (const provider of providers) {
+      logger.info(`📞 Calling ${provider.name}...`);
+      logger.info(`   ${provider.description}`);
 
-    logger.info("\n✅ Kite agent-based approach:");
-    logger.info("  - ONE agent identity (NFT) for all providers");
-    logger.info("  - ONE session key with unified capacity/expiry");
-    logger.info("  - Unified billing tracked by single agent ID");
-    logger.info("  - Risk: revoke session key affects all (by design)");
-    logger.info("  - Complexity: O(1) credentials for n providers");
+      const t0 = Date.now();
+      try {
+        const response = await client.fetchWithPayment(
+          provider.url,
+          { method: "GET", headers: { "Content-Type": "application/json" } },
+          { paymentMode: "perCall" },
+        );
+        const elapsed = Date.now() - t0;
 
-    // ── Multi-session scalability ─────────────────────────────────────
-    logger.step("Multi-session scalability");
+        if (response.ok) {
+          const body = await response.json();
+          logger.success(`   ✅ ${response.status} OK (${elapsed}ms)`);
 
-    logger.info("Advanced pattern: Multiple sessions per agent");
-    logger.info("\n🔑 Session 1 (High-cost providers):");
-    logger.info("  - valueLimit: $100");
-    logger.info("  - validUntil: 7 days");
-    logger.info("  - Used for: AnalyticsAPI, MarketDataAPI");
+          // Log a snippet of the response without flooding the terminal
+          const preview = JSON.stringify(body).slice(0, 120);
+          logger.info(`   Response: ${preview}${preview.length === 120 ? "…" : ""}`);
 
-    logger.info("\n🔑 Session 2 (Low-cost providers):");
-    logger.info("  - valueLimit: $10");
-    logger.info("  - validUntil: 1 day");
-    logger.info("  - Used for: WeatherAPI, TranslationAPI");
+          // Track cost — read from response or use known rate
+          const reportedCost =
+            body?.payment?.amount ?? body?.cost ?? body?.channelReceipt?.cumulativeCost;
+          costPerProvider.set(provider.name, reportedCost ? BigInt(reportedCost) : 0n);
+          totalCalls++;
+        } else {
+          const err = await response.json().catch(() => ({}));
+          logger.warn(`   ⚠️  ${response.status}: ${JSON.stringify(err).slice(0, 80)}`);
+        }
+      } catch (err: any) {
+        logger.error(`   ❌ ${provider.name} failed: ${err.message}`);
+        if (provider.mock) {
+          logger.info("   (Mock provider may require a valid Kite receipt — see mock-provider.ts)");
+        } else {
+          logger.info("   Make sure the backend is running at http://localhost:4000");
+        }
+      }
 
-    logger.info("\n💡 Benefits:");
-    logger.success("  ✅ Granular risk management per session");
-    logger.success("  ✅ Different expiry policies per use case");
-    logger.success("  ✅ Parallel workloads without capacity contention");
-    logger.success("  ✅ Revoke individual sessions without EOA compromise");
+      await wait(400);
+    }
 
-    // ── Real-world use cases ──────────────────────────────────────────
-    logger.step("Real-world use cases");
+    // ── Cost attribution ──────────────────────────────────────────────
+    logger.step("Cost attribution by provider");
 
-    logger.info("🤖 AI Agent Orchestration:");
-    logger.info(
-      "  - Single agent calls: LLM API, vector DB, web search, data APIs"
-    );
-    logger.info("  - All costs tracked under one agent identity");
-    logger.info("  - Session capacity = agent's spending budget");
+    const balanceAfter = await client.getDepositedBalance(undefined, vaultAddress);
+    const totalSpent = balanceBefore - balanceAfter;
 
-    logger.info("\n🔄 Cross-Provider Workflows:");
-    logger.info("  - Fetch data from Provider A");
-    logger.info("  - Process via Provider B");
-    logger.info("  - Store results at Provider C");
-    logger.info("  - All authenticated with same agent identity");
+    logger.data("Cost Summary", {
+      totalCalls,
+      totalSpent: formatUsdc(totalSpent),
+      vaultBefore: formatUsdc(balanceBefore),
+      vaultAfter: formatUsdc(balanceAfter),
+      perProvider: providers.map((p) => ({
+        provider: p.name,
+        reportedCost: costPerProvider.has(p.name)
+          ? formatUsdc(costPerProvider.get(p.name)!)
+          : "n/a",
+      })),
+    });
 
-    logger.info("\n📊 Multi-Tenant SaaS:");
-    logger.info("  - Each customer gets an agent identity");
-    logger.info("  - Agent calls multiple backend services");
-    logger.info("  - Per-customer cost attribution via agent ID");
-    logger.info("  - Centralized session management per tenant");
+    // ── Agent-based vs traditional comparison ─────────────────────────
+    logger.step("Agent-based auth vs Traditional API-key auth");
 
-    logger.info("\n🌐 Decentralized API Marketplace:");
-    logger.info("  - Discover providers via registry");
-    logger.info("  - Pay any provider with same agent identity");
-    logger.info("  - No pre-registration or API key exchange");
-    logger.info("  - Reputation tracked per agent across providers");
+    logger.info("❌ Traditional (per-provider API keys):");
+    logger.info(`   - ${providers.length} separate API keys to manage`);
+    logger.info("   - Rotate/revoke each key independently");
+    logger.info("   - Separate billing per provider");
+    logger.info(`   - Complexity: O(${providers.length}) credentials for ${providers.length} providers`);
+
+    logger.info("\n✅ Kite agent-based:");
+    logger.info("   - ONE session key for ALL providers");
+    logger.info("   - Revoke the session key to cut ALL providers at once");
+    logger.info("   - Unified cost tracking under one agent ID");
+    logger.info("   - Complexity: O(1) regardless of provider count");
 
     // ── Cleanup ───────────────────────────────────────────────────────
-    logger.step("Cleanup resources");
-    await Promise.all(mockProviders.map((p) => p.stop()));
-    logger.success("All providers stopped");
+    logger.step("Cleanup");
+    await mockProvider.stop();
+    logger.success("Mock provider stopped");
 
     logger.complete(
-      "Multi-provider agent workflow demonstrated. Single agent identity enables " +
-        "seamless authentication across multiple providers, unified cost tracking, " +
-        "and O(1) credential management complexity regardless of provider count."
+      "Multi-provider demo complete. One agent identity authenticated to " +
+        `${providers.length} providers (${providers.filter((p) => !p.mock).length} real, ` +
+        `${providers.filter((p) => p.mock).length} mock) with zero per-provider credential management.`,
     );
   } catch (err: any) {
     logger.error(`Demo failed: ${err.message}`);
@@ -245,10 +227,11 @@ export async function run() {
   }
 }
 
-// Allow running standalone
 if (import.meta.url === `file://${process.argv[1]}`) {
-  run().catch((err) => {
+  try {
+    await run();
+  } catch (err) {
     console.error("Fatal error:", err);
     process.exit(1);
-  });
+  }
 }

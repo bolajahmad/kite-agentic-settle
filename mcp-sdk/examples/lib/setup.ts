@@ -4,7 +4,7 @@
  */
 
 import { KITE_TESTNET, KiteSettleClient } from "../../src/index.js";
-import { getVar } from "../../src/vars.js";
+import { getCredential } from "../../src/vars.js";
 import type { Logger } from "./logger.js";
 
 export interface DemoSetupOptions {
@@ -37,7 +37,7 @@ export async function createDemoClient(
   // Try to resolve credential
   let credential: string | undefined;
   try {
-    credential = getVar("PRIVATE_KEY");
+    credential = getCredential();
   } catch {
     // No credential stored, will fail later if needed
   }

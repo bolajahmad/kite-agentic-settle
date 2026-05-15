@@ -168,8 +168,21 @@ function saveConfig(cfg: Record<string, string>): void {
 }
 
 /** Get the EOA credential stored by `kite init`. Falls back to PRIVATE_KEY env var. */
+/** Get the EOA credential stored by `kite init`. Falls back to PRIVATE_KEY env var.
+ *  Migration fallback: also reads from legacy vars.json if config.json is empty. */
 export function getCredential(): string | undefined {
-  return loadConfig()["PRIVATE_KEY"] ?? process.env.PRIVATE_KEY ?? undefined;
+  // Primary: dedicated config.json
+  const fromConfig = loadConfig()["PRIVATE_KEY"];
+  if (fromConfig) return fromConfig;
+
+  // Env var
+  if (process.env.PRIVATE_KEY) return process.env.PRIVATE_KEY;
+
+  // Migration fallback: old location in vars.json
+  const fromVars = load()["PRIVATE_KEY"];
+  if (fromVars) return fromVars;
+
+  return undefined;
 }
 
 /** Store the EOA credential in the dedicated config file. */

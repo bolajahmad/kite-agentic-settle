@@ -4,36 +4,35 @@
  * ARCHITECTURAL DIFFERENTIATOR:
  * This demo shows how Kite payment channels are fundamentally different from
  * traditional payment channels. Instead of being EOA-to-EOA, Kite channels
- * are bound to session keys with explicit capacity and time constraints.
- * This enables:
- * - Granular spend control (valueLimit)
- * - Time-bounded execution (validUntil)
+ * are bound to session keys registered in the user's ClientAgentVault (AA wallet)
+ * with explicit spending budgets and time constraints. This enables:
+ * - Granular spend control (per-session spending rules in ClientAgentVault)
+ * - Time-bounded execution (validUntil in IdentityRegistry)
  * - Revocable delegation without compromising EOA security
  * - Multi-session concurrency from single agent identity
  *
  * WHAT YOU'LL LEARN:
  * - How session keys constrain channel capacity and validity
- * - Why channels cannot exceed session limits
+ * - Why channels cannot exceed session limits (enforced by ClientAgentVault)
  * - How the SDK clamps channel parameters to session bounds
- * - How on-chain spent tracking enforces session limits
+ * - How the ClientAgentVault spending rules track capacity consumption
  *
  * PREREQUISITES:
  * - Run `npx kite init` to store your EOA seed phrase
  * - Run `npx kite onboard` to register an agent and create a session key
- * - Fund your KiteAAWallet with test USDC
+ * - Fund your ClientAgentVault with test USDC: npx kite fund --amount <amount>
  */
 
 // Demo configuration - replace with your agent and session
-const AGENT_ID = "2";
-const SESSION_KEY = "0xb06ccc215fdcff276b82edce185fa7733be16fb4";
+const AGENT_ID = "3";
+const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
 
-import { getSessionSpentFromIndexer } from "../src/indexer.js";
 import { createLogger } from "./lib/logger.js";
 import {
   createDemoClient,
   formatTimestamp,
   formatUsdc,
-  isSessionValid,
+  now,
 } from "./lib/setup.js";
 
 export async function run() {
@@ -68,8 +67,16 @@ export async function run() {
     logger.info(`Agent address (EOA): ${client.eoaAddress}`);
     logger.info(`Session key: ${client.sessionKeyAddress}`);
 
+    // ── Resolve ClientAgentVault address ─────────────────────────────
+    logger.step("Resolve owner ClientAgentVault (AA wallet) address");
+
+    const vaultAddress = await client.getOwnerAAWalletAddress();
+    logger.info(`ClientAgentVault: ${vaultAddress}`);
+    logger.info(`EOA owner:        ${client.eoaAddress}`);
+    logger.info("Sessions and spending rules are stored in this vault.");
+
     // ── Fetch session limits ──────────────────────────────────────────
-    logger.step("Query session limits from indexer");
+    logger.step("Query session limits from indexer (IdentityRegistry)");
 
     const sessions = await client.getSessionsByAgent(`0x${AGENT_ID}`);
     const activeSession = sessions.find(
@@ -82,29 +89,51 @@ export async function run() {
       throw new Error("Session data unavailable");
     }
 
-    logger.data("Active Session", {
+    logger.data("Active Session (IdentityRegistry)", {
       sessionKey: activeSession.sessionKey,
       valueLimit: formatUsdc(BigInt(activeSession.valueLimit)),
       validUntil: formatTimestamp(Number(activeSession.validUntil)),
       status: activeSession.status,
     });
 
-    // ── Check on-chain spent ──────────────────────────────────────────
-    logger.step("Check on-chain spent for session");
+    // ── Check session spent from ClientAgentVault ────────────────────
+    logger.step("Check session budget from ClientAgentVault spending rules");
+    logger.info(
+      "Reading on-chain spending rules from the ClientAgentVault for this session.",
+    );
 
-    const spent = await getSessionSpentFromIndexer(client.sessionKeyAddress);
-    const remaining = BigInt(activeSession.valueLimit) - spent;
+    const cs = client.getContractService();
+    const spendingRules = await cs.getVaultSpendingRules(
+      vaultAddress as `0x${string}`,
+      activeSession.sessionId as `0x${string}`,
+    );
 
-    logger.data("Session Capacity", {
-      valueLimit: formatUsdc(BigInt(activeSession.valueLimit)),
+    if (!spendingRules || spendingRules.length === 0) {
+      logger.warn("No spending rules found on ClientAgentVault for this session.");
+      logger.info("The session may not have been created with spending rules.");
+      return;
+    }
+
+    const currentRule = spendingRules[0];
+    const budget = currentRule.rule.budget;
+    const spent = currentRule.usage.amountUsed;
+    const remaining = budget > spent ? budget - spent : 0n;
+
+    logger.data("Session Capacity (ClientAgentVault)", {
+      budget: formatUsdc(budget),
       spent: formatUsdc(spent),
       remaining: formatUsdc(remaining),
     });
 
-    const validity = isSessionValid(activeSession, spent);
-    if (!validity.valid) {
-      logger.warn(`Session is not valid: ${validity.reason}`);
-      logger.info("This demo requires a valid session with remaining capacity");
+    if (Number(activeSession.validUntil) <= now()) {
+      logger.warn(`Session expired at ${formatTimestamp(Number(activeSession.validUntil))}`);
+      logger.info("This demo requires a non-expired session");
+      return;
+    }
+
+    if (remaining === 0n) {
+      logger.warn("Session has no remaining capacity");
+      logger.info("This demo requires a session with remaining budget");
       return;
     }
 
@@ -128,9 +157,9 @@ export async function run() {
     // ── Open channel with clamping ────────────────────────────────────
     logger.step("Open channel (SDK applies session-bound clamping)");
 
-    // Note: In real usage, the CLI commands enforce this. Here we demonstrate
-    // the concept. The actual channel opening would fail if attempted without
-    // proper session context.
+    // Note: In real usage, the CLI commands enforce this via ClientAgentVault
+    // spending rules. Here we demonstrate the concept. The actual channel opening
+    // goes through openChannelViaVaultBatch which enforces session budget on-chain.
 
     const maxAllowedDeposit = remaining; // Can't deposit more than remaining capacity
     const maxAllowedExpiry = Number(activeSession.validUntil); // Can't extend beyond session expiry
@@ -148,16 +177,19 @@ export async function run() {
 
     logger.info(" Session-bound channels enforce limits at multiple layers:");
     logger.info(
-      "  1. CLI validation: Rejects channel open without agent/session pair",
+      "  1. CLI validation: Rejects channel open without a registered agent/session pair",
     );
     logger.info(
-      "  2. SDK clamping: Automatically reduces deposit and duration to session limits",
+      "  2. SDK clamping: Automatically clamps deposit and duration to session bounds",
     );
     logger.info(
-      "  3. On-chain tracking: getSessionSpent() validates capacity consumption",
+      "  3. ClientAgentVault spending rules: On-chain budget per session (amountUsed / budget)",
     );
     logger.info(
-      "  4. Contract validation: KiteAAWallet rejects transactions exceeding session capacity",
+      "  4. openChannelViaVaultBatch: Channel open is an AA batch tx that the vault validates",
+    );
+    logger.info(
+      "  5. IdentityRegistry: validUntil cap prevents channel expiry beyond session lifetime",
     );
 
     // ── Show benefits ─────────────────────────────────────────────────

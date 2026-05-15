@@ -4,19 +4,19 @@
  * VALUE PROPOSITION:
  * This demo shows the fundamental value of Kite Agent Pay — programmable
  * micropayments using EIP-712 signed receipts that settle on-chain through
- * KiteAAWallet contracts. No pre-funding, no channel setup, just pay-as-you-go.
+ * the ClientAgentVault (AA wallet). No pre-funding, no channel setup, just pay-as-you-go.
  *
  * WHAT YOU'LL LEARN:
  * - How x402 payment challenges work (402 Payment Required)
  * - Difference between regular fetch (fails with 402) vs Kite fetch (auto-pays)
  * - How EIP-712 receipts are signed using session keys
  * - How the SDK automatically handles payment negotiation
- * - How receipts settle on-chain via KiteAAWallet
+ * - How receipts settle on-chain via the ClientAgentVault
  *
  * PREREQUISITES:
  * - Run `npx kite init` to store your EOA seed phrase
  * - Run `npx kite onboard` to register an agent and create a session key
- * - Fund your KiteAAWallet with test USDC
+ * - Fund your ClientAgentVault with test USDC: npx kite fund --amount <amount>
  * - Update AGENT_ID and SESSION_KEY below with your values
  *
  * USAGE:
@@ -25,8 +25,8 @@
  */
 
 // Demo configuration - replace with your agent and session
-const AGENT_ID = "1";
-const SESSION_KEY = "0x525e1B309Ddc64a79C41f76570CA2D08b3A11596";
+const AGENT_ID = "3";
+const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
 
 import { createLogger } from "./lib/logger.js";
 import { createDemoClient, formatUsdc } from "./lib/setup.js";
@@ -60,8 +60,10 @@ export async function run() {
     }
 
     // ── Check wallet balance ──────────────────────────────────────────
-    logger.step("Check KiteAAWallet balance");
-    const balance = await client.getDepositedBalance();
+    logger.step("Check ClientAgentVault balance");
+    const vaultAddress = await client.getOwnerAAWalletAddress();
+    logger.info(`ClientAgentVault address: ${vaultAddress}`);
+    const balance = await client.getDepositedBalance(undefined, vaultAddress);
     logger.data("Balance Before Calls", {
       raw: balance.toString(),
       formatted: formatUsdc(balance),
@@ -69,7 +71,7 @@ export async function run() {
 
     if (balance === 0n) {
       logger.warn(
-        "Wallet balance is zero. Fund your wallet with: npx kite fund --amount <amount>",
+        "Vault balance is zero. Fund your vault with: npx kite fund --amount <amount>",
       );
       logger.info(
         "Demo will continue to show payment flow (on-chain settlement may fail)",
@@ -182,8 +184,8 @@ export async function run() {
     }
 
     // ── Check balance after payment ───────────────────────────────────
-    logger.step("Check wallet balance after payment");
-    const balanceAfter = await client.getDepositedBalance();
+    logger.step("Check ClientAgentVault balance after payment");
+    const balanceAfter = await client.getDepositedBalance(undefined, vaultAddress);
     logger.data("Balance After Calls", {
       raw: balanceAfter.toString(),
       formatted: formatUsdc(balanceAfter),
@@ -198,7 +200,8 @@ export async function run() {
 
     logger.complete(
       "Per-call x402 payment flow demonstrated. Standard fetch gets 402 error. " +
-        "Kite SDK automatically handles payment negotiation with EIP-712 receipts.",
+        "Kite SDK automatically handles payment negotiation with EIP-712 receipts. " +
+        "Payments are settled on-chain via the ClientAgentVault (AA wallet).",
     );
   } catch (err: any) {
     logger.error(`Demo failed: ${err.message}`);

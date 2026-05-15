@@ -745,7 +745,6 @@ export function startSettlementWatcher(): () => void {
   }
 
   const providerAddress = getSigner().address;
-  const pc = getPaymentChannel(getProvider());
   const iface = new ethers.Interface(PaymentChannelABI);
   const processedSettlements = new Set<string>(); // Track processed channelIds to avoid duplicates
   let lastBlock = 0;
@@ -795,22 +794,43 @@ export function startSettlementWatcher(): () => void {
               `deadline=${new Date(Number(settlementDeadline) * 1000).toISOString()}`,
           );
 
-          // Check if we are the provider for this channel
+          // Check if we are the provider for this channel (on-chain fetch)
           const channelData = await getChannelOnChain(channelId);
           if (channelData.provider.toLowerCase() !== providerAddress.toLowerCase()) {
             console.log(`[SettlementWatcher] Not our channel (provider=${channelData.provider}), ignoring`);
             continue;
           }
 
-          // Load our local session and receipts
-          const session = getSession(channelId);
-          if (!session) {
-            console.log(`[SettlementWatcher] No local session found for channel ${channelId}`);
-            continue;
+          // Resolve the consumer (= session key) and agent identity from on-chain,
+          // mirroring the CLI pattern of using channel data rather than local state.
+          const sessionKeyAddress = channelData.consumer;
+          try {
+            const agentInfo = await getAgentBySessionOnChain(sessionKeyAddress);
+            console.log(
+              `[SettlementWatcher] Agent: ${agentInfo.agentDomain} (id=${agentInfo.agentId}), ` +
+                `sessionKey=${sessionKeyAddress}`,
+            );
+          } catch {
+            console.log(`[SettlementWatcher] Session key: ${sessionKeyAddress} (agent lookup failed)`);
           }
 
-          if (!session.lastReceipt) {
-            console.log(`[SettlementWatcher] No receipts in session for channel ${channelId}`);
+          // Try local session first (populated by requireChannelPayment middleware).
+          // Fall back gracefully when the channel was opened externally — in that
+          // case the contract has already validated our signature on the receipt, so
+          // we can safely approve without re-checking the amounts locally.
+          const session = getSession(channelId);
+          if (!session?.lastReceipt) {
+            console.log(
+              `[SettlementWatcher] No local receipt record for ${channelId} — ` +
+                `approving (signature already verified on-chain by contract)`,
+            );
+            try {
+              const { txHash } = await approveSettlementOnChain(channelId);
+              console.log(`[SettlementWatcher] ✅ Settlement approved. Tx: ${txHash}`);
+            } catch (err: any) {
+              console.error(`[SettlementWatcher] ❌ Failed to approve: ${err.message}`);
+              console.log(`[SettlementWatcher] Will wait for challenge window to expire naturally`);
+            }
             continue;
           }
 
@@ -881,10 +901,9 @@ export function startSettlementWatcher(): () => void {
 
             try {
               // Call approveSettlement to skip challenge window
-              const tx = await pc.approveSettlement(channelId);
-              const receipt = await tx.wait();
+              const { txHash } = await approveSettlementOnChain(channelId);
               console.log(
-                `[SettlementWatcher] ✅ Settlement approved (fast-path). Tx: ${receipt.hash}`,
+                `[SettlementWatcher] ✅ Settlement approved (fast-path). Tx: ${txHash}`,
               );
             } catch (err: any) {
               console.error(

@@ -23,6 +23,15 @@ interface Demo {
 
 const DEMOS: Demo[] = [
   {
+    number: 0,
+    name: "onboarding",
+    title: "Full Agent Onboarding",
+    description:
+      "EOA → AA wallet deployment → agent NFT → session key → funded vault",
+    file: "./00-onboarding.js",
+    keywords: ["onboard", "setup", "init", "register", "agent", "wallet", "session", "fund"],
+  },
+  {
     number: 1,
     name: "percall-payment",
     title: "Per-Call Payment with x402",
@@ -82,13 +91,13 @@ const DEMOS: Demo[] = [
     keywords: ["observability", "transparency", "indexer", "query", "usage"],
   },
   {
-    number: 8,
+    number: 9,
     name: "aa-onboard-session",
     title: "AA Onboarding and Session Rule Flow",
     description:
       "EOA onboarding, session constraints, and sponsored AA user operation",
     file: "./bkp.js",
-    keywords: ["aa", "onboard", "session", "sponsored", "gasless"],
+    keywords: ["aa", "bkp", "smoke", "sponsored", "gasless", "transfer"],
   },
 ];
 
