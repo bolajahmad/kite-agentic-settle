@@ -279,72 +279,62 @@ export async function callApi(args: string[]) {
     }
 
     console.log("  Per-call mode: making a single call with each request.");
-    const fetchOpts: any = {
-      paymentMode: "perCall" as const,
-      onPayment,
-      sessionKey: sessionKeyAddress,
-    };
 
-    if (decide === "cli") {
-      fetchOpts.onPaymentRequired = promptForPayment;
-    } else {
-      fetchOpts.onPaymentRequired = async (
-        req: PaymentRequest,
-      ): Promise<boolean> => {
-        const ctx = {
-          request: req,
-          rules: defaultRule,
-          balance: Number.MAX_SAFE_INTEGER,
-          totalSpentThisSession: Number(client.getTotalSpent()),
-          callCount: client.getUsageLogs().length,
-          openaiApiKey: process.env.OPENAI_API_KEY,
-        };
+    const decisionFn =
+      decide === "cli"
+        ? promptForPayment
+        : async (req: PaymentRequest): Promise<boolean> => {
+            const ctx = {
+              request: req,
+              rules: defaultRule,
+              balance: Number.MAX_SAFE_INTEGER,
+              totalSpentThisSession: Number(client.getTotalSpent()),
+              callCount: client.getUsageLogs().length,
+              openaiApiKey: process.env.OPENAI_API_KEY,
+            };
 
-        const result = await decideCall(ctx, decide);
-        console.log(
-          `  Decision: ${result.decision} [${result.tier}] — ${result.reason}`,
-        );
+            const result = await decideCall(ctx, decide);
+            console.log(
+              `  Decision: ${result.decision} [${result.tier}] — ${result.reason}`,
+            );
 
-        if (result.decision === "approve") {
-          return true;
-        }
-
-        if (result.tier === "llm") {
-          return false;
-        }
-
-        if (isHardRuleReject(result.reason)) {
-          return false;
-        }
-
-        // Permissive fallback: if no explicit deny condition matched, allow.
-        return true;
-      };
-    }
+            if (result.decision === "approve") return true;
+            if (result.tier === "llm") return false;
+            if (isHardRuleReject(result.reason)) return false;
+            // Permissive fallback: if no explicit deny condition matched, allow.
+            return true;
+          };
 
     console.log(`  Calling ${url}...`);
     console.log("");
 
     const t0 = Date.now();
-    const response = await client.fetch(url, undefined, fetchOpts);
+    const result = await settle.callPaidApi(url, {
+      method: "GET",
+      mode: paymentMode as "perCall" | "batch" | "channel" | "auto",
+      onPaymentRequired: decisionFn,
+      onPayment: (r) => {
+        lastPaymentResult = r;
+      },
+    });
     const elapsed = Date.now() - t0;
 
-    if (response.status === 402) {
-      const errBody: any = await response.json().catch(() => null);
-      console.log(`  Status: ${response.status} Payment Required`);
+    if (result.status === 402) {
+      const reason =
+        (result.data as Record<string, string> | null)?.error ||
+        "payment was declined";
+      console.log(`  Status: ${result.status} Payment Required`);
       console.log("  The agent was not charged.");
-      const reason = errBody?.error || "payment was declined";
       console.log(`  Reason: ${reason}`);
       throw new Error(String(reason));
     }
 
-    const body = await response.json();
-    console.log(`  Status:  ${response.status} OK`);
-    console.log(`  Data:    ${JSON.stringify(body, null, 2)}`);
+    console.log(`  Status:  ${result.status} OK`);
+    console.log(`  Data:    ${JSON.stringify(result.data, null, 2)}`);
     console.log(`  Time:    ${elapsed}ms`);
 
     if (lastPaymentResult) {
-      console.log(formatReceipt(lastPaymentResult, url, body));
+      console.log(formatReceipt(lastPaymentResult, url, result.data));
     }
   };
 

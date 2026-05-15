@@ -105,6 +105,17 @@ export type {
 
 export { KITE_TESTNET, TOKENS };
 
+// ── Module-level helpers ───────────────────────────────────────────
+
+/** Parse `text` as JSON; return the raw string if it is not valid JSON. */
+function _tryParseJSON(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 // ── Balance types ──────────────────────────────────────────────────
 
 /** Balance of one token for a given address. */
@@ -206,6 +217,79 @@ export interface ChannelInfo {
   highestClaimedCost: string | null;
   highestSequenceNumber: string | null;
   usageMerkleRoot: string | null;
+}
+
+// ── callPaidApi types ─────────────────────────────────────────────
+
+/**
+ * Options for the high-level `callPaidApi` helper.
+ * Pass these to `client.callPaidApi(url, options)` to make a single
+ * paid API call without manually handling 402 challenges.
+ */
+export interface CallPaidApiOptions {
+  /** HTTP method (default: "GET"). */
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  /** Serialised request body for POST/PUT. */
+  body?: string;
+  /** Additional request headers. */
+  headers?: Record<string, string>;
+  /**
+   * Payment routing mode.
+   * - "perCall" — always sign a fresh x402 EIP-712 payment per request.
+   * - "batch"   — route through an active batch session if one exists.
+   * - "channel" — route through an active payment channel if one exists.
+   * - "auto"    — prefer batch → channel → perCall automatically (default).
+   */
+  mode?: "perCall" | "batch" | "channel" | "auto";
+  /** Cap on the maximum payment amount (wei). Throws if the offer exceeds this. */
+  maxAmount?: bigint;
+  /**
+   * Whether to automatically pay when a 402 challenge is received.
+   * When `false` the method returns immediately with `status: 402` instead
+   * of making a payment. Default: `true`.
+   */
+  autopay?: boolean;
+  /**
+   * Optional hook invoked when a 402 challenge is received, before any
+   * payment is attempted. Return `false` to abort the payment (the method
+   * returns with `status: 402`). Useful for the CLI decision engine or any
+   * UI that needs user confirmation.
+   *
+   * When omitted (or when `autopay` is `true`) all payments are approved
+   * automatically up to `maxAmount`.
+   */
+  onPaymentRequired?: (request: PaymentRequest) => Promise<boolean>;
+  /**
+   * Optional hook invoked after a successful payment. Receives the raw
+   * `PaymentResult` from the interceptor. Useful for logging and receipt
+   * formatting in the CLI.
+   */
+  onPayment?: (result: PaymentResult) => void;
+}
+
+/** Structured result from `callPaidApi`. */
+export interface CallPaidApiResult {
+  /** HTTP status code of the final response. */
+  status: number;
+  /** Parsed JSON body (or raw string if not valid JSON). */
+  data: unknown;
+  /**
+   * Payment details. `null` when no payment was required (non-402 response)
+   * or when `autopay` was disabled.
+   */
+  payment: {
+    method: "perCall" | "channel" | "batch";
+    /** Amount paid in wei as a decimal string. */
+    amount: string;
+    /** Session key address used to sign the payment. */
+    sessionKey?: string;
+    /** Recipient address (provider). */
+    recipient?: string;
+    /** Payment nonce as decimal string. */
+    nonce?: string;
+    /** On-chain tx hash (present for legacy direct-settlement paths). */
+    txHash?: string;
+  } | null;
 }
 
 // ── Status helpers (shared by CLI + SDK methods) ──────────────────
@@ -886,6 +970,106 @@ export class KiteSettleClient {
     options?: InterceptorOptions,
   ): Promise<Response> {
     return this.requirePaymentClient().fetch(url, init, options);
+  }
+
+  /**
+   * Make a single paid API call and return a structured result.
+   *
+   * This is the high-level entry point shared by the CLI (perCall/auto
+   * modes) and the MCP tool. It:
+   *  1. Probes the URL — returns early if the endpoint does not require payment.
+   *  2. On a 402 challenge, delegates to `fetchWithPayment` which routes
+   *     via batch / channel / perCall according to `options.mode` and any
+   *     active sessions / channels that were pre-registered.
+   *  3. Returns a structured `CallPaidApiResult` with the response body and
+   *     a payment receipt.
+   *
+   * The caller must have been created with a credential (agent mode or EOA
+   * mode). A read-only client throws when `fetchWithPayment` is called.
+   *
+   * @example
+   * const client = await KiteSettleClient.create({ agentId: 1n });
+   * const result = await client.callPaidApi("https://api.example.com/data");
+   */
+  async callPaidApi(
+    url: string,
+    options: CallPaidApiOptions = {},
+  ): Promise<CallPaidApiResult> {
+    const {
+      method = "GET",
+      body,
+      headers = {},
+      mode = "auto",
+      maxAmount,
+      autopay = true,
+      onPaymentRequired,
+      onPayment,
+    } = options;
+
+    const initHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...headers,
+    };
+    const init: RequestInit = { method, headers: initHeaders };
+    if (body && (method === "POST" || method === "PUT")) {
+      init.body = body;
+    }
+
+    // ── 1. Probe: no payment headers yet ──────────────────────────────
+    const probe = await globalThis.fetch(url, init);
+
+    if (probe.status !== 402) {
+      const text = await probe.text();
+      return { status: probe.status, data: _tryParseJSON(text), payment: null };
+    }
+
+    // ── 2. Not paying? Return 402 early ───────────────────────────────
+    if (!autopay) {
+      const text = await probe.text().catch(() => "");
+      return {
+        status: 402,
+        data: _tryParseJSON(text) ?? { error: "Payment required but autopay is disabled" },
+        payment: null,
+      };
+    }
+
+    // ── 3. Enforce maxAmount cap before paying ─────────────────────────
+    if (maxAmount !== undefined) {
+      const challengeText = await probe.text();
+      const challenge = JSON.parse(challengeText) as {
+        accepts?: Array<{ maxAmountRequired?: string }>;
+      };
+      const offered = BigInt(challenge.accepts?.[0]?.maxAmountRequired ?? "0");
+      if (offered > maxAmount) {
+        throw new Error(
+          `Provider price ${offered} wei exceeds your maxAmount cap ${maxAmount} wei.`,
+        );
+      }
+    }
+
+    // ── 4. Pay via the unified interceptor ───────────────────────────
+    let capturedPayment: CallPaidApiResult["payment"] = null;
+
+    const response = await this.fetchWithPayment(url, init, {
+      paymentMode: mode,
+      maxPaymentPerCall: maxAmount,
+      onPaymentRequired,
+      onPayment: (result) => {
+        capturedPayment = {
+          method: result.method,
+          amount: result.amount.toString(),
+          txHash: result.txHash,
+        };
+        onPayment?.(result);
+      },
+    });
+
+    const responseText = await response.text();
+    return {
+      status: response.status,
+      data: _tryParseJSON(responseText),
+      payment: capturedPayment,
+    };
   }
 
   // ── Wallet ────────────────────────────────────────────────────

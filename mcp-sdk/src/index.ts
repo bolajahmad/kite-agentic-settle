@@ -1,7 +1,11 @@
 // ── Primary entry point ────────────────────────────────────────────
 // Import KiteSettleClient for all new consumer and provider code.
 export { KiteSettleClient } from "./kite-settle-client.js";
-export type { KiteSettleClientOptions } from "./kite-settle-client.js";
+export type {
+  KiteSettleClientOptions,
+  CallPaidApiOptions,
+  CallPaidApiResult,
+} from "./kite-settle-client.js";
 
 export type { BatchEndReason, BatchLimits } from "./batch.js";
 
