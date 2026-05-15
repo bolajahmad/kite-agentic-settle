@@ -7,8 +7,7 @@
 
 import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { TOKENS } from "../../config.js";
-import { ContractService } from "../../contracts.js";
-import { KITE_TESTNET, KiteSettleClient } from "../../index.js";
+import { KiteSettleClient } from "../../index.js";
 import {
   _tokenMetadataCache,
   resolveTokenMetadata,
@@ -23,25 +22,26 @@ function fmt(wei: bigint): string {
 }
 
 async function showBalance(args: string[]) {
-  // ── Resolve target address (priority: --agent > --address > credential) ──
   const agentFlag = findFlag(args, "--agent");
   const addressFlag = findFlag(args, "--address");
+  const tokenFlag = findFlag(args, "--token");
 
-  let targetAddress: string;
+  let client: KiteSettleClient;
+  let queryAddress: string | undefined;
   let displayLabel: string;
 
   if (agentFlag !== undefined) {
-    // Agent always wins — resolve owner from subgraph
+    // Resolve owner address from subgraph (agent may not be locally registered)
     const { getAgentById } = await import("../../indexer.js");
     const agent = await getAgentById(`0x${BigInt(agentFlag).toString(16)}`);
-    if (!agent) {
-      throw new Error(`Agent ${agentFlag} not found on-chain.`);
-    }
-    targetAddress = agent.owner.id || agent.owner.address;
-    displayLabel = `Agent ${agentFlag} (owner: ${targetAddress})`;
+    if (!agent) throw new Error(`Agent ${agentFlag} not found on-chain.`);
+    queryAddress = agent.owner.id || agent.owner.address;
+    displayLabel = `Agent ${agentFlag} (owner: ${queryAddress})`;
+    client = KiteSettleClient.createReadOnly();
   } else if (addressFlag) {
-    targetAddress = addressFlag;
-    displayLabel = targetAddress;
+    queryAddress = addressFlag;
+    displayLabel = addressFlag;
+    client = KiteSettleClient.createReadOnly();
   } else {
     const credential = getCredential();
     if (!credential) {
@@ -49,110 +49,38 @@ async function showBalance(args: string[]) {
         "No address to check. Pass --address <addr>, --agent <id>, or run: npx kite init",
       );
     }
-    // Derive address from credential without paying for a full session lookup
-    const client = await KiteSettleClient.create({ credential });
-    targetAddress = client.eoaAddress;
-    displayLabel = targetAddress;
+    client = await KiteSettleClient.create({ credential });
+    displayLabel = client.eoaAddress;
   }
 
-  // ── Build a client for RPC calls (credential optional) ─────────────
-  const contract = new ContractService(KITE_TESTNET, {
-    getAddress: () => targetAddress,
-  } as any);
+  const extraTokens: string[] =
+    tokenFlag === undefined
+      ? []
+      : tokenFlag.includes(",")
+        ? tokenFlag.split(",").map((t) => t.trim())
+        : [tokenFlag.trim()];
 
-  async function resolveAaWallet(address: string): Promise<string> {
-    const normalized = address.toLowerCase();
-
-    const { getAgentById, getUserById } = await import("../../indexer.js");
-
-    if (agentFlag !== undefined) {
-      const agent = await getAgentById(`0x${BigInt(agentFlag).toString(16)}`);
-      const walletAddress =
-        agent?.aaWallet?.address ??
-        (agent?.owner?.id
-          ? (await getUserById(agent.owner.id))?.aaWallet?.address
-          : undefined);
-      if (!walletAddress) {
-        throw new Error(
-          `Agent ${agentFlag} does not have an indexed AA wallet yet.`,
-        );
-      }
-      return walletAddress;
-    }
-
-    const user = await getUserById(normalized);
-    if (user?.aaWallet?.address) {
-      return user.aaWallet.address;
-    }
-
-    // If the provided address is already the wallet contract, use it directly.
-    return address;
-  }
-
-  // ── Resolve token list ──────────────────────────────────────────────
-  let tokens: string[] = [];
-  const tokenFlag = findFlag(args, "--token");
-  if (tokenFlag) {
-    const isMultiple =
-      tokenFlag.includes(",") && tokenFlag.split(",").length > 1;
-    tokens = isMultiple
-      ? tokenFlag
-          .trim()
-          .split(",")
-          .map((t) => t.trim())
-      : [tokenFlag.trim()];
-  }
-  tokens.unshift(zeroAddress); // always include default token
-
-  const showNativeBalance = findFlag(args, "--show-native") || true;
+  const result = await client.balance({
+    address: queryAddress,
+    tokens: extraTokens,
+  });
 
   console.log(`  Address:  ${displayLabel}`);
+  console.log(`  AA Wallet: ${result.aaWalletAddress}`);
   console.log("");
 
-  const walletContract = await resolveAaWallet(targetAddress);
-  console.log(`  AA Wallet: ${walletContract}`);
-  console.log("");
-
-  const agentBalance = await Promise.all(
-    tokens.map(async (t) => {
-      const token = TOKENS.find(
-        ({ address, symbol }) =>
-          address.toLowerCase() === t.toLowerCase() ||
-          symbol.toLowerCase() === t.toLowerCase(),
-      );
-
-      const depBalance =
-        token?.address === zeroAddress
-          ? await contract.getDeposit(walletContract as `0x${string}`)
-          : await contract.getAvailableBalance(
-              walletContract as `0x${string}`,
-              token?.address as `0x${string}`,
-            );
-      const balance =
-        token?.address === zeroAddress
-          ? undefined
-          : await contract.getDeposit(walletContract as `0x${string}`);
-      return {
-        ...token,
-        balance: formatUnits(depBalance, token?.decimals || 18),
-        nativeBalance: balance
-          ? formatUnits(balance, token?.decimals || 18)
-          : undefined,
-      };
-    }),
-  );
-
-  function displayBalance(tkn: (typeof agentBalance)[0], symbol: string) {
-    console.log(`  Token:    ${symbol}`);
-    console.log(`  Deposited Balance:  ${tkn.balance} ${symbol} (deposited)`);
-    if (showNativeBalance && tkn.address !== zeroAddress)
+  for (const tkn of result.tokens) {
+    console.log(`  Token:    ${tkn.symbol}`);
+    console.log(
+      `  Deposited Balance:  ${tkn.depositedBalanceFormatted} ${tkn.symbol} (deposited)`,
+    );
+    if (tkn.token.toLowerCase() !== zeroAddress.toLowerCase()) {
       console.log(
-        `     Balance:       ${tkn.nativeBalance} ${symbol} (wallet)`,
+        `     Balance:       ${tkn.walletBalanceFormatted} ${tkn.symbol} (wallet)`,
       );
+    }
     console.log("");
   }
-
-  agentBalance.forEach((tkn) => displayBalance(tkn, tkn.symbol || "KITE"));
 }
 
 async function getIndexedPayments(

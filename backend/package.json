@@ -10,6 +10,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@kite-agentic-pay/sdk": "file:../mcp-sdk",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "axios": "^1.6.3",
     "body-parser": "^1.20.2",

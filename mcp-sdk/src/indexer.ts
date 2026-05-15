@@ -172,6 +172,10 @@ export async function getAgentById(id: string): Promise<IndexedAgent | null> {
         owner {
           id
           address
+          aaWallet {
+            id
+            address
+          }
         }
         sessions {
           sessionKey

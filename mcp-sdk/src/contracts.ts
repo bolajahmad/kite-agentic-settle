@@ -77,12 +77,17 @@ export class ContractService {
   async getAgentWalletFromRegistry(
     agentId: bigint,
   ): Promise<{ walletContract: `0x${string}`; user: `0x${string}` } | null> {
-    const result = (await this.client.readContract({
+    const result = await this.client.readContract({
       address: this.config.contracts.identityRegistry as `0x${string}`,
       abi: identityRegistryAbi,
       functionName: "getAgentWallet",
       args: [agentId],
-    })) as readonly [`0x${string}`, `0x${string}`];
+    });
+    console.log({
+      result,
+      agentId,
+      IdReg: this.config.contracts.identityRegistry,
+    });
 
     const walletContract = result[0];
     const user = result[1];
@@ -366,17 +371,24 @@ export class ContractService {
     return result.hash;
   }
 
-  async resolveOwnerVaultWalletAddress(): Promise<`0x${string}`> {
+  /** Derive the ClientAgentVault (AA wallet) address for any EOA address. */
+  async resolveVaultWalletAddressFor(
+    eoaAddress: string,
+  ): Promise<`0x${string}`> {
     const { GokiteAASDK } = await import("gokite-aa-sdk");
     const aaSdk = new GokiteAASDK(
       this.config.networkName || "kite_testnet",
       this.config.rpcUrl,
       this.config.bundlerUrl || "",
     );
-
     return aaSdk.getAccountAddress(
-      this.eoaAddress as `0x${string}`,
+      eoaAddress as `0x${string}`,
     ) as `0x${string}`;
+  }
+
+  /** Derive the ClientAgentVault address for this client's own EOA. */
+  async resolveOwnerVaultWalletAddress(): Promise<`0x${string}`> {
+    return this.resolveVaultWalletAddressFor(this.eoaAddress);
   }
 
   async depositToWallet(token: string, amount: bigint): Promise<string> {
@@ -741,9 +753,7 @@ export class ContractService {
     ];
 
     const ownerPkRaw =
-      process.env.PRIVATE_KEY ??
-      getCredential() ??
-      process.env.EOA_PRIVATE_KEY;
+      process.env.PRIVATE_KEY ?? getCredential() ?? process.env.EOA_PRIVATE_KEY;
     if (ownerPkRaw) {
       const ownerPk = (
         ownerPkRaw.startsWith("0x") ? ownerPkRaw : `0x${ownerPkRaw}`
@@ -969,9 +979,7 @@ export class ContractService {
     ];
 
     const ownerPkRaw =
-      process.env.PRIVATE_KEY ??
-      getCredential() ??
-      process.env.EOA_PRIVATE_KEY;
+      process.env.PRIVATE_KEY ?? getCredential() ?? process.env.EOA_PRIVATE_KEY;
     if (ownerPkRaw) {
       const ownerPk = (
         ownerPkRaw.startsWith("0x") ? ownerPkRaw : `0x${ownerPkRaw}`

@@ -28,22 +28,21 @@
  * it in HTTP headers) so the client can track cumulative cost.
  */
 
-import type { Request, Response, NextFunction } from "express";
-import {
-  getChannelOnChain,
-  activateChannelOnChain,
-  isContractsConfigured,
-} from "../services/contract-service.js";
+import type { NextFunction, Request, Response } from "express";
 import {
   getSession,
-  upsertSession,
   recordReceipt,
-  type ChannelSession,
+  upsertSession,
   type ChannelCallReceipt,
 } from "../services/channel-session.js";
 import {
-  signChannelReceipt,
+  activateChannelOnChain,
+  getChannelOnChain,
+  isContractsConfigured,
+} from "../services/contract-service.js";
+import {
   providerAddress,
+  signChannelReceipt,
 } from "../services/receipt-signer.js";
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -99,10 +98,7 @@ function build402Challenge(
     accepts: [
       {
         scheme: "kite-programmable",
-        network:
-          config.network ??
-          process.env.KITE_NETWORK ??
-          "kite-testnet",
+        network: config.network ?? process.env.KITE_NETWORK ?? "kite-testnet",
         maxAmountRequired: config.ratePerCall.toString(),
         // Inform clients this is also the ceiling per single call in a channel.
         maxRatePerCall: config.ratePerCall.toString(),
@@ -228,7 +224,9 @@ export function requireChannelPayment(config: ChannelRouteConfig) {
             return;
           }
         } else {
-          console.log(`[channel] Channel already Active — skipping activation.`);
+          console.log(
+            `[channel] Channel already Active — skipping activation.`,
+          );
         }
 
         // Create session entry.
@@ -243,14 +241,20 @@ export function requireChannelPayment(config: ChannelRouteConfig) {
           lastReceipt: null,
           activatedAt: Math.floor(Date.now() / 1000),
           expiresAt: channelData.expiresAt,
-        } as ChannelSession;
+        };
         upsertSession(session);
         console.log(`[channel] Session created for channel ${channelId}`);
       } else {
         // ── Step 3: Subsequent call — validate last-receipt continuity ──
-        const lastSeqHeader = req.headers["x-last-receipt-seq"] as string | undefined;
-        const lastCostHeader = req.headers["x-last-receipt-cost"] as string | undefined;
-        const lastSigHeader = req.headers["x-last-receipt-sig"] as string | undefined;
+        const lastSeqHeader = req.headers["x-last-receipt-seq"] as
+          | string
+          | undefined;
+        const lastCostHeader = req.headers["x-last-receipt-cost"] as
+          | string
+          | undefined;
+        const lastSigHeader = req.headers["x-last-receipt-sig"] as
+          | string
+          | undefined;
 
         // If the client forwards a last-receipt, verify it matches our records.
         if (lastSeqHeader && session.lastReceipt) {

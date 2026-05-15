@@ -34,6 +34,22 @@ export interface ToolDefinition {
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
+    name: "check_balance",
+    description:
+      "Check deposited (KiteAAWallet) balance and raw ERC-20 balance for an address.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "EOA address to check (0x…)" },
+        token: {
+          type: "string",
+          description: "ERC-20 token address (defaults to DmUSDT)",
+        },
+      },
+      required: ["address"],
+    },
+  },
+  {
     name: "call_paid_api",
     description:
       "Call a paid API endpoint. The SDK handles x402 payment negotiation automatically (EIP-712 programmable settlement). Returns the API response and a payment receipt.",
@@ -76,22 +92,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
   {
-    name: "check_balance",
-    description:
-      "Check deposited (KiteAAWallet) balance and raw ERC-20 balance for an address.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        address: { type: "string", description: "EOA address to check (0x…)" },
-        token: {
-          type: "string",
-          description: "ERC-20 token address (defaults to DmUSDT)",
-        },
-      },
-      required: ["address"],
-    },
-  },
-  {
     name: "get_usage_logs",
     description:
       "Retrieve payment usage logs recorded by this backend (all agents).",
@@ -103,25 +103,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           description: "Max number of log entries to return (default: 50)",
         },
       },
-    },
-  },
-  {
-    name: "register_agent",
-    description:
-      "Mint an agent NFT on IdentityRegistry (EIP-8004). Returns the on-chain agentId.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agentURI: {
-          type: "string",
-          description: "Base64-encoded or IPFS agent metadata URI",
-        },
-        credential: {
-          type: "string",
-          description: "EOA private key (hex) that will own the agent NFT",
-        },
-      },
-      required: ["agentURI", "credential"],
     },
   },
   {
@@ -140,47 +121,59 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
   {
-    name: "deposit_to_wallet",
-    description:
-      "Approve + deposit ERC-20 tokens into KiteAAWallet so agents can pay for services.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        amount: { type: "string", description: "Amount in wei to deposit" },
-        token: {
-          type: "string",
-          description: "Token address (defaults to DmUSDT)",
-        },
-        credential: { type: "string", description: "EOA private key (hex)" },
-      },
-      required: ["amount", "credential"],
-    },
-  },
-  {
     name: "get_session_info",
     description:
-      "Read session key rules from KiteAAWallet (limits, validity, spent amount).",
+      "List session keys for an agent (paginated) or look up a single session key. " +
+      "Returns status, spend limits, amounts used/remaining and expiry for each session. " +
+      "Pass agentId (without sessionKey) for a paginated list. Pass sessionKey to get one session.",
     inputSchema: {
       type: "object",
       properties: {
+        agentId: {
+          type: "string",
+          description: "Agent tokenId — required when sessionKey is omitted (list mode).",
+        },
         sessionKey: {
           type: "string",
-          description: "Session key address (0x…)",
+          description: "Session key address (0x…). When provided, returns only this session.",
+        },
+        limit: {
+          type: "number",
+          description: "Max sessions to return in list mode (default: 10).",
+        },
+        offset: {
+          type: "number",
+          description: "Pagination offset for list mode (default: 0).",
         },
       },
-      required: ["sessionKey"],
     },
   },
   {
     name: "get_channel_info",
     description:
-      "Read a payment channel's on-chain state (status, deposit, provider, consumer).",
+      "List payment channels for an agent (paginated) or look up a single channel. " +
+      "Returns status, deposit, spend limits, provider and settlement info. " +
+      "Pass agentId (without channelId) for a paginated list. Pass channelId to get one channel.",
     inputSchema: {
       type: "object",
       properties: {
-        channelId: { type: "string", description: "Channel ID (bytes32 hex)" },
+        agentId: {
+          type: "string",
+          description: "Agent tokenId — required when channelId is omitted (list mode).",
+        },
+        channelId: {
+          type: "string",
+          description: "Channel ID (bytes32 hex). When provided, returns only this channel.",
+        },
+        limit: {
+          type: "number",
+          description: "Max channels to return in list mode (default: 10).",
+        },
+        offset: {
+          type: "number",
+          description: "Pagination offset for list mode (default: 0).",
+        },
       },
-      required: ["channelId"],
     },
   },
 ];
@@ -392,28 +385,28 @@ export async function executeTool(
     // ─── check_balance ────────────────────────────────────────────────────
     case "check_balance": {
       const address = args.address as string;
-      const token =
-        (args.token as string) ??
-        process.env.USDT_TOKEN_ADDRESS ??
-        process.env.TOKEN_ADDRESS ??
-        "";
+      if (!address)
+        throw new Error("check_balance requires an 'address' argument");
+      const token = args.token as string | undefined;
 
-      const provider = getProvider();
-      const erc20 = new ethers.Contract(token, ERC20_ABI, provider);
-      const wallet = getKiteAAWallet(provider);
-
-      const [rawBalance, depositedBalance] = await Promise.all([
-        token ? erc20.balanceOf(address) : Promise.resolve(0n),
-        wallet.getUserBalance(address, token),
-      ]);
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+      const client = KiteSettleClient.createReadOnly();
+      const result = await client.balance({
+        address,
+        tokens: token ? [token] : undefined,
+      });
 
       return {
-        address,
-        token,
-        walletBalance: rawBalance.toString(),
-        walletBalanceFormatted: ethers.formatUnits(rawBalance, 18),
-        depositedBalance: depositedBalance.toString(),
-        depositedBalanceFormatted: ethers.formatUnits(depositedBalance, 18),
+        eoaAddress: result.eoaAddress,
+        aaWallet: result.aaWalletAddress,
+        tokens: result.tokens.map((t) => ({
+          token: t.token,
+          symbol: t.symbol,
+          walletBalance: t.walletBalance.toString(),
+          walletBalanceFormatted: t.walletBalanceFormatted,
+          depositedBalance: t.depositedBalance.toString(),
+          depositedBalanceFormatted: t.depositedBalanceFormatted,
+        })),
       };
     }
 
@@ -423,39 +416,6 @@ export async function executeTool(
       const logs = getUsageLogs();
       const sliced = logs.slice(-limit);
       return { count: sliced.length, logs: sliced };
-    }
-
-    // ─── register_agent ───────────────────────────────────────────────────
-    case "register_agent": {
-      if (!credential) throw new Error("register_agent requires a credential");
-      const agentURI = args.agentURI as string;
-      const signer = signerFromCredential(credential);
-      const registry = getIdentityRegistry(signer);
-
-      const tx = await registry.register(agentURI ?? "");
-      const receipt = await tx.wait();
-
-      // Decode the Registered event to get the agentId
-      const iface = registry.interface;
-      let agentId: bigint | undefined;
-      for (const log of receipt.logs ?? []) {
-        try {
-          const parsed = iface.parseLog(log);
-          if (parsed?.name === "Registered") {
-            agentId = parsed.args.agentId as bigint;
-            break;
-          }
-        } catch {
-          // not this event
-        }
-      }
-
-      return {
-        txHash: receipt.hash,
-        agentId: agentId?.toString(),
-        owner: signer.address,
-        agentURI,
-      };
     }
 
     // ─── resolve_agent ────────────────────────────────────────────────────
@@ -472,82 +432,46 @@ export async function executeTool(
       return { agentId: agentId.toString(), agentURI: uri, owner };
     }
 
-    // ─── deposit_to_wallet ────────────────────────────────────────────────
-    case "deposit_to_wallet": {
-      if (!credential)
-        throw new Error("deposit_to_wallet requires a credential");
-      const amount = BigInt(args.amount as string);
-      const token =
-        (args.token as string) ??
-        process.env.USDT_TOKEN_ADDRESS ??
-        process.env.TOKEN_ADDRESS ??
-        "";
-
-      const signer = signerFromCredential(credential);
-      const walletAddr = process.env.KITE_AA_WALLET_ADDRESS ?? "";
-      const erc20 = new ethers.Contract(token, ERC20_ABI, signer);
-      const wallet = getKiteAAWallet(signer);
-
-      // Approve
-      const approveTx = await erc20.approve(walletAddr, amount);
-      await approveTx.wait();
-
-      // Deposit
-      const depositTx = await wallet.deposit(token, amount);
-      const receipt = await depositTx.wait();
-
-      return {
-        txHash: receipt.hash,
-        amount: amount.toString(),
-        token,
-        depositor: signer.address,
-      };
-    }
-
     // ─── get_session_info ─────────────────────────────────────────────────
     case "get_session_info": {
-      const sessionKey = args.sessionKey as string;
-      const provider = getProvider();
-      const wallet = getKiteAAWallet(provider);
+      const sessionKey = args.sessionKey as string | undefined;
+      const agentId = args.agentId as string | undefined;
+      const limit = (args.limit as number | undefined) ?? 10;
+      const offset = (args.offset as number | undefined) ?? 0;
 
-      const [rule, spent] = await Promise.all([
-        wallet.getSessionRule(sessionKey),
-        wallet.getSessionSpent(sessionKey),
-      ]);
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+      const client = KiteSettleClient.createReadOnly();
 
-      return {
-        sessionKey,
-        agentId: rule[0]?.toString(),
-        valueLimit: rule[1]?.toString(),
-        maxValueAllowed: rule[2]?.toString(),
-        validUntil: rule[3]?.toString(),
-        active: rule[4],
-        spent: spent.toString(),
-        spentFormatted: ethers.formatUnits(spent, 18),
-      };
+      if (sessionKey) {
+        const session = await client.getSessionInfo(sessionKey);
+        if (!session) return { found: false, sessionKey };
+        return { found: true, sessions: [session] };
+      }
+
+      if (!agentId) throw new Error("get_session_info requires 'agentId' or 'sessionKey'");
+      const sessions = await client.listSessions(agentId, { limit, offset });
+      return { agentId, limit, offset, count: sessions.length, sessions };
     }
 
     // ─── get_channel_info ─────────────────────────────────────────────────
     case "get_channel_info": {
-      const channelId = args.channelId as string;
-      const provider = getProvider();
-      const channel = getPaymentChannel(provider);
+      const channelId = args.channelId as string | undefined;
+      const agentId = args.agentId as string | undefined;
+      const limit = (args.limit as number | undefined) ?? 10;
+      const offset = (args.offset as number | undefined) ?? 0;
 
-      const ch = await channel.getChannel(channelId);
-      return {
-        channelId,
-        provider: ch.provider,
-        consumer: ch.consumer,
-        token: ch.token,
-        deposit: ch.deposit?.toString(),
-        maxSpend: ch.maxSpend?.toString(),
-        maxPerCall: ch.maxPerCall?.toString(),
-        status: Number(ch.status),
-        statusName:
-          ["Open", "Active", "SettlementPending", "Closed"][
-            Number(ch.status)
-          ] ?? "Unknown",
-      };
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+      const client = KiteSettleClient.createReadOnly();
+
+      if (channelId) {
+        const channel = await client.getChannelInfo(channelId);
+        if (!channel) return { found: false, channelId };
+        return { found: true, channels: [channel] };
+      }
+
+      if (!agentId) throw new Error("get_channel_info requires 'agentId' or 'channelId'");
+      const channels = await client.listChannels(agentId, { limit, offset });
+      return { agentId, limit, offset, count: channels.length, channels };
     }
 
     default:

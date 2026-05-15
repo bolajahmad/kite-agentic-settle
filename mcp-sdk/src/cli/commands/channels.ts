@@ -1041,13 +1041,12 @@ async function cmdChannelList(args: string[]): Promise<void> {
   const filter = (findFlag(args, "--filter") ?? "all").toLowerCase();
   const agentEntityId = toAgentEntityId(agentIndex);
 
-  const indexedChannels = await getChannelsByAgent(
-    agentEntityId,
-    limit,
-    offset,
-  ).catch((err: Error) => {
-    throw new Error(`Failed to query channels from indexer: ${err.message}`);
-  });
+  const sdkClient = KiteSettleClient.createReadOnly();
+  const indexedChannels = await sdkClient
+    .listChannels(agentIndex, { limit, offset })
+    .catch((err: Error) => {
+      throw new Error(`Failed to query channels from indexer: ${err.message}`);
+    });
 
   const cachedChannels = includeCache
     ? listChannels().filter((s) => s.agentIndex === agentIndex)
@@ -1060,19 +1059,19 @@ async function cmdChannelList(args: string[]): Promise<void> {
     deposit: string;
     maxPerCall: string;
     source: string;
-  }> = indexedChannels.map((indexed) => {
+  }> = indexedChannels.map((ch) => {
     const cached = cachedChannels.find(
       (entry) =>
-        entry.channelId.toLowerCase() === indexed.channelId.toLowerCase(),
+        entry.channelId.toLowerCase() === ch.channelId.toLowerCase(),
     );
     const source = cached ? "subgraph+in-memory" : "subgraph";
 
     return {
-      channelId: indexed.channelId.toLowerCase(),
-      status: indexedStatusLabel(indexed.status, indexed.expiresAt),
-      provider: indexed.provider,
-      deposit: formatUnits(safeBigInt(indexed.deposit), 18),
-      maxPerCall: formatUnits(safeBigInt(indexed.maxPerCall), 18),
+      channelId: ch.channelId.toLowerCase(),
+      status: ch.status,
+      provider: ch.provider,
+      deposit: ch.depositFormatted,
+      maxPerCall: ch.maxPerCallFormatted,
       source,
     };
   });

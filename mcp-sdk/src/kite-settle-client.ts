@@ -21,7 +21,7 @@
  * ```
  */
 
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { BatchEndReason, BatchLimits } from "./batch.js";
 import type { KiteClientOptions } from "./client.js";
@@ -38,14 +38,18 @@ import type {
 import { checkRules, decide } from "./decide.js";
 import type {
   IndexedAgent,
+  IndexedChannel,
   IndexedPayment,
   IndexedSession,
 } from "./indexer.js";
 import {
   getAgentById,
   getAgentsByOwner,
+  getChannelById,
+  getChannelsByAgent,
   getPaymentsByAgent,
   getRecentPayments,
+  getSessionByKey,
   getSessionKeyAdded,
   getSessionsByAgent,
   getUserAgentsWithActiveSessions,
@@ -85,6 +89,7 @@ export type {
   DecisionMode,
   DecisionResult,
   IndexedAgent,
+  IndexedChannel,
   IndexedPayment,
   IndexedSession,
   InterceptorOptions,
@@ -99,6 +104,153 @@ export type {
 };
 
 export { KITE_TESTNET, TOKENS };
+
+// ── Balance types ──────────────────────────────────────────────────
+
+/** Balance of one token for a given address. */
+export interface TokenBalance {
+  /** Token contract address. `zeroAddress` (0x000…) means native gas token. */
+  token: string;
+  symbol: string;
+  decimals: number;
+  /** Raw ERC-20 / native balance sitting in the EOA wallet. */
+  walletBalance: bigint;
+  walletBalanceFormatted: string;
+  /** Balance deposited into the ClientAgentVault (spendable by agents). */
+  depositedBalance: bigint;
+  depositedBalanceFormatted: string;
+}
+
+/** Full balance snapshot returned by `client.balance()`. */
+export interface BalanceResult {
+  eoaAddress: string;
+  aaWalletAddress: string;
+  tokens: TokenBalance[];
+}
+
+// ── Session types ──────────────────────────────────────────────────
+
+/**
+ * Enriched session snapshot: raw indexer data + computed spent/remaining.
+ * Returned by `client.listSessions()` and `client.getSessionInfo()`.
+ */
+export interface SessionInfo {
+  sessionKey: string;
+  sessionId: string;
+  agentId: string;
+  /** Effective human-readable status (accounts for expiry). */
+  status: string;
+  /** Unix seconds (as string). */
+  validUntil: string;
+  /** ISO-8601 formatted expiry datetime. */
+  validUntilFormatted: string;
+  /** Lifetime spend cap in wei (as string) — from the session's spending rule budget. */
+  maxAmount: string;
+  /** Lifetime spend cap formatted (e.g. "10.0"). */
+  maxAmountFormatted: string;
+  /** Per-transaction value limit in wei (as string). */
+  valueLimit: string;
+  /** Per-transaction value limit formatted. */
+  valueLimitFormatted: string;
+  /** Amount spent in the current spending window in wei (from ClientAgentVault on-chain). */
+  spent: string;
+  spentFormatted: string;
+  /** Remaining capacity in the current window in wei (budget − spent). */
+  remaining: string;
+  remainingFormatted: string;
+  blockedAgents: string[];
+  createdAt: string;
+  /** Raw spending rules from the ClientAgentVault contract. Empty if none configured. */
+  spendingRules: Array<{
+    timeWindow: string;
+    budget: string;
+    budgetFormatted: string;
+    amountUsed: string;
+    amountUsedFormatted: string;
+    remainingInWindow: string;
+    remainingInWindowFormatted: string;
+    windowStartTime: string;
+  }>;
+}
+
+// ── Channel types ──────────────────────────────────────────────────
+
+/**
+ * Enriched channel snapshot with formatted amounts and human-readable status.
+ * Returned by `client.listChannels()` and `client.getChannelInfo()`.
+ */
+export interface ChannelInfo {
+  channelId: string;
+  /** Human-readable status (e.g. "Active", "Expired", "Settlement Pending"). */
+  status: string;
+  provider: string;
+  agentId: string;
+  sessionKey: string;
+  eoaAddress: string;
+  walletContract: string;
+  token: string;
+  deposit: string;
+  depositFormatted: string;
+  maxSpend: string;
+  maxSpendFormatted: string;
+  maxPerCall: string;
+  maxPerCallFormatted: string;
+  settledAmount: string;
+  settledAmountFormatted: string;
+  refundAmount: string;
+  refundAmountFormatted: string;
+  openedAt: string;
+  expiresAt: string;
+  closedAt: string | null;
+  settlementDeadline: string | null;
+  highestClaimedCost: string | null;
+  highestSequenceNumber: string | null;
+  usageMerkleRoot: string | null;
+}
+
+// ── Status helpers (shared by CLI + SDK methods) ──────────────────
+
+/**
+ * Compute the effective human-readable status for a session,
+ * accounting for expiry even when the indexer still shows "ACTIVE".
+ */
+export function effectiveSessionStatus(session: IndexedSession): string {
+  const now = Math.floor(Date.now() / 1000);
+  const upper = session.status.trim().toUpperCase();
+  if (upper === "ACTIVE" && Number(session.validUntil) <= now) return "Expired";
+  const s = session.status.trim().toLowerCase();
+  return s ? s[0].toUpperCase() + s.slice(1) : "Unknown";
+}
+
+/**
+ * Compute the human-readable label for a channel's status,
+ * accounting for expiry even when the indexer still shows "ACTIVE".
+ */
+export function effectiveChannelStatus(
+  status: string,
+  expiresAt?: string | number | null,
+): string {
+  const expiresAtNum = Number(expiresAt);
+  if (
+    Number.isFinite(expiresAtNum) &&
+    expiresAtNum > 0 &&
+    expiresAtNum < Math.floor(Date.now() / 1000)
+  ) {
+    return "Expired";
+  }
+  switch (status.toUpperCase()) {
+    case "OPEN":
+      return "Pending Activation";
+    case "ACTIVE":
+      return "Active";
+    case "SETTLEMENT_PENDING":
+      return "Settlement Pending";
+    case "CLOSED":
+      return "Closed";
+    default:
+      return status || "Unknown";
+  }
+}
 
 // ── CreateOptions ──────────────────────────────────────────────────
 
@@ -155,6 +307,41 @@ export interface AgentMetadataSummary {
   name?: string;
   shortDescription?: string;
   raw?: Record<string, unknown>;
+}
+
+// ── Internal helpers ───────────────────────────────────────────────
+
+/** Map an `IndexedChannel` to a fully enriched `ChannelInfo`. */
+function enrichChannel(ch: IndexedChannel): ChannelInfo {
+  const fmt18 = (raw: string | null | undefined) =>
+    formatUnits(BigInt(raw ?? "0"), 18);
+  return {
+    channelId: ch.channelId,
+    status: effectiveChannelStatus(ch.status, ch.expiresAt),
+    provider: ch.provider,
+    agentId: ch.agent?.agentId ?? "",
+    sessionKey: ch.session?.sessionKey ?? "",
+    eoaAddress: ch.user?.address ?? ch.user?.id ?? "",
+    walletContract: ch.walletContract ?? "",
+    token: ch.token,
+    deposit: ch.deposit,
+    depositFormatted: fmt18(ch.deposit),
+    maxSpend: ch.maxSpend,
+    maxSpendFormatted: fmt18(ch.maxSpend),
+    maxPerCall: ch.maxPerCall,
+    maxPerCallFormatted: fmt18(ch.maxPerCall),
+    settledAmount: ch.settledAmount,
+    settledAmountFormatted: fmt18(ch.settledAmount),
+    refundAmount: ch.refundAmount,
+    refundAmountFormatted: fmt18(ch.refundAmount),
+    openedAt: ch.openedAt,
+    expiresAt: ch.expiresAt,
+    closedAt: ch.closedAt ?? null,
+    settlementDeadline: ch.settlementDeadline ?? null,
+    highestClaimedCost: ch.highestClaimedCost ?? null,
+    highestSequenceNumber: ch.highestSequenceNumber ?? null,
+    usageMerkleRoot: ch.usageMerkleRoot ?? null,
+  };
 }
 
 // ── KiteSettleClient ───────────────────────────────────────────────
@@ -542,10 +729,9 @@ export class KiteSettleClient {
       // Fallback: re-derive deterministically from a stored EOA private key.
       // Useful for agents onboarded before the plain-key migration, or when
       // the session private key var was manually deleted.
-      const eoaKeyCandidates = [
-        getCredential(),
-        getVar("DEPLOYER_KEY"),
-      ].filter(Boolean) as string[];
+      const eoaKeyCandidates = [getCredential(), getVar("DEPLOYER_KEY")].filter(
+        Boolean,
+      ) as string[];
 
       outer: for (const eoaKeyHex of eoaKeyCandidates) {
         const eoaKeyBytes = new Uint8Array(
@@ -745,6 +931,113 @@ export class KiteSettleClient {
       .getContractService()
       .getNativeBalance((address ?? this.eoaAddress) as `0x${string}`)
       .catch(() => 0n);
+  }
+
+  /**
+   * Full balance snapshot for an address: wallet balances + vault deposited balances.
+   *
+   * Works for any EOA — no credential required (read-only RPC calls only).
+   * Use `options.address` to query a different address than this client's own EOA.
+   * Use `options.tokens` to add extra token addresses on top of the default TOKENS list.
+   *
+   * @example
+   * // Self balance
+   * const result = await client.balance();
+   * // External address
+   * const result = await client.balance({ address: "0xabc…" });
+   * // With extra token
+   * const result = await client.balance({ tokens: ["0xTokenAddr"] });
+   */
+  async balance(options?: {
+    /** EOA address to query. Defaults to this client's own EOA. */
+    address?: string;
+    /** Additional token addresses to include alongside the default TOKENS list. */
+    tokens?: string[];
+  }): Promise<BalanceResult> {
+    const targetEoa = options?.address ?? this.eoaAddress;
+
+    // Prefer the existing payment client's contract service; fall back to a
+    // minimal read-only one so this works on createReadOnly() clients too.
+    const cs: ContractService =
+      this.paymentClient?.getContractService() ??
+      new ContractService(this.config, { getAddress: () => targetEoa });
+
+    const aaWalletAddress = await cs.resolveVaultWalletAddressFor(targetEoa);
+
+    // Native (KITE) token is always shown.
+    const nativeMeta = TOKENS.find(
+      (t) => t.address.toLowerCase() === zeroAddress.toLowerCase(),
+    ) ?? { address: zeroAddress, symbol: "KITE", decimals: 18 };
+
+    // If the caller specifies tokens, show only those + native.
+    // If no filter is given (empty or omitted), show all configured tokens.
+    type TokenMeta = { address: string; symbol: string; decimals: number };
+    let tokenList: TokenMeta[];
+    if (options?.tokens && options.tokens.length > 0) {
+      const requestedMeta = options.tokens.map((addr): TokenMeta => {
+        const known = TOKENS.find(
+          (t) => t.address.toLowerCase() === addr.toLowerCase(),
+        );
+        return (
+          known ?? {
+            address: addr,
+            symbol: addr.slice(0, 8) + "…",
+            decimals: 18,
+          }
+        );
+      });
+      // Prepend native, skipping duplicates.
+      tokenList = [
+        nativeMeta,
+        ...requestedMeta.filter(
+          (e) => e.address.toLowerCase() !== zeroAddress.toLowerCase(),
+        ),
+      ];
+    } else {
+      tokenList = [...TOKENS];
+    }
+
+    const results = await Promise.all(
+      tokenList.map(async (meta) => {
+        const isNative =
+          meta.address.toLowerCase() === zeroAddress.toLowerCase();
+        const [walletBalance, depositedBalance] = await Promise.all([
+          isNative
+            ? cs.getNativeBalance(targetEoa).catch(() => 0n)
+            : cs
+                .getTokenBalance(
+                  meta.address as `0x${string}`,
+                  targetEoa as `0x${string}`,
+                )
+                .catch(() => 0n),
+          isNative
+            ? cs.getDeposit(aaWalletAddress).catch(() => 0n)
+            : cs
+                .getAvailableBalance(
+                  aaWalletAddress,
+                  meta.address as `0x${string}`,
+                )
+                .catch(() => 0n),
+        ]);
+        return {
+          token: meta.address,
+          symbol: meta.symbol ?? "?",
+          decimals: meta.decimals ?? 18,
+          walletBalance,
+          walletBalanceFormatted: formatUnits(
+            walletBalance,
+            meta.decimals ?? 18,
+          ),
+          depositedBalance,
+          depositedBalanceFormatted: formatUnits(
+            depositedBalance,
+            meta.decimals ?? 18,
+          ),
+        } satisfies TokenBalance;
+      }),
+    );
+
+    return { eoaAddress: targetEoa, aaWalletAddress, tokens: results };
   }
 
   /** Access low-level contract helpers for advanced CLI and SDK flows. */
@@ -1166,6 +1459,219 @@ export class KiteSettleClient {
   /** Get all session keys registered for an agent. */
   async getSessionsByAgent(agentId: string): Promise<IndexedSession[]> {
     return getSessionsByAgent(agentId);
+  }
+
+  /**
+   * Build a lightweight read-only ContractService from this instance's config.
+   * Works even when the client was created with `createReadOnly()` (no credential).
+   */
+  private readOnlyCs(): ContractService {
+    return (
+      this.paymentClient?.getContractService() ??
+      new ContractService(this.config, { getAddress: () => "" })
+    );
+  }
+
+  /**
+   * Fetch on-chain spending data for a session from the ClientAgentVault.
+   * Returns the first spending rule's budget/usage (the common case) plus the
+   * full rules array.  Falls back to `fallbackMaxAmount` / `0n` when no rules
+   * are configured or when the contract call fails.
+   */
+  private async resolveSessionSpend(
+    cs: ContractService,
+    walletContract: `0x${string}`,
+    sessionId: string,
+    fallbackMaxAmount: bigint,
+  ): Promise<{
+    maxAmount: bigint;
+    spent: bigint;
+    spendingRules: SessionInfo["spendingRules"];
+  }> {
+    const rules = await cs
+      .getVaultSpendingRules(walletContract, sessionId as `0x${string}`)
+      .catch(
+        () =>
+          [] as Awaited<ReturnType<ContractService["getVaultSpendingRules"]>>,
+      );
+
+    const enrichedRules: SessionInfo["spendingRules"] = rules.map((r) => {
+      const budget = r.rule.budget;
+      const used = r.usage.amountUsed;
+      const rem = budget > used ? budget - used : 0n;
+      return {
+        timeWindow: r.rule.timeWindow.toString(),
+        budget: budget.toString(),
+        budgetFormatted: formatUnits(budget, 18),
+        amountUsed: used.toString(),
+        amountUsedFormatted: formatUnits(used, 18),
+        remainingInWindow: rem.toString(),
+        remainingInWindowFormatted: formatUnits(rem, 18),
+        windowStartTime: r.usage.currentTimeWindowStartTime.toString(),
+      };
+    });
+
+    if (enrichedRules.length === 0) {
+      return { maxAmount: fallbackMaxAmount, spent: 0n, spendingRules: [] };
+    }
+
+    // Use the first rule as the primary budget/spent (most deployments have one).
+    const primary = rules[0];
+    return {
+      maxAmount: primary.rule.budget,
+      spent: primary.usage.amountUsed,
+      spendingRules: enrichedRules,
+    };
+  }
+
+  /**
+   * List enriched session snapshots for an agent, including spent/remaining amounts.
+   *
+   * @param agentId  On-chain agentId (numeric or hex string).
+   * @param options  Pagination and optional agentId normalization.
+   */
+  async listSessions(
+    agentId: string | bigint | number,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<SessionInfo[]> {
+    const entityId = `0x${BigInt(agentId).toString(16)}`;
+    const { limit = 10, offset = 0 } = options;
+    const sessions = await getSessionsByAgent(entityId, limit, offset);
+
+    const cs = this.readOnlyCs();
+    // Resolve wallet contract once per agent — all sessions share the same vault.
+    const agent = await getAgentById(`0x${BigInt(agentId).toString(16)}`).catch(
+      () => null,
+    );
+    const agentWallet = (agent?.owner.aaWallet.address ||
+      zeroAddress) as `0x${string}`;
+
+    return Promise.all(
+      sessions.map(async (session) => {
+        const fallbackMax = BigInt(session.maxLimit ?? "0");
+        const { maxAmount, spent, spendingRules } = agentWallet
+          ? await this.resolveSessionSpend(
+              cs,
+              agentWallet,
+              session.sessionId,
+              fallbackMax,
+            )
+          : {
+              maxAmount: fallbackMax,
+              spent: 0n,
+              spendingRules: [] as SessionInfo["spendingRules"],
+            };
+
+        const remaining = maxAmount > spent ? maxAmount - spent : 0n;
+        return {
+          sessionKey: session.sessionKey,
+          sessionId: session.sessionId,
+          agentId: session.agent?.agentId ?? session.agentId ?? String(agentId),
+          status: effectiveSessionStatus(session),
+          validUntil: session.validUntil,
+          validUntilFormatted: new Date(Number(session.validUntil) * 1000)
+            .toISOString()
+            .replace("T", " ")
+            .replace(".000Z", " UTC"),
+          maxAmount: maxAmount.toString(),
+          maxAmountFormatted: formatUnits(maxAmount, 18),
+          valueLimit: session.valueLimit ?? "0",
+          valueLimitFormatted: formatUnits(
+            BigInt(session.valueLimit ?? "0"),
+            18,
+          ),
+          spent: spent.toString(),
+          spentFormatted: formatUnits(spent, 18),
+          remaining: remaining.toString(),
+          remainingFormatted: formatUnits(remaining, 18),
+          blockedAgents: session.blockedAgents ?? [],
+          createdAt: session.createdAt,
+          spendingRules,
+        } satisfies SessionInfo;
+      }),
+    );
+  }
+
+  /**
+   * Get an enriched snapshot for a single session key.
+   * Returns `null` if not found in the indexer.
+   */
+  async getSessionInfo(sessionKey: string): Promise<SessionInfo | null> {
+    const session = await getSessionByKey(sessionKey).catch(() => null);
+    if (!session) return null;
+
+    const cs = this.readOnlyCs();
+    const rawAgentId = session.agent?.agentId ?? session.agentId;
+    const agent = await getAgentById(
+      `0x${BigInt(rawAgentId).toString(16)}`,
+    ).catch(() => null);
+    const agentWallet = (agent?.owner.aaWallet.address ||
+      zeroAddress) as `0x${string}`;
+
+    const fallbackMax = BigInt(session.maxLimit ?? "0");
+    const { maxAmount, spent, spendingRules } = agentWallet
+      ? await this.resolveSessionSpend(
+          cs,
+          agentWallet,
+          session.sessionId,
+          fallbackMax,
+        )
+      : {
+          maxAmount: fallbackMax,
+          spent: 0n,
+          spendingRules: [] as SessionInfo["spendingRules"],
+        };
+
+    const remaining = maxAmount > spent ? maxAmount - spent : 0n;
+
+    return {
+      sessionKey: session.sessionKey,
+      sessionId: session.sessionId,
+      agentId: rawAgentId ?? "",
+      status: effectiveSessionStatus(session),
+      validUntil: session.validUntil,
+      validUntilFormatted: new Date(Number(session.validUntil) * 1000)
+        .toISOString()
+        .replace("T", " ")
+        .replace(".000Z", " UTC"),
+      maxAmount: maxAmount.toString(),
+      maxAmountFormatted: formatUnits(maxAmount, 18),
+      valueLimit: session.valueLimit ?? "0",
+      valueLimitFormatted: formatUnits(BigInt(session.valueLimit ?? "0"), 18),
+      spent: spent.toString(),
+      spentFormatted: formatUnits(spent, 18),
+      remaining: remaining.toString(),
+      remainingFormatted: formatUnits(remaining, 18),
+      blockedAgents: session.blockedAgents ?? [],
+      createdAt: session.createdAt,
+      spendingRules,
+    };
+  }
+
+  /**
+   * List enriched channel snapshots for an agent.
+   *
+   * @param agentId  On-chain agentId (numeric or hex string).
+   * @param options  Pagination options.
+   */
+  async listChannels(
+    agentId: string | bigint | number,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<ChannelInfo[]> {
+    const entityId = `0x${BigInt(agentId).toString(16)}`;
+    const { limit = 10, offset = 0 } = options;
+    const channels = await getChannelsByAgent(entityId, limit, offset);
+    return channels.map((ch) => enrichChannel(ch));
+  }
+
+  /**
+   * Get an enriched snapshot for a single channel by its channelId.
+   * Returns `null` if not found in the indexer.
+   */
+  async getChannelInfo(channelId: string): Promise<ChannelInfo | null> {
+    const ch = await getChannelById(channelId).catch(() => null);
+    if (!ch) return null;
+    return enrichChannel(ch);
   }
 
   /** Get payment history for an agent. */

@@ -344,11 +344,9 @@ async function cmdSessionList(args: string[]): Promise<void> {
 
   const agentId = BigInt(agentIndexStr);
   const { limit, offset } = parsePagination(args);
-  const sessions = await getSessionsByAgent(
-    `0x${agentId.toString(16)}`,
-    limit,
-    offset,
-  );
+
+  const client = KiteSettleClient.createReadOnly();
+  const sessions = await client.listSessions(agentId, { limit, offset });
 
   if (sessions.length === 0) {
     console.log("");
@@ -357,9 +355,13 @@ async function cmdSessionList(args: string[]): Promise<void> {
     return;
   }
 
-  const rows = await Promise.all(
-    sessions.map((session) => buildSessionListRow(session)),
-  );
+  const rows: SessionListRow[] = sessions.map((s) => ({
+    sessionKey: s.sessionKey,
+    status: s.status,
+    expiresAt: s.validUntilFormatted,
+    maxAmount: s.maxAmountFormatted,
+    remainingAmount: s.remainingFormatted,
+  }));
   const pageInfo =
     sessions.length < limit
       ? `${offset + 1}-${offset + sessions.length} (all results in this page)`
@@ -391,8 +393,9 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
     return;
   }
 
-  const session = await resolveIndexedSession(sessionKeyRaw);
   const normalizedKey = normalizeSessionKey(sessionKeyRaw);
+  const client = KiteSettleClient.createReadOnly();
+  const session = await client.getSessionInfo(normalizedKey);
 
   console.log("");
   console.log("── Session Key Status ─────────────────────────────────────");
@@ -405,7 +408,7 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
     return;
   }
 
-  console.log(`  Status:  ${getEffectiveSessionStatus(session)}`);
+  console.log(`  Status:  ${session.status}`);
   console.log(`  Address: ${session.sessionKey}`);
   console.log("──────────────────────────────────────────────────────────");
 }
