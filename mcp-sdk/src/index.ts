@@ -5,6 +5,9 @@ export type {
   KiteSettleClientOptions,
   CallPaidApiOptions,
   CallPaidApiResult,
+  ChannelSettlementSelector,
+  InitiateSettlementOptions,
+  ChannelSettlementResult,
 } from "./kite-settle-client.js";
 
 export type { BatchEndReason, BatchLimits } from "./batch.js";

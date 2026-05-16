@@ -24,6 +24,8 @@
 import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { BatchEndReason, BatchLimits } from "./batch.js";
+import type { ChannelCallReceipt } from "./channel-store.js";
+import { loadChannel } from "./channel-store.js";
 import type { KiteClientOptions } from "./client.js";
 import { KitePaymentClient } from "./client.js";
 import { KITE_TESTNET, TOKENS } from "./config.js";
@@ -66,6 +68,7 @@ import type {
   Receipt,
   UsageLog,
 } from "./types.js";
+import { ChannelStatus } from "./types.js";
 import {
   deleteVar,
   getCredential,
@@ -292,6 +295,50 @@ export interface CallPaidApiResult {
   } | null;
 }
 
+// ── Channel settlement types ──────────────────────────────────────
+
+/**
+ * Selector for which channel(s) to settle.
+ * Precedence: channelId > sessionKey > agentId.
+ * At least one field must be provided.
+ */
+export interface ChannelSettlementSelector {
+  /** Settle this specific channel (highest precedence). */
+  channelId?: `0x${string}`;
+  /** Settle all expired channels for this session key. */
+  sessionKey?: string;
+  /** Settle all expired channels for this agent ID (lowest precedence). */
+  agentId?: string | bigint;
+}
+
+/** Options for `initiateSettlements`. */
+export interface InitiateSettlementOptions {
+  /**
+   * When `true`, settle channels regardless of whether they have expired.
+   * By default only expired channels are settled when using sessionKey/agentId selectors.
+   */
+  forceActiveClose?: boolean;
+}
+
+/** Result for a single channel settlement attempt. */
+export interface ChannelSettlementResult {
+  channelId: string;
+  /** Outcome of the settlement attempt. */
+  status: "success" | "already_pending" | "already_closed" | "error";
+  /** On-chain tx hash (present on success). */
+  txHash?: string;
+  /** ISO-8601 settlement deadline (present when known). */
+  settlementDeadline?: string;
+  /** Provider address (present when the channel state was fetched). */
+  provider?: string;
+  /** Whether the AA (gasless) path was used. */
+  usedAaPath?: boolean;
+  /** Whether a provider-signed receipt claim was included. */
+  usedReceiptClaim?: boolean;
+  /** Human-readable description (present for non-success statuses). */
+  message?: string;
+}
+
 // ── Status helpers (shared by CLI + SDK methods) ──────────────────
 
 /**
@@ -318,7 +365,8 @@ export function effectiveChannelStatus(
   if (
     Number.isFinite(expiresAtNum) &&
     expiresAtNum > 0 &&
-    expiresAtNum < Math.floor(Date.now() / 1000)
+    expiresAtNum < Math.floor(Date.now() / 1000) &&
+    status.trim().toUpperCase() === "ACTIVE"
   ) {
     return "Expired";
   }
@@ -1028,7 +1076,9 @@ export class KiteSettleClient {
       const text = await probe.text().catch(() => "");
       return {
         status: 402,
-        data: _tryParseJSON(text) ?? { error: "Payment required but autopay is disabled" },
+        data: _tryParseJSON(text) ?? {
+          error: "Payment required but autopay is disabled",
+        },
         payment: null,
       };
     }
@@ -1070,6 +1120,530 @@ export class KiteSettleClient {
       data: _tryParseJSON(responseText),
       payment: capturedPayment,
     };
+  }
+
+  // ── Channel Settlement ────────────────────────────────────────
+
+  /**
+   * Core per-channel settlement logic extracted from the CLI `channel close` command.
+   * Tries the AA (gasless) path first, falls back to direct contract calls.
+   * @private
+   */
+  private async _settleSingleChannel(
+    channelId: `0x${string}`,
+  ): Promise<ChannelSettlementResult> {
+    const contract = this.requirePaymentClient().getContractService();
+    const sessionKeyAddress = this.sessionKeyAddress as
+      | `0x${string}`
+      | undefined;
+
+    // ── Resolve local store data ───────────────────────────────
+    const stored = loadChannel(channelId);
+    const merkleRoot: `0x${string}` =
+      stored?.merkleRoot ??
+      "0x0000000000000000000000000000000000000000000000000000000000000000";
+    const latestReceipt: ChannelCallReceipt | null =
+      stored?.calls.at(-1)?.channelReceipt ?? null;
+
+    // ── Check on-chain state ───────────────────────────────────
+    const ch = await this.getChannel(channelId);
+
+    if (ch.status === ChannelStatus.Closed) {
+      return {
+        channelId,
+        status: "already_closed",
+        provider: ch.provider,
+        message: "Channel is already closed.",
+      };
+    }
+
+    if (ch.status === ChannelStatus.SettlementPending) {
+      const state = await this.getSettlementState(channelId).catch(() => ({
+        deadline: 0,
+      }));
+      return {
+        channelId,
+        status: "already_pending",
+        provider: ch.provider,
+        settlementDeadline:
+          state.deadline > 0
+            ? new Date(state.deadline * 1000).toISOString()
+            : undefined,
+        message: "Settlement already pending.",
+      };
+    }
+
+    // ── Prepare settlement parameters ──────────────────────────
+    const sequenceNumber = latestReceipt?.sequenceNumber ?? 0;
+    const cumulativeCost = latestReceipt
+      ? BigInt(latestReceipt.cumulativeCost)
+      : 0n;
+    const timestamp = latestReceipt?.timestamp ?? 0;
+    const providerSignature =
+      latestReceipt?.providerSignature ?? ("0x" as `0x${string}`);
+
+    let settleTxHash: string | undefined;
+    let usedAaPath = false;
+    let usedReceiptClaim = !!latestReceipt;
+    let aaError: Error | null = null;
+
+    // ── AA (gasless) path — agents must not fall back to direct tx ─
+    if (!sessionKeyAddress) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: "No session key available for AA settlement.",
+      };
+    }
+
+    const walletContract = await contract
+      .resolveWalletContractForSession(sessionKeyAddress)
+      .catch(() => null);
+
+    if (!walletContract) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: `Could not resolve ClientAgentVault wallet for session key ${sessionKeyAddress}. Ensure the session is registered on-chain.`,
+      };
+    }
+
+    // Try with the local receipt claim first (if available).
+    try {
+      settleTxHash = await contract.initiateSettlementViaVaultAA(
+        sessionKeyAddress,
+        walletContract,
+        channelId,
+        sequenceNumber,
+        cumulativeCost,
+        timestamp,
+        providerSignature,
+        merkleRoot,
+      );
+      usedAaPath = true;
+    } catch (err) {
+      aaError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    // If the receipt-based attempt failed and we had a receipt, retry with a zero claim.
+    if (!settleTxHash && latestReceipt) {
+      try {
+        settleTxHash = await contract.initiateSettlementViaVaultAA(
+          sessionKeyAddress,
+          walletContract,
+          channelId,
+          0,
+          0n,
+          0,
+          "0x" as `0x${string}`,
+          merkleRoot,
+        );
+        usedAaPath = true;
+        usedReceiptClaim = false;
+      } catch (err) {
+        aaError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+
+    if (!settleTxHash) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: aaError
+          ? `AA settlement failed: ${aaError.message}`
+          : "AA settlement failed: unknown error.",
+      };
+    }
+
+    const state = await this.getSettlementState(channelId).catch(() => ({
+      deadline: 0,
+    }));
+
+    return {
+      channelId,
+      status: "success",
+      txHash: settleTxHash,
+      provider: ch.provider,
+      usedAaPath,
+      usedReceiptClaim,
+      settlementDeadline:
+        state.deadline > 0
+          ? new Date(state.deadline * 1000).toISOString()
+          : undefined,
+    };
+  }
+
+  /**
+   * Finalize or force-close a single channel via the AA wallet (gasless).
+   *
+   * - If the channel is expired (Open/Active past expiry) → `forceCloseExpired` via AA.
+   * - If the channel has a pending settlement and the challenge window has closed → `finalize` via AA.
+   */
+  private async _finalizeOrForceCloseSingleChannel(
+    channelId: `0x${string}`,
+  ): Promise<ChannelSettlementResult> {
+    const contract = this.requirePaymentClient().getContractService();
+    const sessionKeyAddress = this.sessionKeyAddress as
+      | `0x${string}`
+      | undefined;
+
+    if (!sessionKeyAddress) {
+      return {
+        channelId,
+        status: "error",
+        message: "No session key available for AA finalization.",
+      };
+    }
+
+    const walletContract = await contract
+      .resolveWalletContractForSession(sessionKeyAddress)
+      .catch(() => null);
+
+    if (!walletContract) {
+      return {
+        channelId,
+        status: "error",
+        message: `Could not resolve ClientAgentVault wallet for session key ${sessionKeyAddress}.`,
+      };
+    }
+
+    const ch = await this.getChannel(channelId);
+
+    if (ch.status === ChannelStatus.Closed) {
+      return {
+        channelId,
+        status: "already_closed",
+        provider: ch.provider,
+        message: "Channel is already closed.",
+      };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+
+    // Pending settlement: finalize if challenge window has passed.
+    if (ch.status === ChannelStatus.SettlementPending) {
+      const state = await this.getSettlementState(channelId).catch(() => ({
+        deadline: 0,
+      }));
+
+      if (state.deadline > 0 && now <= state.deadline) {
+        return {
+          channelId,
+          status: "error",
+          provider: ch.provider,
+          message: `Challenge window still open until ${new Date(state.deadline * 1000).toISOString()}. Run again after the deadline.`,
+        };
+      }
+
+      const stored = loadChannel(channelId);
+      const merkleRoot: `0x${string}` =
+        stored?.merkleRoot ??
+        "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+      try {
+        const txHash = await contract.finalizeViaVaultAA(
+          sessionKeyAddress,
+          walletContract,
+          channelId,
+          merkleRoot,
+        );
+        return {
+          channelId,
+          status: "success",
+          txHash,
+          provider: ch.provider,
+          usedAaPath: true,
+          message: "Channel finalized via AA wallet.",
+        };
+      } catch (err) {
+        return {
+          channelId,
+          status: "error",
+          provider: ch.provider,
+          message: `AA finalize failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+
+    // Open / Active: force-close if the channel has expired past its grace period.
+    const isExpired = ch.expiresAt > 0 && now >= ch.expiresAt + 300;
+
+    if (!isExpired) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message:
+          ch.expiresAt > 0
+            ? `Channel not yet eligible for force-close (expires ${new Date(ch.expiresAt * 1000).toISOString()}).`
+            : "Channel has no expiry set — use `kite channel settle` to initiate settlement instead.",
+      };
+    }
+
+    try {
+      const txHash = await contract.forceCloseExpiredViaVaultAA(
+        sessionKeyAddress,
+        walletContract,
+        channelId,
+      );
+      return {
+        channelId,
+        status: "success",
+        txHash,
+        provider: ch.provider,
+        usedAaPath: true,
+        message:
+          "Force-close submitted via AA wallet. Settlement window is now open.",
+      };
+    } catch (err) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: `AA force-close failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Finalize or force-close one or more channels after the challenge window has closed.
+   *
+   * - Channels with `SettlementPending` status whose deadline has passed are **finalized**.
+   * - Channels that are `Open` / `Active` and have expired are **force-closed** to open the settlement window.
+   *
+   * All operations use the AA (gasless) path via the ClientAgentVault so no native gas
+   * is required from the session key.
+   *
+   * @example
+   * const results = await KiteSettleClient.finalizeChannels({ channelId: "0x…" });
+   * const results = await KiteSettleClient.finalizeChannels({ agentId: 1n });
+   */
+  static async finalizeChannels(
+    selector: ChannelSettlementSelector,
+  ): Promise<ChannelSettlementResult[]> {
+    const finalizeIndexedChannel = async (
+      ch: IndexedChannel,
+    ): Promise<ChannelSettlementResult> => {
+      try {
+        const channelClient = await KiteSettleClient.create({
+          agentId: BigInt(ch.agent.agentId),
+          sessionKey: ch.session.sessionKey,
+          allowUnavailableSession: true,
+        });
+        return await channelClient._finalizeOrForceCloseSingleChannel(
+          ch.channelId as `0x${string}`,
+        );
+      } catch (err: unknown) {
+        return {
+          channelId: ch.channelId,
+          status: "error",
+          message: String(err),
+        };
+      }
+    };
+
+    if (selector.channelId) {
+      const indexed = await getChannelById(selector.channelId).catch(
+        () => null,
+      );
+      if (!indexed) {
+        return [
+          {
+            channelId: selector.channelId,
+            status: "error",
+            message: `Channel ${selector.channelId} not found in indexer.`,
+          },
+        ];
+      }
+      return [await finalizeIndexedChannel(indexed)];
+    }
+
+    if (selector.sessionKey) {
+      const normalizedKey = (
+        selector.sessionKey.startsWith("0x")
+          ? selector.sessionKey.toLowerCase()
+          : `0x${selector.sessionKey.toLowerCase()}`
+      ) as `0x${string}`;
+
+      const indexedSession = await getSessionByKey(normalizedKey).catch(
+        () => null,
+      );
+      if (!indexedSession) {
+        throw new Error(`Session ${normalizedKey} not found in indexer.`);
+      }
+
+      const rawAgentId =
+        (indexedSession as any).agent?.agentId ?? indexedSession.agentId;
+      const agentEntityId = `0x${BigInt(rawAgentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels.filter(
+        (ch) =>
+          ch.session.sessionKey.toLowerCase() === normalizedKey.toLowerCase() &&
+          ch.status.toUpperCase() !== "CLOSED",
+      );
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(finalizeIndexedChannel));
+    }
+
+    if (selector.agentId !== undefined) {
+      const agentEntityId = `0x${BigInt(selector.agentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels.filter(
+        (ch) => ch.status.toUpperCase() !== "CLOSED",
+      );
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(finalizeIndexedChannel));
+    }
+
+    throw new Error(
+      "finalizeChannels requires at least one of: channelId, sessionKey, agentId.",
+    );
+  }
+
+  /**
+   * Initiate settlement for one or more payment channels.
+   *
+   * Resolves channels from the selector (precedence: channelId > sessionKey > agentId).
+   * For sessionKey / agentId selectors, only expired channels are settled unless
+   * `forceActiveClose` is `true`.
+   *
+   * Each channel is settled using a dedicated client created with the session key
+   * recorded for that channel in the indexer — so this method works correctly even
+   * when different channels belong to different sessions.
+   *
+   * This mirrors the `kite channel close` CLI logic — the provider API must still
+   * agree to the submitted receipts for settlement to finalize. Call
+   * `finalizeChannel()` after the challenge window closes.
+   *
+   * **Implemented path**: channelId (direct) → sessionKey (all session channels) →
+   * agentId (all agent channels), with the stated precedence order. Only one path
+   * is executed per call.
+   *
+   * @example
+   * // Settle one specific channel
+   * const results = await KiteSettleClient.initiateSettlements({ channelId: "0x…" });
+   *
+   * // Settle all expired channels for an agent
+   * const results = await KiteSettleClient.initiateSettlements({ agentId: 1n });
+   *
+   * // Force-settle all channels (including active ones) for a session
+   * const results = await KiteSettleClient.initiateSettlements(
+   *   { sessionKey: "0x…" },
+   *   { forceActiveClose: true },
+   * );
+   */
+  static async initiateSettlements(
+    selector: ChannelSettlementSelector,
+    options: InitiateSettlementOptions = {},
+  ): Promise<ChannelSettlementResult[]> {
+    const { forceActiveClose = false } = options;
+    const now = Math.floor(Date.now() / 1000);
+
+    const isSettleable = (ch: IndexedChannel): boolean => {
+      const status = ch.status.toUpperCase();
+      if (status === "CLOSED" || status === "SETTLEMENT_PENDING") return false;
+      return forceActiveClose || Number(ch.expiresAt) < now;
+    };
+
+    /**
+     * Create a client with the indexed channel's own session key and settle it.
+     * Each channel gets its own credentialed client so the AA path uses the
+     * correct session key regardless of which identifier was passed by the caller.
+     */
+    const settleIndexedChannel = async (
+      ch: IndexedChannel,
+    ): Promise<ChannelSettlementResult> => {
+      try {
+        const channelClient = await KiteSettleClient.create({
+          agentId: BigInt(ch.agent.agentId),
+          sessionKey: ch.session.sessionKey,
+          allowUnavailableSession: true,
+        });
+        return await channelClient._settleSingleChannel(
+          ch.channelId as `0x${string}`,
+        );
+      } catch (err: unknown) {
+        return {
+          channelId: ch.channelId,
+          status: "error",
+          message: String(err),
+        };
+      }
+    };
+
+    // ── channelId takes highest precedence ─────────────────────
+    if (selector.channelId) {
+      const indexed = await getChannelById(selector.channelId).catch(
+        () => null,
+      );
+      if (!indexed) {
+        return [
+          {
+            channelId: selector.channelId,
+            status: "error",
+            message: `Channel ${selector.channelId} not found in indexer.`,
+          },
+        ];
+      }
+      return [await settleIndexedChannel(indexed)];
+    }
+
+    // ── sessionKey ─────────────────────────────────────────────
+    if (selector.sessionKey) {
+      const normalizedKey = (
+        selector.sessionKey.startsWith("0x")
+          ? selector.sessionKey.toLowerCase()
+          : `0x${selector.sessionKey.toLowerCase()}`
+      ) as `0x${string}`;
+
+      const indexedSession = await getSessionByKey(normalizedKey).catch(
+        () => null,
+      );
+      if (!indexedSession) {
+        throw new Error(`Session ${normalizedKey} not found in indexer.`);
+      }
+
+      const rawAgentId =
+        (indexedSession as any).agent?.agentId ?? indexedSession.agentId;
+      const agentEntityId = `0x${BigInt(rawAgentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels
+        .filter(
+          (ch) =>
+            ch.session.sessionKey.toLowerCase() === normalizedKey.toLowerCase(),
+        )
+        .filter(isSettleable);
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(settleIndexedChannel));
+    }
+
+    // ── agentId (lowest precedence) ────────────────────────────
+    if (selector.agentId !== undefined) {
+      const agentEntityId = `0x${BigInt(selector.agentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels.filter(isSettleable);
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(settleIndexedChannel));
+    }
+
+    throw new Error(
+      "initiateSettlements requires at least one of: channelId, sessionKey, agentId.",
+    );
   }
 
   // ── Wallet ────────────────────────────────────────────────────
@@ -1846,6 +2420,43 @@ export class KiteSettleClient {
     const { limit = 10, offset = 0 } = options;
     const channels = await getChannelsByAgent(entityId, limit, offset);
     return channels.map((ch) => enrichChannel(ch));
+  }
+
+  /**
+   * List enriched channel snapshots for a specific session key.
+   * Resolves the agent from the indexer and filters to channels belonging
+   * to the given session.
+   *
+   * @param sessionKey  Session key address (with or without 0x prefix).
+   * @param options     Pagination options applied when fetching agent channels.
+   */
+  async listChannelsBySession(
+    sessionKey: string,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<ChannelInfo[]> {
+    const normalizedKey = (
+      sessionKey.startsWith("0x")
+        ? sessionKey.toLowerCase()
+        : `0x${sessionKey.toLowerCase()}`
+    ) as `0x${string}`;
+
+    const indexedSession = await getSessionByKey(normalizedKey).catch(
+      () => null,
+    );
+    if (!indexedSession) return [];
+
+    const rawAgentId =
+      (indexedSession as any).agent?.agentId ?? indexedSession.agentId;
+    const entityId = `0x${BigInt(rawAgentId).toString(16)}`;
+    const { limit = 10, offset = 0 } = options;
+    const allChannels = await getChannelsByAgent(entityId, limit, offset);
+
+    return allChannels
+      .filter(
+        (ch) =>
+          ch.session.sessionKey.toLowerCase() === normalizedKey.toLowerCase(),
+      )
+      .map((ch) => enrichChannel(ch));
   }
 
   /**

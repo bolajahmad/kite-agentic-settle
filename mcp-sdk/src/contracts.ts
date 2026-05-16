@@ -908,18 +908,17 @@ export class ContractService {
   }
 
   /**
-   * Initiate settlement through AA wallet via UserOp so session consumers do not pay native gas.
-   * The wallet executes PaymentChannel.initiateSettlement(...) as msg.sender.
+   * Send a single contract call as a UserOp through the ClientAgentVault (AA wallet).
+   * The AA wallet becomes msg.sender, so no native gas is required from the session key.
+   *
+   * @param sessionKeyAddress - The active session key address (used to derive/verify the signer).
+   * @param walletContract    - Expected AA wallet address (ClientAgentVault).
+   * @param callData          - Encoded function call data for the PaymentChannel contract.
    */
-  async initiateSettlementViaVaultAA(
+  private async _sendVaultAATransaction(
     sessionKeyAddress: `0x${string}`,
     walletContract: `0x${string}`,
-    channelId: `0x${string}`,
-    sequenceNumber: number,
-    cumulativeCost: bigint,
-    timestamp: number,
-    providerSignature: `0x${string}`,
-    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000",
+    callData: `0x${string}`,
   ): Promise<string> {
     const { GokiteAASDK } = await import("gokite-aa-sdk");
     const aaSdk = new GokiteAASDK(
@@ -940,21 +939,7 @@ export class ContractService {
     const batchRequest = {
       targets: [this.config.contracts.paymentChannel as `0x${string}`],
       values: [0n],
-      callDatas: [
-        encodeFunctionData({
-          abi: paymentChannelAbi,
-          functionName: "initiateSettlement",
-          args: [
-            channelId,
-            sessionKeyAddress,
-            BigInt(sequenceNumber),
-            cumulativeCost,
-            BigInt(timestamp),
-            providerSignature,
-            merkleRoot,
-          ],
-        }),
-      ],
+      callDatas: [callData],
     };
 
     const keyPair = (this.wdkAccount as any)?.keyPair;
@@ -978,8 +963,7 @@ export class ContractService {
       },
     ];
 
-    const ownerPkRaw =
-      process.env.PRIVATE_KEY ?? getCredential() ?? process.env.EOA_PRIVATE_KEY;
+    const ownerPkRaw = getCredential();
     if (ownerPkRaw) {
       const ownerPk = (
         ownerPkRaw.startsWith("0x") ? ownerPkRaw : `0x${ownerPkRaw}`
@@ -1002,7 +986,7 @@ export class ContractService {
     for (const strategy of signerStrategies) {
       try {
         console.log(
-          `  Sending UserOp to bundler for gasless channel close via AA (signer=${strategy.label})...`,
+          `  Sending UserOp to bundler via AA (signer=${strategy.label})...`,
         );
 
         const sponsoredResult = await aaSdk.sendUserOperationAndWait(
@@ -1093,7 +1077,7 @@ export class ContractService {
             tokenErr?.message ??
             String(tokenErr);
           lastError = new Error(
-            `AA settle failed (signer=${strategy.label}) sponsored=[${sponsoredReason}] token=[${tokenReason}]`,
+            `AA tx failed (signer=${strategy.label}) sponsored=[${sponsoredReason}] token=[${tokenReason}]`,
           );
         }
       }
@@ -1101,7 +1085,86 @@ export class ContractService {
 
     throw (
       lastError ??
-      new Error("Unknown UserOp failure while initiating settlement")
+      new Error("Unknown UserOp failure in _sendVaultAATransaction")
+    );
+  }
+
+  /**
+   * Initiate settlement through AA wallet via UserOp so session consumers do not pay native gas.
+   * The wallet executes PaymentChannel.initiateSettlement(...) as msg.sender.
+   */
+  async initiateSettlementViaVaultAA(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    channelId: `0x${string}`,
+    sequenceNumber: number,
+    cumulativeCost: bigint,
+    timestamp: number,
+    providerSignature: `0x${string}`,
+    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000",
+  ): Promise<string> {
+    const callData = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "initiateSettlement",
+      args: [
+        channelId,
+        sessionKeyAddress,
+        BigInt(sequenceNumber),
+        cumulativeCost,
+        BigInt(timestamp),
+        providerSignature,
+        merkleRoot,
+      ],
+    });
+    return this._sendVaultAATransaction(
+      sessionKeyAddress,
+      walletContract,
+      callData,
+    );
+  }
+
+  /**
+   * Finalize a payment channel through AA wallet via UserOp (gasless).
+   * The wallet executes PaymentChannel.finalize(...) as msg.sender.
+   * Call this after the challenge window has closed following initiateSettlement.
+   */
+  async finalizeViaVaultAA(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    channelId: `0x${string}`,
+    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000",
+  ): Promise<string> {
+    const callData = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "finalize",
+      args: [channelId, merkleRoot],
+    });
+    return this._sendVaultAATransaction(
+      sessionKeyAddress,
+      walletContract,
+      callData,
+    );
+  }
+
+  /**
+   * Force-close an expired channel through AA wallet via UserOp (gasless).
+   * The wallet executes PaymentChannel.forceCloseExpired(...) as msg.sender.
+   * Use for channels that have expired without a provider-initiated settlement.
+   */
+  async forceCloseExpiredViaVaultAA(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    channelId: `0x${string}`,
+  ): Promise<string> {
+    const callData = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "forceCloseExpired",
+      args: [channelId],
+    });
+    return this._sendVaultAATransaction(
+      sessionKeyAddress,
+      walletContract,
+      callData,
     );
   }
 

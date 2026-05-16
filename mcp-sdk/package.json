@@ -1,7 +1,7 @@
 {
-  "name": "@kite-agentic-pay/sdk",
+  "name": "@kite-settle/sdk",
   "version": "0.2.0",
-  "description": "Kite Agent Pay SDK and CLI — programmable payments for AI agents",
+  "description": "Kite Settle SDK and CLI — decentralized programmable payments for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
