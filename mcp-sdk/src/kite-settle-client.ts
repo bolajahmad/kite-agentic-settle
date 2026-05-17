@@ -70,6 +70,12 @@ import type {
 } from "./types.js";
 import { ChannelStatus } from "./types.js";
 import {
+  buildChannelHeaders,
+  extractChannelReceipt,
+  probeApi402Offer,
+  waitForChannelActive,
+} from "./utils/channel-helpers.js";
+import {
   deleteVar,
   getCredential,
   getKiteDir,
@@ -238,12 +244,22 @@ export interface CallPaidApiOptions {
   headers?: Record<string, string>;
   /**
    * Payment routing mode.
-   * - "perCall" — always sign a fresh x402 EIP-712 payment per request.
-   * - "batch"   — route through an active batch session if one exists.
-   * - "channel" — route through an active payment channel if one exists.
-   * - "auto"    — prefer batch → channel → perCall automatically (default).
+   * - "perCall"  — always sign a fresh x402 EIP-712 payment per request.
+   * - "batch"   — open a channel (or reuse existing) and route through it.
+   * - "stream"  — same as batch; intended for streaming/long-lived channels.
+   * - "channel" — alias for batch/stream; explicit channel mode.
+   * - "auto"    — prefer batch session → channel → perCall automatically (default).
    */
-  mode?: "perCall" | "batch" | "channel" | "auto";
+  mode?: "perCall" | "batch" | "stream" | "channel" | "auto";
+  /**
+   * Session Key Address
+   * - 0x${string} — explicitly specify a session key to use for signing payments.
+   */
+  sessionKeyAddress?: `0x${string}`;
+  /**
+   * AgentID
+   */
+  agentId?: string;
   /** Cap on the maximum payment amount (wei). Throws if the offer exceeds this. */
   maxAmount?: bigint;
   /**
@@ -268,6 +284,40 @@ export interface CallPaidApiOptions {
    * formatting in the CLI.
    */
   onPayment?: (result: PaymentResult) => void;
+
+  // ── Channel-mode options (batch / stream / channel) ───────────────────
+
+  /**
+   * Reuse an existing open channel instead of opening a new one.
+   * When provided, the channel must already be open and associated with the
+   * same provider as the API endpoint's 402 offer.
+   */
+  channelId?: `0x${string}`;
+  /**
+   * Initial channel deposit in wei.
+   * Default: the provider's `recommendedDeposit` from the 402 offer, or 10× `maxPerCall`.
+   */
+  deposit?: bigint;
+  /**
+   * Maximum cost cap per individual API call in wei.
+   * Default: the provider's `maxRatePerCall` from the 402 offer.
+   */
+  maxPerCall?: bigint;
+  /**
+   * Channel lifetime in seconds.
+   * Default: the provider's `maxDuration` from the 402 offer, or 3600.
+   */
+  maxDuration?: number;
+  /**
+   * ERC-20 token address to use for channel payments.
+   * Default: the network default (DmUSDT).
+   */
+  token?: string;
+  /**
+   * Wait for the provider to activate the channel before making the first call.
+   * Activation is required before calls are accepted. Default: `true`.
+   */
+  waitForActivation?: boolean;
 }
 
 /** Structured result from `callPaidApi`. */
@@ -293,6 +343,16 @@ export interface CallPaidApiResult {
     /** On-chain tx hash (present for legacy direct-settlement paths). */
     txHash?: string;
   } | null;
+  /** Channel ID used when mode is batch / stream / channel. */
+  channelId?: `0x${string}`;
+  /** `true` when this call opened a new channel (vs reusing an existing one). */
+  channelOpened?: boolean;
+  /** On-chain tx hash of the channel open transaction (present when `channelOpened` is `true`). */
+  channelOpenTxHash?: string;
+  /** Provider address the channel was opened with. */
+  channelProvider?: string;
+  /** ERC-20 token asset address used for the channel. */
+  channelAsset?: string;
 }
 
 // ── Channel settlement types ──────────────────────────────────────
@@ -1032,6 +1092,10 @@ export class KiteSettleClient {
    *  3. Returns a structured `CallPaidApiResult` with the response body and
    *     a payment receipt.
    *
+   * For channel modes (`"batch"`, `"stream"`, `"channel"`), the method opens
+   * a new channel (or reuses `options.channelId`) and makes the call via
+   * channel headers. See `CallPaidApiOptions` for the full channel config.
+   *
    * The caller must have been created with a credential (agent mode or EOA
    * mode). A read-only client throws when `fetchWithPayment` is called.
    *
@@ -1043,11 +1107,18 @@ export class KiteSettleClient {
     url: string,
     options: CallPaidApiOptions = {},
   ): Promise<CallPaidApiResult> {
+    const { mode = "auto" } = options;
+
+    // ── Channel-based modes: open/reuse channel, call via channel headers ──
+    if (mode === "batch" || mode === "stream" || mode === "channel") {
+      return this._callPaidApiViaChannel(url, options);
+    }
+
+    // ── perCall / auto: probe then route via the x402 interceptor ──────────
     const {
       method = "GET",
       body,
       headers = {},
-      mode = "auto",
       maxAmount,
       autopay = true,
       onPaymentRequired,
@@ -1119,6 +1190,159 @@ export class KiteSettleClient {
       status: response.status,
       data: _tryParseJSON(responseText),
       payment: capturedPayment,
+    };
+  }
+
+  /**
+   * Open a channel (or reuse an existing one) and make a single API call
+   * via channel headers. Used internally by `callPaidApi` for batch/stream/channel modes.
+   *
+   * Handles the full flow:
+   *  1. Probes the 402 offer to discover provider address, asset, and rate limits.
+   *  2. Opens a new channel via `this.openChannel()`, or reuses `options.channelId`.
+   *  3. Optionally waits for the provider to activate the channel.
+   *  4. Makes one HTTP call with channel payment headers.
+   *  5. Extracts the provider-signed receipt and fires `onPayment`.
+   */
+  private async _callPaidApiViaChannel(
+    url: string,
+    options: CallPaidApiOptions,
+  ): Promise<CallPaidApiResult> {
+    const {
+      method = "GET",
+      body,
+      headers = {},
+      channelId: existingChannelId,
+      deposit: depositOverride,
+      maxPerCall: maxPerCallOverride,
+      maxDuration,
+      token: tokenOverride,
+      waitForActivation = true,
+      onPayment,
+      sessionKeyAddress,
+      agentId,
+    } = options;
+
+    const initHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...headers,
+    };
+
+    // ── 1. Probe for 402 offer ────────────────────────────────────────────
+    const probeResult = await probeApi402Offer(url, tokenOverride);
+
+    if (!probeResult) {
+      // No payment required — direct call
+      const init: RequestInit = {
+        method,
+        headers: initHeaders,
+        ...(body && (method === "POST" || method === "PUT") ? { body } : {}),
+      };
+      const response = await globalThis.fetch(url, init);
+      const text = await response.text();
+      return {
+        status: response.status,
+        data: _tryParseJSON(text),
+        payment: null,
+      };
+    }
+
+    const { offer, raw } = probeResult;
+    const channelOptions = (raw as any)?.channelOptions as
+      | { recommendedDeposit?: string; maxDuration?: number }
+      | undefined;
+
+    // ── 2. Open or reuse channel ──────────────────────────────────────────
+    let channelId: `0x${string}`;
+    let channelOpened = false;
+    let channelOpenTxHash: string | undefined;
+
+    if (existingChannelId) {
+      channelId = existingChannelId;
+    } else {
+      const ratePerCall =
+        maxPerCallOverride ??
+        (offer.maxRatePerCall
+          ? BigInt(offer.maxRatePerCall)
+          : BigInt(offer.maxAmountRequired));
+
+      const deposit =
+        depositOverride ??
+        (channelOptions?.recommendedDeposit
+          ? BigInt(channelOptions.recommendedDeposit)
+          : ratePerCall * 10n);
+
+      const duration = maxDuration ?? channelOptions?.maxDuration ?? 3600;
+
+      const walletContractForSpending = (await this.getPaymentClient()
+        .getContractService()
+        .resolveWalletContractForSession(
+          sessionKeyAddress as `0x${string}`,
+        )) as `0x${string}`;
+
+      const channelResult =
+        await this.getContractService().openChannelViaVaultBatch(
+          sessionKeyAddress as `0x${string}`,
+          walletContractForSpending,
+          offer.payTo,
+          offer.asset,
+          0,
+          deposit,
+          deposit,
+          duration,
+          ratePerCall,
+        );
+
+      channelId = channelResult.channelId as `0x${string}`;
+      channelOpenTxHash = channelResult.txHash;
+      channelOpened = true;
+
+      if (waitForActivation) {
+        await waitForChannelActive(this, channelId);
+      }
+    }
+
+    // Register the channel so the interceptor routes through it
+    this.setChannelForProvider(offer.payTo, channelId);
+
+    // ── 3. Make the API call with channel headers ─────────────────────────
+    const channelHeaders = buildChannelHeaders(channelId, null);
+    const allHeaders: Record<string, string> = {
+      ...initHeaders,
+      ...channelHeaders,
+    };
+    const callInit: RequestInit = {
+      method,
+      headers: allHeaders,
+      ...(body && (method === "POST" || method === "PUT") ? { body } : {}),
+    };
+
+    const response = await this.requirePaymentClient().fetch(url, callInit);
+    const responseText = await response.text();
+    const data = _tryParseJSON(responseText);
+
+    // ── 4. Extract provider receipt and fire callback ─────────────────────
+    const receipt = extractChannelReceipt(data, response.headers);
+
+    if (receipt && onPayment) {
+      onPayment({
+        method: "channel",
+        amount: BigInt(receipt.cumulativeCost),
+        success: true,
+      });
+    }
+
+    return {
+      status: response.status,
+      data,
+      payment: receipt
+        ? { method: "channel", amount: receipt.cumulativeCost }
+        : null,
+      channelId,
+      channelOpened,
+      channelOpenTxHash,
+      channelProvider: offer.payTo,
+      channelAsset: offer.asset,
     };
   }
 
@@ -1915,6 +2139,24 @@ export class KiteSettleClient {
     return this.requirePaymentClient()
       .getContractService()
       .getAgentURI(agentId);
+  }
+
+  /**
+   * Fetch owner, agentURI, and AA wallet for an agent in a single parallel read.
+   * Works on `createReadOnly()` clients — no credential required.
+   *
+   * @returns `{ agentId, owner, agentURI, walletContract, registeredOwner }`
+   *   Each field is `null` when the on-chain read fails (agent may not exist).
+   */
+  async getAgentInfo(agentId: bigint | string): Promise<{
+    agentId: string;
+    owner: string | null;
+    agentURI: string | null;
+    walletContract: string | null;
+    registeredOwner: string | null;
+  }> {
+    const id = typeof agentId === "string" ? BigInt(agentId) : agentId;
+    return this.readOnlyCs().getAgentInfo(id);
   }
 
   /**

@@ -133,3 +133,70 @@ export function buildChannelHeaders(
 
   return headers;
 }
+
+// ── 402 Offer utilities ───────────────────────────────────────────────────
+
+/** First offer extracted from a 402 response's `accepts[]` array. */
+export interface PayOffer {
+  payTo: `0x${string}`;
+  asset: `0x${string}`;
+  maxAmountRequired: string;
+  /** Provider's declared per-call ceiling. */
+  maxRatePerCall?: string;
+  scheme: string;
+  description?: string;
+  merchantName?: string;
+  resource?: string;
+}
+
+function selectOffer(
+  offers: PayOffer[],
+  preferredAsset?: string,
+): PayOffer {
+  const normalizedPreferredAsset = preferredAsset?.toLowerCase();
+  const scopedOffers = normalizedPreferredAsset
+    ? offers.filter(
+        (offer) => offer.asset.toLowerCase() === normalizedPreferredAsset,
+      )
+    : offers;
+  return (
+    [...scopedOffers].sort((a, b) => {
+      const aAmount = BigInt(a.maxAmountRequired);
+      const bAmount = BigInt(b.maxAmountRequired);
+      if (aAmount < bAmount) return -1;
+      if (aAmount > bAmount) return 1;
+      return 0;
+    })[0] ?? offers[0]
+  );
+}
+
+/**
+ * Probe an endpoint for a 402 Payment Required offer.
+ * Returns `null` when no payment is required (non-402 response).
+ */
+export async function probeApi402Offer(
+  url: string,
+  preferredAsset?: string,
+): Promise<null | { offer: PayOffer; raw: any }> {
+  const probe = await globalThis.fetch(url);
+  if (probe.status !== 402) return null;
+
+  const text = await probe.text();
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`Cannot parse 402 response body: ${text}`);
+  }
+
+  const offers = parsed.accepts as PayOffer[] | undefined;
+  if (!offers || offers.length === 0) {
+    throw new Error("402 response is missing accepts[]");
+  }
+
+  const offer = selectOffer(
+    offers,
+    preferredAsset ?? process.env.SETTLEMENT_TOKEN_ADDRESS,
+  );
+  return { offer, raw: parsed };
+}

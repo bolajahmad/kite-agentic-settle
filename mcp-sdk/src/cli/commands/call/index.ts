@@ -1,17 +1,17 @@
 import { formatUnits, parseUnits } from "viem";
+import { createChannelRecord } from "../../../channel-store.js";
 import {
   DecisionMode,
   SessionRules,
   decide as decideCall,
 } from "../../../decide.js";
 import { getSessionsByAgent } from "../../../indexer.js";
-import { KiteSettleClient } from "../../../kite-settle-client.js";
+import { KITE_TESTNET, KiteSettleClient } from "../../../kite-settle-client.js";
 import { PaymentRequest, PaymentResult } from "../../../types.js";
 import { prompt, resolveTokenMetadata } from "../../../utils/index.js";
 import { deriveSessionId } from "../../../utils/session-id.js";
 import { getVar } from "../../../vars.js";
 import { findFlag } from "../../index.js";
-import { runBatchApiCallsFlow, runStreamCallsFlow } from "./channel-flow.js";
 import { formatReceipt, promptForPayment } from "./shared.js";
 
 function isHardRuleReject(reason: string): boolean {
@@ -52,12 +52,7 @@ export async function callApi(args: string[]) {
       ? Number.MAX_SAFE_INTEGER
       : parsedMaxCalls;
 
-  const token = await resolveTokenMetadata(
-    tokenFlag ||
-      process.env.SETTLEMENT_TOKEN_ADDRESS ||
-      process.env.TESTNET_TOKEN ||
-      "0xd4A87dA836399f9ea548b5f8f8fF8fB80B8eD78F",
-  );
+  const token = await resolveTokenMetadata(tokenFlag || KITE_TESTNET.token);
   const tokenDecimals = token?.decimals ?? 18;
 
   const paymentMode =
@@ -149,6 +144,8 @@ export async function callApi(args: string[]) {
         )
       : indexedSessions[0];
 
+    console.log({ selectedSession });
+
     let sessionRemainingSeconds: number | undefined;
     let sessionRemainingCapacity: bigint | undefined;
 
@@ -233,48 +230,82 @@ export async function callApi(args: string[]) {
       lastPaymentResult = result;
     };
 
-    if (mode === "batch") {
-      await runBatchApiCallsFlow(
-        {
-          client,
-          url,
-          token,
-          decide,
-          defaultRules: defaultRule,
-          onPayment,
-          maxCalls,
-          durationSecs,
-          ratePerCallOverride,
-          depositOverride,
-          agentIndex: agentIdStr ? Number.parseInt(agentIdStr, 10) : undefined,
-          eoaAddress: settle.eoaAddress,
-          sessionKeyAddress: sessionKeyAddress as `0x${string}` | undefined,
-          sessionRemainingSeconds,
-          sessionRemainingCapacity,
-        },
-        channelIdFlag,
+    if (mode === "batch" || mode === "stream") {
+      console.log(
+        `  Channel mode (${mode}): opening channel and making one call.`,
       );
-      return;
-    }
+      console.log("");
 
-    if (mode === "stream") {
-      await runStreamCallsFlow({
-        client,
-        url,
-        token,
-        decide,
-        defaultRules: defaultRule,
-        onPayment,
-        maxCalls,
-        durationSecs,
-        ratePerCallOverride,
-        depositOverride,
-        agentIndex: agentIdStr ? Number.parseInt(agentIdStr, 10) : undefined,
-        eoaAddress: settle.eoaAddress,
-        sessionKeyAddress: sessionKeyAddress as `0x${string}` | undefined,
-        sessionRemainingSeconds,
-        sessionRemainingCapacity,
-      }, channelIdFlag);
+      const channelResult = await settle.callPaidApi(url, {
+        method: "GET",
+        mode: "channel",
+        sessionKeyAddress: sessionKeyAddress as `0x${string}`,
+        agentId: agentIdStr,
+        channelId: channelIdFlag,
+        deposit: depositOverride,
+        maxPerCall: ratePerCallOverride,
+        maxDuration: durationSecs,
+        onPayment: (r) => {
+          lastPaymentResult = r;
+        },
+      });
+
+      console.log(`  Status:  ${channelResult.status} OK`);
+      console.log(`  Data:    ${JSON.stringify(channelResult.data, null, 2)}`);
+
+      if (channelResult.channelId) {
+        console.log(`  Channel: ${channelResult.channelId}`);
+        if (channelResult.channelOpened) {
+          console.log(`  Open tx: ${channelResult.channelOpenTxHash}`);
+        }
+      }
+
+      if (lastPaymentResult) {
+        console.log(formatReceipt(lastPaymentResult, url, channelResult.data));
+      }
+
+      if (channelResult.channelOpened && channelResult.channelId) {
+        createChannelRecord({
+          channelId: channelResult.channelId,
+          provider: (channelResult.channelProvider ?? "") as `0x${string}`,
+          token: channelResult.channelAsset ?? "",
+          openUrl: url,
+          agentAddress: settle.eoaAddress ?? "",
+          agentIndex: agentIdStr ? Number.parseInt(agentIdStr, 10) : 0,
+          maxPerCall:
+            ratePerCallOverride?.toString() ??
+            channelResult.payment?.amount ??
+            "0",
+          deposit: depositOverride?.toString() ?? "0",
+          maxSpend: depositOverride?.toString() ?? "0",
+          durationSecs: durationSecs ?? 3600,
+          openedAt: Date.now(),
+          openTxHash: channelResult.channelOpenTxHash ?? "",
+          providerMaxRatePerCall: undefined,
+        });
+        console.log(
+          `  Saved local channel state: ~/.kite-agent-pay/channels/${channelResult.channelId}.json`,
+        );
+      }
+
+      console.log("");
+      console.log(
+        `── Channel ─────────────────────────────────────────────────`,
+      );
+      console.log(`  Channel: ${channelResult.channelId ?? "(none)"}`);
+      console.log(`  Status:  call complete; channel left open.`);
+      if (channelResult.channelId) {
+        console.log(
+          `  Reuse:   npx kite call --url ${url} --mode ${mode} --channel ${channelResult.channelId}` +
+            (agentIdStr ? ` --agent ${agentIdStr}` : "") +
+            (settle.sessionKeyAddress
+              ? ` --session ${settle.sessionKeyAddress}`
+              : ""),
+        );
+      }
+      console.log(
+        `────────────────────────────────────────────────────────────`,
+      );
       return;
     }
 

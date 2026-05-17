@@ -3,22 +3,15 @@ import { KitePaymentClient } from "../../../client.js";
 import { DecisionMode, SessionRules } from "../../../decide.js";
 import { PaymentRequest, PaymentResult } from "../../../types.js";
 import {
+  probeApi402Offer,
+  type PayOffer,
+} from "../../../utils/channel-helpers.js";
+import {
   prompt,
   type TokenMetadata,
 } from "../../../utils/index.js";
 
-/** First offer extracted from a 402 response's `accepts[]` array. */
-export interface PayOffer {
-  payTo: `0x${string}`;
-  asset: `0x${string}`;
-  maxAmountRequired: string;
-  /** Provider's declared ceiling across all their endpoints. */
-  maxRatePerCall?: string;
-  scheme: string;
-  description?: string;
-  merchantName?: string;
-  resource?: string;
-}
+export type { PayOffer };
 
 /** Shared options threaded through batch/stream flows. */
 export interface ChannelFlowOpts {
@@ -154,51 +147,4 @@ export function formatReceipt(
   return lines.join("\n");
 }
 
-function selectOffer(
-  offers: PayOffer[],
-  preferredAsset?: string,
-): PayOffer {
-  const normalizedPreferredAsset = preferredAsset?.toLowerCase();
-
-  const scopedOffers = normalizedPreferredAsset
-    ? offers.filter(
-        (offer) => offer.asset.toLowerCase() === normalizedPreferredAsset,
-      )
-    : offers;
-
-  return [...scopedOffers].sort((a, b) => {
-    const aAmount = BigInt(a.maxAmountRequired);
-    const bAmount = BigInt(b.maxAmountRequired);
-    if (aAmount < bAmount) return -1;
-    if (aAmount > bAmount) return 1;
-    return 0;
-  })[0] ?? offers[0];
-}
-
-export async function probeApi402Offer(
-  url: string,
-  preferredAsset?: string,
-): Promise<null | { offer: PayOffer; raw: any }> {
-  const probe = await globalThis.fetch(url);
-  if (probe.status !== 402) return null;
-
-  const text = await probe.text();
-  let parsed: any;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error(`Cannot parse 402 response body: ${text}`);
-  }
-
-  const offers = parsed.accepts as PayOffer[] | undefined;
-  if (!offers || offers.length === 0) {
-    throw new Error("402 response is missing accepts[]");
-  }
-
-  const offer = selectOffer(
-    offers,
-    preferredAsset ?? process.env.SETTLEMENT_TOKEN_ADDRESS,
-  );
-
-  return { offer, raw: parsed };
-}
+export { probeApi402Offer };

@@ -17,8 +17,6 @@
  * There is no manual vars command — use those commands to set credentials.
  */
 
-import { KITE_TESTNET } from "../config.js";
-import { ContractService } from "../contracts.js";
 import { KiteSettleClient } from "../kite-settle-client.js";
 import { prompt } from "../utils/index.js";
 import { getCredential, getConfigPath, setCredential, getVar } from "../vars.js";
@@ -178,17 +176,13 @@ async function cmdWhoami(args: string[]) {
         );
       }
 
-      const readContracts = new ContractService(KITE_TESTNET, null, "");
-      const ownerOnchain = await readContracts
-        .getAgentOwner(agentId)
-        .catch(() => null);
-      const agentURI = await readContracts
-        .getAgentURI(agentId)
-        .catch(() => null);
+      const agentInfo = await KiteSettleClient.createReadOnly().getAgentInfo(agentId);
+      const ownerOnchain = agentInfo.owner;
+      const agentURI = agentInfo.agentURI;
       const decoded = agentURI ? decodeAgentMetadataURI(agentURI) : null;
-      const walletFromRegistry = await readContracts
-        .getAgentWalletFromRegistry(agentId)
-        .catch(() => null);
+      const walletFromRegistry = agentInfo.walletContract
+        ? { walletContract: agentInfo.walletContract, user: agentInfo.registeredOwner ?? "" }
+        : null;
 
       const credentialClient = credential
         ? await KiteSettleClient.create({ credential }).catch(() => null)

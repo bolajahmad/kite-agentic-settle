@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { parseUnits } from "viem";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { prompt } from "../../utils/index.js";
-import { getVar } from "../../vars.js";
+import { getCredential, getVar } from "../../vars.js";
 import { findFlag } from "../index.js";
 
 function header(title: string) {
@@ -323,7 +323,7 @@ export async function cmdOnboardAgent(args: string[]): Promise<void> {
   let credential: string | undefined;
 
   // If PRIVATE_KEY is set, or prompt
-  credential = getVar("PRIVATE_KEY");
+  credential = getCredential();
   if (!credential)
     credential = await prompt("  Provide seed phrase or private key: ", true);
   if (!credential)

@@ -1,5 +1,5 @@
 {
-  "name": "@kite-settle/sdk",
+  "name": "@kite-agentic-pay/sdk",
   "version": "0.2.0",
   "description": "Kite Settle SDK and CLI — decentralized programmable payments for AI agents",
   "main": "dist/index.js",

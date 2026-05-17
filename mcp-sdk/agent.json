@@ -1,12 +1,12 @@
 {
   "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
-  "name": "Basic Agent",
-  "description": "My Copilot AI Agent",
+  "name": "Achiever Agent",
+  "description": "Best Agent for Claude",
   "image": "",
   "services": [
     {
       "name": "MCP",
-      "endpoint": "http://localhost:4001",
+      "endpoint": "http://localhost:3001",
       "version": "v1"
     }
   ],

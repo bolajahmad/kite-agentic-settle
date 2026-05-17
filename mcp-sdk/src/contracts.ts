@@ -289,6 +289,37 @@ export class ContractService {
     })) as string;
   }
 
+  /**
+   * Fetch owner, agentURI, and AA wallet for an agent in a single parallel read.
+   * No credential required — works on any ContractService instance.
+   */
+  async getAgentInfo(agentId: bigint): Promise<{
+    agentId: string;
+    owner: string | null;
+    agentURI: string | null;
+    walletContract: string | null;
+    registeredOwner: string | null;
+  }> {
+    const [ownerResult, uriResult, walletResult] = await Promise.allSettled([
+      this.getAgentOwner(agentId),
+      this.getAgentURI(agentId),
+      this.getAgentWalletFromRegistry(agentId),
+    ]);
+    return {
+      agentId: agentId.toString(),
+      owner: ownerResult.status === "fulfilled" ? ownerResult.value : null,
+      agentURI: uriResult.status === "fulfilled" ? uriResult.value : null,
+      walletContract:
+        walletResult.status === "fulfilled"
+          ? (walletResult.value?.walletContract ?? null)
+          : null,
+      registeredOwner:
+        walletResult.status === "fulfilled"
+          ? (walletResult.value?.user ?? null)
+          : null,
+    };
+  }
+
   // ── IdentityRegistry session queries ─────────────────────────────
 
   /** Read session status from IdentityRegistry. */
@@ -752,8 +783,7 @@ export class ContractService {
       },
     ];
 
-    const ownerPkRaw =
-      process.env.PRIVATE_KEY ?? getCredential() ?? process.env.EOA_PRIVATE_KEY;
+    const ownerPkRaw = getCredential();
     if (ownerPkRaw) {
       const ownerPk = (
         ownerPkRaw.startsWith("0x") ? ownerPkRaw : `0x${ownerPkRaw}`
@@ -783,107 +813,55 @@ export class ContractService {
     };
 
     let lastError: Error | null = null;
+    const paymentToken = "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63";
+
     for (const strategy of signerStrategies) {
       try {
         console.log(
-          `  Sending UserOp to bundler for gasless channel open via AA (signer=${strategy.label})...`,
+          `  Sending UserOp via AA with token payment for channel open (signer=${strategy.label})...`,
         );
 
-        const sponsoredResult = await aaSdk.sendUserOperationAndWait(
+        const baseUserOp = await (aaSdk as any).createUserOperation(
           this.eoaAddress as `0x${string}`,
           batchRequest,
+        );
+        const paymentResult = await aaSdk.sendUserOperationWithPayment(
+          this.eoaAddress as `0x${string}`,
+          batchRequest,
+          baseUserOp,
+          paymentToken,
           strategy.sign,
-          undefined,
           undefined,
           { maxRetries: 60, interval: 5000 },
         );
-        const sponsoredStatus = (sponsoredResult as any).status as
+        const paymentStatus = (paymentResult as any).status as
           | {
               status?: string;
               transactionHash?: `0x${string}`;
               reason?: string;
             }
           | undefined;
-        if (sponsoredStatus?.status && sponsoredStatus.status !== "success") {
+        if (paymentStatus?.status && paymentStatus.status !== "success") {
           throw new Error(
-            sponsoredStatus.reason ??
-              `Sponsored UserOp did not succeed (${sponsoredStatus.status})`,
+            paymentStatus.reason ??
+              `Token-payment UserOp did not succeed (${paymentStatus.status})`,
           );
         }
 
         const txHash =
-          sponsoredStatus?.transactionHash ?? sponsoredResult.userOpHash;
-        console.log(`  UserOp included. Receipt tx: ${txHash}`);
+          paymentStatus?.transactionHash ?? paymentResult.userOpHash;
+        console.log(`  Token-payment UserOp included. Receipt tx: ${txHash}`);
         return await decodeChannelOpened(txHash);
-      } catch (sponsoredErr: any) {
-        const sponsoredReason =
-          sponsoredErr?.cause?.reason ??
-          sponsoredErr?.cause?.shortMessage ??
-          sponsoredErr?.shortMessage ??
-          sponsoredErr?.message ??
-          String(sponsoredErr);
-
-        const shouldFallbackToTokenPayment =
-          /timeout|timed out|sponsor|paymaster|aa21|aa31|rejected/i.test(
-            sponsoredReason,
-          );
-        if (!shouldFallbackToTokenPayment) {
-          lastError = new Error(sponsoredReason);
-          continue;
-        }
-
-        const paymentToken =
-          (process.env.SETTLEMENT_TOKEN_ADDRESS as `0x${string}` | undefined) ??
-          (process.env.PAYMASTER_PAYMENT_TOKEN as `0x${string}` | undefined) ??
-          ("0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63" as `0x${string}`);
-
-        try {
-          console.log(
-            `  Sponsored UserOp failed (${sponsoredReason}). Retrying with token-payment fallback using ${paymentToken} (signer=${strategy.label})...`,
-          );
-
-          const baseUserOp = await (aaSdk as any).createUserOperation(
-            this.eoaAddress as `0x${string}`,
-            batchRequest,
-          );
-          const paymentResult = await aaSdk.sendUserOperationWithPayment(
-            this.eoaAddress as `0x${string}`,
-            batchRequest,
-            baseUserOp,
-            paymentToken,
-            strategy.sign,
-            undefined,
-            { maxRetries: 60, interval: 5000 },
-          );
-
-          const paymentStatus = (paymentResult as any).status as
-            | {
-                status?: string;
-                transactionHash?: `0x${string}`;
-                reason?: string;
-              }
-            | undefined;
-          if (paymentStatus?.status && paymentStatus.status !== "success") {
-            throw new Error(
-              paymentStatus.reason ??
-                `Token-payment UserOp did not succeed (${paymentStatus.status})`,
-            );
-          }
-
-          const txHash =
-            paymentStatus?.transactionHash ?? paymentResult.userOpHash;
-          console.log(`  Token-payment UserOp included. Receipt tx: ${txHash}`);
-          return await decodeChannelOpened(txHash);
-        } catch (paymentErr: any) {
-          const paymentReason =
-            paymentErr?.cause?.reason ??
-            paymentErr?.cause?.shortMessage ??
-            paymentErr?.shortMessage ??
-            paymentErr?.message ??
-            String(paymentErr);
-          lastError = new Error(paymentReason);
-          continue;
-        }
+      } catch (err: any) {
+        const reason =
+          err?.cause?.reason ??
+          err?.cause?.shortMessage ??
+          err?.shortMessage ??
+          err?.message ??
+          String(err);
+        lastError = new Error(
+          `AA channel open failed (signer=${strategy.label}): ${reason}`,
+        );
       }
     }
 
@@ -983,103 +961,55 @@ export class ContractService {
     }
 
     let lastError: Error | null = null;
+    const paymentToken =
+      "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63" as `0x${string}`;
+
     for (const strategy of signerStrategies) {
       try {
         console.log(
-          `  Sending UserOp to bundler via AA (signer=${strategy.label})...`,
+          `  Sending UserOp via AA with token payment (signer=${strategy.label})...`,
         );
 
-        const sponsoredResult = await aaSdk.sendUserOperationAndWait(
+        const baseUserOp = await (aaSdk as any).createUserOperation(
           this.eoaAddress as `0x${string}`,
           batchRequest,
+        );
+        const tokenResult = await aaSdk.sendUserOperationWithPayment(
+          this.eoaAddress as `0x${string}`,
+          batchRequest,
+          baseUserOp,
+          paymentToken,
           strategy.sign,
-          undefined,
           undefined,
           { maxRetries: 60, interval: 5000 },
         );
-        const sponsoredStatus = (sponsoredResult as any).status as
+        const tokenStatus = (tokenResult as any).status as
           | {
               status?: string;
               transactionHash?: `0x${string}`;
               reason?: string;
             }
           | undefined;
-        if (sponsoredStatus?.status && sponsoredStatus.status !== "success") {
+        if (tokenStatus?.status && tokenStatus.status !== "success") {
           throw new Error(
-            sponsoredStatus.reason ??
-              `Sponsored UserOp did not succeed (${sponsoredStatus.status})`,
+            tokenStatus.reason ??
+              `Token-payment UserOp did not succeed (${tokenStatus.status})`,
           );
         }
 
-        const txHash =
-          sponsoredStatus?.transactionHash ?? sponsoredResult.userOpHash;
+        const txHash = tokenStatus?.transactionHash ?? tokenResult.userOpHash;
         console.log(`  UserOp included. Receipt tx: ${txHash}`);
         return txHash;
-      } catch (sponsoredErr: any) {
-        const sponsoredReason =
-          sponsoredErr?.cause?.reason ??
-          sponsoredErr?.cause?.shortMessage ??
-          sponsoredErr?.shortMessage ??
-          sponsoredErr?.message ??
-          String(sponsoredErr);
-
-        const shouldFallbackToTokenPayment =
-          /timeout|timed out|sponsor|paymaster|aa21|aa31|rejected/i.test(
-            sponsoredReason,
-          );
-        if (!shouldFallbackToTokenPayment) {
-          lastError = new Error(sponsoredReason);
-          continue;
-        }
-
-        const paymentToken =
-          "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63" as `0x${string}`;
-        console.log(
-          `  Sponsored UserOp failed (${sponsoredReason}). Retrying with token-payment fallback using ${paymentToken} (signer=${strategy.label})...`,
+      } catch (tokenErr: any) {
+        const reason =
+          tokenErr?.cause?.reason ??
+          tokenErr?.cause?.shortMessage ??
+          tokenErr?.shortMessage ??
+          tokenErr?.message ??
+          String(tokenErr);
+        lastError = new Error(
+          `AA tx failed (signer=${strategy.label}): ${reason}`,
         );
-
-        try {
-          const baseUserOp = await (aaSdk as any).createUserOperation(
-            this.eoaAddress as `0x${string}`,
-            batchRequest,
-          );
-          const tokenResult = await aaSdk.sendUserOperationWithPayment(
-            this.eoaAddress as `0x${string}`,
-            batchRequest,
-            baseUserOp,
-            paymentToken,
-            strategy.sign,
-            undefined,
-            { maxRetries: 60, interval: 5000 },
-          );
-          const tokenStatus = (tokenResult as any).status as
-            | {
-                status?: string;
-                transactionHash?: `0x${string}`;
-                reason?: string;
-              }
-            | undefined;
-          if (tokenStatus?.status && tokenStatus.status !== "success") {
-            throw new Error(
-              tokenStatus.reason ??
-                `Token-payment UserOp did not succeed (${tokenStatus.status})`,
-            );
-          }
-
-          const txHash = tokenStatus?.transactionHash ?? tokenResult.userOpHash;
-          console.log(`  UserOp included. Receipt tx: ${txHash}`);
-          return txHash;
-        } catch (tokenErr: any) {
-          const tokenReason =
-            tokenErr?.cause?.reason ??
-            tokenErr?.cause?.shortMessage ??
-            tokenErr?.shortMessage ??
-            tokenErr?.message ??
-            String(tokenErr);
-          lastError = new Error(
-            `AA tx failed (signer=${strategy.label}) sponsored=[${sponsoredReason}] token=[${tokenReason}]`,
-          );
-        }
       }
     }
 
