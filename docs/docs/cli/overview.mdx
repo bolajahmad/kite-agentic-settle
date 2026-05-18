@@ -1,0 +1,65 @@
+---
+sidebar_position: 1
+title: CLI Overview
+description: The Kite CLI — local-first agent and wallet management
+---
+
+# CLI Overview
+
+The Kite CLI (`npx kite`) is the developer-facing command-line interface for every aspect of agent setup, wallet management, and payment operations.
+
+## Install
+
+```bash
+npm install -g @kite-agentic-pay/sdk
+# or use without installing:
+npx kite <command>
+```
+
+## Philosophy
+
+The CLI is **local-first**:
+- All credentials stay on your machine in `~/.kite-agent-pay/`
+- No account creation required on any Kite server
+- Each command either reads from local state or sends a transaction directly to the chain
+- The CLI is a thin wrapper over the SDK — everything it can do, the SDK can do programmatically
+
+## Command Groups
+
+| Group | Commands | Purpose |
+|---|---|---|
+| **Setup** | `init`, `clean` | Credential management |
+| **Identity** | `onboard`, `whoami`, `agent` | Agent registration and inspection |
+| **Sessions** | `session start`, `session revoke` | Session key lifecycle |
+| **Payments** | `call`, `balance`, `fund`, `withdraw` | Making payments and managing funds |
+| **Channels** | `channel open/call/status/list/close/force-close` | Channel management |
+| **Tools** | `simulate`, `usage` | Testing and observability |
+
+## Global Help
+
+```bash
+npx kite --help
+npx kite <command> --help
+```
+
+## Quick Reference
+
+```bash
+npx kite init                          # Store EOA credential
+npx kite onboard --name "My Agent"     # Register agent on-chain
+npx kite whoami                        # Verify identity
+npx kite call --url <url>              # Make a paid API call
+npx kite balance                       # Check wallet balance
+npx kite usage                         # View payment history
+npx kite fund <address> [amount]       # Send tokens to AA wallet
+npx kite channel open                  # Open a payment channel
+npx kite channel list                  # List open channels
+npx kite channel close <id>            # Initiate settlement
+```
+
+## Next Steps
+
+- [kite init →](./init) — Credential setup
+- [kite agents →](./agents) — Registration commands
+- [kite payments →](./payments) — Payment commands
+- [kite runtime →](./runtime) — Running the MCP server

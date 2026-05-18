@@ -1,0 +1,96 @@
+---
+sidebar_position: 4
+title: Channel Recovery
+description: What to do when channel state is lost or corrupted
+---
+
+# Channel Recovery
+
+Channel state lives locally (`~/.kite-agent-pay/channels/`). If this state is lost, the channel can still be settled — but recovery options depend on what the provider retained.
+
+## What Can Be Lost
+
+| Data | Location | Can Recover? |
+|---|---|---|
+| Channel ID | Local + on-chain | Yes — query subgraph |
+| Receipt history | Local + provider | Partial — provider has their copy |
+| Session key | Local vars.json | Yes — re-register on-chain |
+| Channel deposit | On-chain | Always recoverable via settlement |
+
+## Recovery Flow
+
+### Step 1: Find Your Channel IDs
+
+```bash
+npx kite channel list
+```
+
+If local state is missing:
+
+```graphql
+# Query subgraph for channels by owner EOA
+query {
+  channels(where: { owner: "0xYourEOA" }) {
+    channelId
+    status
+    deposit
+    provider
+  }
+}
+```
+
+### Step 2: Check On-Chain Status
+
+```typescript
+const info = await client.getChannelInfo(channelId);
+console.log(info.status, info.deposit, info.settledAmount);
+```
+
+### Step 3: Recover Receipts
+
+Contact the provider. They should have the latest receipt for each channel. They can provide:
+
+```json
+{
+  "channelId": "0xabc...",
+  "sequenceNumber": 5,
+  "cumulativeCost": "2000000000000000000",
+  "signature": "0xdef..."
+}
+```
+
+Restore this to local store:
+
+```typescript
+import { ChannelStore } from "@kite-agentic-pay/sdk";
+
+const store = new ChannelStore();
+store.addReceipt(channelId, receipt);
+```
+
+### Step 4: Initiate Settlement
+
+```typescript
+await client.initiateSettlement(channelId);
+```
+
+If you have no receipt, you can still initiate with `cumulativeCost = 0` — the provider will submit their receipt during the challenge window and get paid the correct amount.
+
+## If Provider Is Unresponsive
+
+1. Call `initiateSettlement(channelId)` with any receipt you have (or none)
+2. Wait for the challenge window (1 hour)
+3. Call `finalizeChannel(channelId)`
+4. Your full deposit is refunded if the provider submitted nothing
+
+## Prevention
+
+- Back up `~/.kite-agent-pay/` regularly, especially `channels/`
+- Use `kite usage` to export payment logs periodically
+- Enable Merkle root anchoring for long-running channels (anchors receipt hashes on-chain via `AttestationRegistry`)
+
+## Related Pages
+
+- [Channel Receipts →](./receipts) — Receipt format and storage
+- [Channel Settlement →](./settlement) — Normal settlement flow
+- [Security: Tradeoffs →](../security/tradeoffs) — Honest assessment of local-first limitations

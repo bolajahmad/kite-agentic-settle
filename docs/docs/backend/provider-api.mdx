@@ -1,0 +1,142 @@
+---
+sidebar_position: 2
+title: Provider API Reference
+description: All routes, middleware, and provider-side payment validation
+---
+
+# Provider API Reference
+
+## Request Headers (Provider Receives)
+
+### x402 Mode
+
+| Header | Description |
+|---|---|
+| `X-PAYMENT` | Base64-encoded EIP-712 signed payment struct |
+| `X-PAYMENT-VERSION` | Protocol version (currently `1`) |
+
+### Channel Mode
+
+| Header | Description |
+|---|---|
+| `X-Channel-Id` | Channel ID (bytes32 hex) |
+| `X-Channel-Receipt` | Base64-encoded signed receipt struct |
+
+## x402 Middleware
+
+```typescript
+import { x402Middleware } from "@/middlewares/x402";
+
+router.get(
+  "/api/data/report",
+  x402Middleware({
+    price: parseUnits("0.40", 18),
+    token: DM_USDT_TOKEN,
+    providerAddress: process.env.PROVIDER_ADDRESS,
+  }),
+  reportHandler
+);
+```
+
+The middleware:
+1. Returns a `402 Payment Required` response on first request (no payment header)
+2. Validates the EIP-712 payment struct from `X-PAYMENT` on retry
+3. Verifies the session key is active on-chain
+4. Checks that the amount matches the required price
+5. Passes to the route handler if valid
+
+## Channel Middleware
+
+```typescript
+import { channelMiddleware } from "@/middlewares/channel";
+
+router.get(
+  "/api/stream/intelligence",
+  channelMiddleware({
+    pricePerCall: parseUnits("0.10", 18),
+    providerAddress: process.env.PROVIDER_ADDRESS,
+  }),
+  streamHandler
+);
+```
+
+The middleware:
+1. Reads `X-Channel-Id` and `X-Channel-Receipt` headers
+2. Verifies the receipt signature against the channel's session key
+3. Checks sequence number is strictly increasing
+4. Updates the local receipt store
+5. Passes to the route handler
+
+## 402 Challenge Response Format
+
+```json
+HTTP/1.1 402 Payment Required
+Content-Type: application/json
+
+{
+  "error": "Payment Required",
+  "version": "1",
+  "price": "400000000000000000",
+  "token": "0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489",
+  "provider": "0xProviderEOA...",
+  "chainId": 2368,
+  "contract": "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb",
+  "domain": {
+    "name": "KitePaymentChannel",
+    "version": "1",
+    "chainId": 2368,
+    "verifyingContract": "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb"
+  }
+}
+```
+
+## Payment Validation Utilities
+
+```typescript
+import {
+  verifyX402Payment,
+  verifyChannelReceipt,
+  validateSessionKey
+} from "@kite-agentic-pay/sdk";
+
+// Validate an x402 payment header
+const result = await verifyX402Payment(req.headers["x-payment"], {
+  expectedPrice: parseUnits("0.40", 18),
+  expectedToken: DM_USDT_TOKEN,
+  expectedProvider: PROVIDER_ADDRESS,
+  rpcUrl: KITE_TESTNET.rpcUrl,
+});
+
+// Validate a channel receipt
+const receiptResult = await verifyChannelReceipt(
+  req.headers["x-channel-receipt"],
+  req.headers["x-channel-id"],
+  { rpcUrl: KITE_TESTNET.rpcUrl }
+);
+```
+
+## Health Endpoint
+
+```
+GET /health
+```
+
+Returns:
+
+```json
+{
+  "status": "ok",
+  "provider": "0xProviderEOA...",
+  "channels": {
+    "open": 2,
+    "active": 1
+  },
+  "uptime": 3600
+}
+```
+
+## Related Pages
+
+- [Backend Server →](./server)
+- [x402 Payments Concept →](../concepts/x402-payments)
+- [Channel Receipts →](../channels/receipts)

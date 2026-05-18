@@ -1,0 +1,148 @@
+---
+sidebar_position: 3
+title: MCP Tool Schemas
+description: Complete JSON schemas for all 7 Kite MCP tools
+---
+
+# MCP Tool Schemas
+
+The MCP server exposes 7 tools. These are the exact schemas returned by `GET /api/tools/schema`.
+
+## `check_balance`
+
+```json
+{
+  "name": "check_balance",
+  "description": "Check the USDT balance of an agent's AA wallet",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "agent_id": {
+        "type": "string",
+        "description": "The numeric agent ID"
+      },
+      "token": {
+        "type": "string",
+        "description": "Token contract address (optional, defaults to DmUSDT)"
+      }
+    },
+    "required": ["agent_id"]
+  }
+}
+```
+
+## `call_paid_api`
+
+```json
+{
+  "name": "call_paid_api",
+  "description": "Make a paid API call, handling 402 payment challenges automatically",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "url": { "type": "string", "description": "Target API URL" },
+      "agent_id": { "type": "string", "description": "Agent ID to use" },
+      "method": {
+        "type": "string",
+        "enum": ["GET", "POST", "PUT", "DELETE"],
+        "default": "GET"
+      },
+      "body": { "type": "string", "description": "Request body as JSON string" },
+      "channel_id": { "type": "string", "description": "Use a specific channel ID" }
+    },
+    "required": ["url", "agent_id"]
+  }
+}
+```
+
+## `open_channel`
+
+```json
+{
+  "name": "open_channel",
+  "description": "Open a payment channel with a provider",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "agent_id": { "type": "string" },
+      "provider_address": { "type": "string", "description": "Provider EOA address" },
+      "deposit_usdt": { "type": "number", "description": "Deposit amount in USDT" },
+      "max_per_call_usdt": { "type": "number", "description": "Max spend per call in USDT" },
+      "duration_seconds": { "type": "number", "description": "Max channel duration", "default": 3600 }
+    },
+    "required": ["agent_id", "provider_address", "deposit_usdt"]
+  }
+}
+```
+
+## `settle_channel`
+
+```json
+{
+  "name": "settle_channel",
+  "description": "Initiate cooperative settlement of a payment channel",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "agent_id": { "type": "string" },
+      "channel_id": { "type": "string" }
+    },
+    "required": ["agent_id", "channel_id"]
+  }
+}
+```
+
+## `get_agent_info`
+
+```json
+{
+  "name": "get_agent_info",
+  "description": "Get on-chain identity information for an agent",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "agent_id": { "type": "string", "description": "Agent ID or address" }
+    },
+    "required": ["agent_id"]
+  }
+}
+```
+
+## `list_channels`
+
+```json
+{
+  "name": "list_channels",
+  "description": "List all open payment channels for an agent",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "agent_id": { "type": "string" },
+      "status": {
+        "type": "string",
+        "enum": ["open", "settling", "closed", "all"],
+        "default": "open"
+      }
+    },
+    "required": ["agent_id"]
+  }
+}
+```
+
+## `get_payment_history`
+
+```json
+{
+  "name": "get_payment_history",
+  "description": "Get recent payment history for an agent",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "agent_id": { "type": "string" },
+      "limit": { "type": "number", "default": 10 },
+      "since": { "type": "string", "description": "ISO 8601 date filter" }
+    },
+    "required": ["agent_id"]
+  }
+}
+```

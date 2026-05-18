@@ -1,0 +1,82 @@
+---
+sidebar_position: 4
+title: Deploy the Indexer
+description: How to deploy or use the Kite subgraph
+---
+
+# Deploy the Indexer
+
+The Kite subgraph indexes all on-chain events and makes them queryable via GraphQL. You can either use the hosted version or deploy your own.
+
+## Option A: Use the Hosted Endpoint
+
+The Kite team maintains a hosted subgraph on Goldsky. Query it directly:
+
+```bash
+curl -X POST https://api.goldsky.com/api/public/<your-key>/subgraphs/kite-agentic-pay/1.0.0/gn \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ agentRegistereds(first: 5) { owner agentId } }"}'
+```
+
+Check `subgraph/networks.json` for the current endpoint.
+
+## Option B: Deploy Your Own (Goldsky)
+
+```bash
+cd subgraph
+npm install
+
+# Generate types
+npm run codegen
+
+# Build
+npm run build
+
+# Deploy to Goldsky
+goldsky subgraph deploy kite-agentic-pay/1.0.0 --path .
+```
+
+You'll need a Goldsky API key: [goldsky.com](https://goldsky.com)
+
+## Option C: Local Docker (The Graph Node)
+
+```bash
+cd subgraph
+docker-compose up -d
+
+# Deploy to local node
+npm run create-local
+npm run deploy-local
+```
+
+Endpoint: `http://localhost:8000/subgraphs/name/kite-agentic-pay`
+
+## Querying After Deploy
+
+```graphql
+query RecentPayments {
+  x402PaymentProcesseds(first: 10, orderBy: blockTimestamp, orderDirection: desc) {
+    channelId
+    agent
+    provider
+    amount
+    blockTimestamp
+  }
+}
+```
+
+## Updating the Subgraph
+
+After modifying `schema.graphql` or `subgraph.yaml`:
+
+```bash
+npm run codegen  # Regenerate types
+npm run build
+# Redeploy
+```
+
+## Related Pages
+
+- [Indexer: Overview →](../indexer/overview)
+- [Indexer: Entities →](../indexer/entities)
+- [Indexer: Querying →](../indexer/querying)

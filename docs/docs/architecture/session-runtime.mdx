@@ -1,0 +1,162 @@
+---
+sidebar_position: 3
+title: Session Runtime
+description: How session keys are loaded, MCP bindings work, and runtime isolation is maintained
+---
+
+# Session Runtime
+
+## What Is the Session Runtime?
+
+The session runtime is the component that:
+1. Loads session private keys from local storage
+2. Provides them to the SDK for signing
+3. Isolates signing from AI runtimes (MCP)
+4. Manages session selection for agents with multiple sessions
+
+---
+
+## Session Key Storage Format
+
+Session keys are stored in `~/.kite-agent-pay/vars.json`:
+
+```json
+{
+  "AGENT_0_ID": "1",
+  "AGENT_0_AA_WALLET": "0xdef...",
+  "SESSION_1_0_ADDRESS": "0x875...",
+  "SESSION_1_0_PRIVATE": "0xabc...",
+  "SESSION_1_0_VALID_UNTIL": "1750000000",
+  "SESSION_1_0_BUDGET": "10000000000000000000"
+}
+```
+
+Key naming convention: `SESSION_<agentId>_<sessionIndex>_<field>`
+
+The file is created with mode `0600`. The SDK reads it at runtime when a session is needed.
+
+---
+
+## Session Loading in the SDK
+
+When `KiteSettleClient` is created, it loads the session key for the specified agent:
+
+```typescript
+const client = await KiteSettleClient.create({
+  credential: storedCredential,  // EOA key from config.json
+});
+
+// OR with explicit agent and session selection:
+const client = await KiteSettleClient.create({
+  credential: storedCredential,
+  agentId: "1",
+  sessionKey: "0x875...",        // explicit session key address
+});
+```
+
+If no `agentId` is specified, the client operates in EOA mode (no session key signing).
+If `agentId` is specified but no `sessionKey`, the SDK selects the first active session for that agent.
+
+---
+
+## Session Loading in the MCP Server
+
+The MCP server loads session keys when it starts:
+
+```typescript
+// kite-mcp/src/server.ts
+const sessionKeys = await loadSessionKeys(); // reads vars.json
+```
+
+When a tool call arrives with an `agentId`, the server:
+1. Looks up the matching session key in its loaded set
+2. Creates a `KiteSettleClient` with that session key
+3. Executes the payment operation
+4. Returns the result
+
+The AI runtime (Claude, GPT, etc.) never sees the session key — it only provides the `agentId`.
+
+---
+
+## Runtime Isolation
+
+The MCP server enforces a strict isolation boundary:
+
+```
+AI Runtime (Claude Desktop)
+    │
+    │  MCP JSON-RPC (no keys)
+    │
+    ▼
+MCP Server (kite-mcp)
+    │
+    │  In-process SDK calls (with session key loaded in memory)
+    │
+    ▼
+KiteSettleClient
+    │
+    │  Local file read (vars.json)
+    │
+    ▼
+Session Private Key (never leaves this process)
+```
+
+The AI runtime cannot:
+- Request to export or print session keys
+- Call arbitrary functions on the session key
+- Intercept signing operations
+- Access the local file system directly
+
+It can only call named MCP tools, which have defined input/output schemas.
+
+---
+
+## Multi-Session Selection
+
+An agent can have multiple active session keys. The SDK selects among them based on:
+
+1. **Explicit selection** — caller provides `sessionKey` address
+2. **Automatic selection** — SDK picks the first non-expired session with sufficient remaining budget
+3. **Preferred session** — `preferredSessionIndex` in client options
+
+For the MCP server, session selection is controlled by the `agentId` and optional `sessionKey` tool parameter. When `sessionKey` is omitted, the server selects automatically.
+
+---
+
+## Session Expiry Handling
+
+The SDK checks `validUntil` before using a session key:
+
+```typescript
+if (session.validUntil < Math.floor(Date.now() / 1000)) {
+  throw new Error(`Session ${sessionKey} has expired at ${new Date(session.validUntil * 1000)}`);
+}
+```
+
+If all sessions for an agent are expired, the operation fails with a clear error. The user must run `npx kite session start` or `npx kite onboard` to create a new session.
+
+---
+
+## MCP Binding to Agent Identity
+
+When you start the MCP server, it reads the local vars store and knows:
+- Which agents exist
+- Which session keys are available
+- Which AA wallets are associated
+
+When Claude (or any MCP client) calls `call_paid_api` with `agentId: "1"`, the server automatically:
+1. Resolves agent 1's session key
+2. Creates a client with that session key
+3. Signs the payment using that key
+4. Returns the result
+
+The binding is automatic and transparent to the AI runtime.
+
+---
+
+## Related Pages
+
+- [Session Keys →](../concepts/session-keys) — What session keys are and why they exist
+- [Local-First Architecture →](../concepts/local-first-architecture) — How local storage fits the design
+- [MCP Server →](../mcp/overview) — MCP server setup and configuration
+- [CLI: Runtime →](../cli/runtime) — `kite run` and `kite signer` commands

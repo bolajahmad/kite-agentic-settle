@@ -1,0 +1,84 @@
+---
+sidebar_position: 1
+title: Threat Model
+description: What Kite protects against, and what it does not
+---
+
+# Threat Model
+
+## Threats Kite Addresses
+
+### Stolen Session Keys
+
+A session key is a hot key. If extracted from disk, an attacker can make payments on behalf of the agent — but only within the session's configured limits.
+
+**Mitigations:**
+- Session keys have a `validUntil` expiry (typically 30 days)
+- Session keys have an on-chain `budget` cap (e.g. 10 USDT total)
+- Session keys have a per-call cap (`maxPerCall`)
+- Session keys can be immediately revoked on-chain
+
+**What is NOT protected:** If an attacker steals the EOA credential (`config.json`), they can register new sessions with higher limits. The EOA credential is the root of trust.
+
+---
+
+### Malicious Providers (Overcharging)
+
+A malicious provider could return a 402 challenge with a price higher than expected — requesting 100 USDT for a call that should cost 0.40 USDT.
+
+**Mitigations:**
+- The session key's `maxPerCall` cap enforces a per-call ceiling
+- The SDK's decision engine validates payment amounts before signing
+- The `allowedRecipients` list restricts which addresses can receive payments
+
+**What is NOT protected:** If you configure `maxPerCall = 100 USDT` and the provider requests 100 USDT, the SDK will approve it.
+
+---
+
+### Replay Attacks
+
+An attacker captures a signed payment receipt and replays it to claim payment twice.
+
+**Mitigations:**
+- Channel receipts have strictly monotonically increasing sequence numbers
+- The `PaymentChannel` contract rejects receipts with sequence numbers ≤ the last processed
+- x402 payments include a nonce that makes each receipt unique
+
+---
+
+### Man-in-the-Middle (MITM)
+
+An attacker intercepts the API response and substitutes fake data.
+
+**Mitigations:**
+- Kite does not address data integrity — only payment authenticity
+- For data integrity, use HTTPS + provider response signatures (not yet built)
+- The threat model is: **you pay the right person the right amount**. Whether the data they return is correct is out of scope.
+
+---
+
+### Malicious MCP Server
+
+A malicious MCP server could lie about tool results — claiming a payment was made when it wasn't, or redirecting payments.
+
+**Mitigations:**
+- The MCP server is run locally by the agent owner (not hosted by Kite)
+- Tool results can be verified independently by querying on-chain state
+- The session key only signs payments — it cannot create channels or register new sessions without going through the AA wallet
+
+---
+
+## What Kite Does Not Address
+
+| Threat | Status |
+|---|---|
+| EOA credential theft | Out of scope — protect your private key |
+| Data integrity of API responses | Out of scope |
+| Provider DDoS | Out of scope |
+| Smart contract bugs | Auditing pending |
+| RPC censorship | Out of scope (use multiple RPC providers) |
+
+## Related Pages
+
+- [Security: Session Security →](./session-security) — How to minimize session key risk
+- [Security: Tradeoffs →](./tradeoffs) — Honest assessment of system limitations

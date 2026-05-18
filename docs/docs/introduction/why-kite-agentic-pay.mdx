@@ -1,0 +1,157 @@
+---
+sidebar_position: 3
+title: Why Kite Agentic Pay
+description: How Kite compares to centralized payment systems, API keys, and custodial wallets
+---
+
+# Why Kite Agentic Pay
+
+## The Problem
+
+AI agents are increasingly making real decisions — calling APIs, consuming compute, buying data. But the payment infrastructure they use today was designed for humans.
+
+Here's what agents are stuck with:
+
+| Approach | What breaks for AI agents |
+|---|---|
+| **API keys** | Static secrets, no spending limits, no identity, no auditability |
+| **Custodial wallets** | Third party holds your funds, single point of failure |
+| **Stripe billing** | Requires human credit card, identity verification, subscription setup |
+| **Centralized passport** | Your agent's identity lives on someone else's server |
+| **Manual approval** | Every payment requires a human to approve it |
+
+None of these were designed for autonomous, bounded, auditable agent payments.
+
+---
+
+## What Kite Does Differently
+
+### Local-First Ownership
+
+Your session keys, your credentials, and your channel state never leave your machine unless you choose to share them. The entire signing stack runs locally — there is no Kite server that holds your private keys.
+
+Compare this to hosted agent wallets where a provider:
+- Controls withdrawal of your funds
+- Can freeze your agent account
+- Sees all your payment activity
+- Has access to your private key material
+
+### Session-Bounded Autonomy
+
+Instead of giving an agent your full EOA key (which would have unlimited spending power), Kite creates a **session key** — a temporary delegated signer that can only:
+- Spend up to a configured total budget
+- Spend up to a configured per-call limit
+- Operate until a configured expiry date
+- Pay only to non-blocklisted providers
+
+The agent has real autonomy within the bounds you set. The EOA retains full control.
+
+### On-Chain Agent Identity (EIP-8004)
+
+Agents are registered as **NFTs** on `IdentityRegistry`. This means:
+- Agent identity is permissionless and portable
+- Providers can verify who is paying them without trusting a third-party registry
+- Session key delegation is cryptographically provable
+- Multiple runtimes can share one agent identity
+
+### Auditable by Design
+
+Every payment leaves an on-chain trace. The `AttestationRegistry` anchors Merkle roots of call receipts after settlement. The subgraph indexes all events. Your agent's entire payment history is queryable — essential for compliance and debugging.
+
+---
+
+## Comparison Table
+
+| Capability | Kite Agentic Pay | API Keys | Custodial Wallet | Stripe |
+|---|---|---|---|---|
+| Self-custodied funds | ✅ | ❌ | ❌ | ❌ |
+| Per-agent spending limits | ✅ | ❌ | Partial | ❌ |
+| Session-scoped delegation | ✅ | ❌ | ❌ | ❌ |
+| On-chain audit trail | ✅ | ❌ | ❌ | Partial |
+| Portable agent identity | ✅ | ❌ | ❌ | ❌ |
+| Works without a server | ✅ | ✅ | ❌ | ❌ |
+| Streaming/batch payments | ✅ | ❌ | ❌ | ❌ |
+| Multi-provider single identity | ✅ | ❌ | ❌ | ❌ |
+| Revocable without key rotation | ✅ | ❌ | Partial | ❌ |
+
+---
+
+## Why Not Just Use Stripe?
+
+Stripe requires:
+- A human account owner with identity verification
+- A credit card tied to a human
+- A subscription or per-use billing arrangement that a human sets up
+- Trust that Stripe will not freeze your account
+
+Stripe is excellent for SaaS. It was not designed for autonomous agents spending fractions of a cent on API calls at machine speed.
+
+---
+
+## Why Not Custodial Agent Wallets?
+
+Custodial wallets are convenient, but they:
+- Hold your private key (you cannot verify this)
+- Can be frozen (your agent stops working)
+- Require KYC in many jurisdictions
+- Create a single point of failure if the custodian is compromised
+
+Kite uses **Account Abstraction (GokiteAccount / ERC-4337)** so you get smart wallet features (session keys, spending rules, gas abstraction) without surrendering custody of your funds.
+
+---
+
+## Why Local-First Matters
+
+The alternative to local-first is a runtime server — a server that loads your session key and signs payment receipts on behalf of your agent. This introduces:
+
+- A remote server that can be compromised
+- A service you depend on for uptime
+- A third party that can log all your payment activity
+- A single failure point that stops all your agents
+
+Kite runs the entire signing stack on your machine. The only thing that touches the network is the signed receipt — not the key that created it.
+
+See [Local-First Architecture →](../concepts/local-first-architecture) for the full technical discussion.
+
+---
+
+## Why Session Keys?
+
+The alternative is giving the agent your full EOA private key. That means:
+- The agent can spend all your funds
+- There is no revocation path short of moving all funds to a new address
+- If the agent runtime is compromised, everything is compromised
+
+Session keys give you:
+- Bounded delegation — agent can only spend up to the limit you set
+- Time-bounded delegation — key expires automatically
+- Revocable — you can revoke a session key without losing your funds
+- Auditable — each session key has a dedicated spend record on-chain
+
+See [Session Keys →](../concepts/session-keys) for the full discussion.
+
+---
+
+## Why Payment Channels?
+
+Per-call (x402) payments are simple but expensive for high-frequency scenarios — one on-chain transaction per call. Payment channels solve this by settling many calls in a single on-chain transaction.
+
+This means:
+- 100 API calls = 2 on-chain transactions (open + close), not 100
+- Gas cost is amortized across the entire session
+- The provider still gets a signed receipt for each call (off-chain)
+- Either party can settle at any time
+
+See [Payment Channels →](../concepts/payment-channels) for details.
+
+---
+
+## Summary
+
+Kite Agentic Pay is the infrastructure layer that makes autonomous agent payments viable:
+
+- **Self-custodied** — you own your keys and your funds
+- **Bounded** — agents operate within explicit limits you set
+- **Auditable** — every payment is on-chain and queryable
+- **Composable** — one agent identity works across many providers
+- **Local-first** — no server required for the signing stack

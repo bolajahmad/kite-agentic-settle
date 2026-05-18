@@ -24,8 +24,8 @@
  */
 
 // Demo configuration - replace with your agent and session
-const AGENT_ID = "3";
-const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
+const AGENT_ID = "8";
+const SESSION_KEY = "0x6869Be52272d679eC4D4020796EdE9091546Cdc3";
 
 import { createLogger } from "./lib/logger.js";
 import {
@@ -109,7 +109,9 @@ export async function run() {
     );
 
     if (!spendingRules || spendingRules.length === 0) {
-      logger.warn("No spending rules found on ClientAgentVault for this session.");
+      logger.warn(
+        "No spending rules found on ClientAgentVault for this session.",
+      );
       logger.info("The session may not have been created with spending rules.");
       return;
     }
@@ -126,7 +128,9 @@ export async function run() {
     });
 
     if (Number(activeSession.validUntil) <= now()) {
-      logger.warn(`Session expired at ${formatTimestamp(Number(activeSession.validUntil))}`);
+      logger.warn(
+        `Session expired at ${formatTimestamp(Number(activeSession.validUntil))}`,
+      );
       logger.info("This demo requires a non-expired session");
       return;
     }

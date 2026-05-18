@@ -1,0 +1,113 @@
+---
+sidebar_position: 1
+title: Opening a Channel
+description: How to open a payment channel with a provider
+---
+
+# Opening a Channel
+
+A payment channel is opened with a single on-chain transaction. Once open, all calls within the channel require only off-chain signatures.
+
+## Prerequisites
+
+- AA wallet funded with sufficient DmUSDT
+- Provider's EOA address (the API server you will pay)
+- An active session key (`kite onboard` or `kite session start`)
+
+## Via CLI
+
+```bash
+npx kite channel open \
+  --provider 0xProviderEOA \
+  --deposit 5 \
+  --max-per-call 0.5 \
+  --duration 3600
+```
+
+Output:
+
+```
+  Opening channel with provider 0xProv...
+  Deposit: 5.00 USDT
+  Max per call: 0.50 USDT
+  Duration: 1h
+  ─────────────────────────────────────
+  ✓ Channel opened!
+  Channel ID: 0xabc123...
+  Tx: 0xdef456...
+
+  Waiting for provider to activate...
+  ✓ Channel active!
+```
+
+## Via SDK
+
+```typescript
+import { KiteSettleClient, KITE_TESTNET } from "@kite-agentic-pay/sdk";
+import { parseUnits } from "viem";
+
+const client = await KiteSettleClient.create({ credential, agentId: "1" });
+
+const channel = await client.openChannel({
+  provider: "0xProviderEOA" as `0x${string}`,
+  token: KITE_TESTNET.token as `0x${string}`,
+  deposit: parseUnits("5.0", 18),
+  maxSpend: parseUnits("4.5", 18),
+  maxPerCall: parseUnits("0.5", 18),
+  maxDuration: 3600,
+  mode: "prepaid",
+});
+
+console.log("Channel ID:", channel.channelId);
+console.log("Tx:", channel.txHash);
+```
+
+## Channel Parameters
+
+| Parameter | Description |
+|---|---|
+| `provider` | Provider's EOA address (must match what receives receipts) |
+| `deposit` | Amount of tokens locked upfront |
+| `maxSpend` | On-chain enforced total spend cap |
+| `maxPerCall` | Session-key-level cap per call |
+| `maxDuration` | Seconds until channel can be force-closed |
+| `mode` | `prepaid` (tokens locked now) or `postpaid` |
+
+## Channel States After Open
+
+```
+User opens channel → status: OPEN
+Provider activates → status: ACTIVE  ← calls can now be made
+```
+
+The provider's backend watcher monitors `ChannelOpened` events and calls `activateChannel()` automatically. In the demo setup, this happens within seconds.
+
+If you open a channel manually with a provider that doesn't run automation, you need to coordinate with them to activate the channel.
+
+## What Happens On-Chain
+
+`PaymentChannel.openChannel()` is called with:
+- `sessionKey` — the signing key that will sign receipts
+- `provider` — the entity that will receive payments
+- `token` — ERC-20 token (DmUSDT, USDT, USDC.e)
+- `deposit` — amount transferred to the contract
+- `terms` — maxPerCall, maxSpend, maxDuration
+
+The `deposit` amount is transferred from your AA wallet to the `PaymentChannel` contract atomically.
+
+## Checking Channel Status After Open
+
+```typescript
+let info = await client.getChannelInfo(channel.channelId);
+while (info.status !== "Active") {
+  await new Promise(r => setTimeout(r, 2000));
+  info = await client.getChannelInfo(channel.channelId);
+}
+console.log("Channel is active, ready to use!");
+```
+
+## Related Pages
+
+- [Channel Receipts →](./receipts) — How payments work within the channel
+- [Channel Settlement →](./settlement) — Closing and settling
+- [SDK: Channels →](../sdk/channels) — Full programmatic API

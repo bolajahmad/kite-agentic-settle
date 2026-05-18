@@ -1,0 +1,182 @@
+---
+sidebar_position: 2
+title: Quickstart
+description: Get Kite Agentic Pay running locally in under 10 minutes
+---
+
+# Quickstart
+
+This guide gets you from zero to a working AI agent making paid API calls in under 10 minutes.
+
+:::info Prerequisites
+- Node.js 18+
+- An EOA wallet with a small amount of KITE (testnet gas) — get from [Kite Faucet](https://docs.gokite.ai/faucet)
+- Testnet USDT tokens for payments
+:::
+
+---
+
+## Step 1 — Install the CLI
+
+```bash
+npm install -g @kite-agentic-pay/sdk
+# or use without installing:
+npx kite --help
+```
+
+---
+
+## Step 2 — Store Your Credential
+
+```bash
+npx kite init
+```
+
+This prompts for your EOA private key or seed phrase and stores it at `~/.kite-agent-pay/config.json` (mode `0600`, never committed to git).
+
+```
+  KiteSettler — EOA Setup
+  ──────────────────────────────────────────────
+  Seed phrase or private key: ████████████████
+  Stored credential in /Users/you/.kite-agent-pay/config.json
+```
+
+---
+
+## Step 3 — Register Your Agent On-Chain
+
+```bash
+npx kite onboard --name "My First Agent"
+```
+
+This single command:
+1. Derives and deploys your **AA wallet** (GokiteAccount)
+2. Mints an **Agent NFT** on `IdentityRegistry`
+3. Generates a **session key** with spending limits
+4. Links everything together on-chain
+5. Saves all addresses to `~/.kite-agent-pay/vars.json`
+
+After this you have a fully operational on-chain identity.
+
+---
+
+## Step 4 — Start the Local Provider Backend
+
+The reference backend simulates paid APIs. In a separate terminal:
+
+```bash
+cd backend
+npm install
+cp .env.example .env    # fill in your deployer private key
+npm run dev
+```
+
+The provider starts at `http://localhost:4000`.
+
+---
+
+## Step 5 — Make Your First Paid Call
+
+### Via CLI
+
+```bash
+npx kite call --url http://localhost:4000/api/data/protocol-report
+```
+
+The SDK automatically:
+1. Detects the `402 Payment Required` response
+2. Signs an EIP-712 receipt with your session key
+3. Retries with the `X-PAYMENT` header
+4. Returns the API response
+
+### Via SDK
+
+```typescript
+import { KiteSettleClient } from "@kite-agentic-pay/sdk";
+
+const client = await KiteSettleClient.create({ credential: process.env.EOA_KEY });
+
+const response = await client.fetchWithPayment(
+  "http://localhost:4000/api/data/protocol-report",
+  { method: "GET" },
+  { paymentMode: "perCall" }
+);
+
+const data = await response.json();
+console.log(data);
+```
+
+---
+
+## Step 6 — Connect Claude Desktop (Optional)
+
+Start the MCP server:
+
+```bash
+cd kite-mcp
+npm install && npm run build
+npx @kite-agentic-pay/mcp-server
+```
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "kite": {
+      "url": "http://localhost:3100/mcp/sse"
+    }
+  }
+}
+```
+
+Restart Claude Desktop. You can now ask Claude to make paid API calls on your behalf:
+
+> "Call the protocol report at http://localhost:4000/api/data/protocol-report using agent ID 1 and pay automatically."
+
+---
+
+## Step 7 — Run the Full Demo Suite
+
+The `mcp-sdk/examples/` directory has 8 demos covering every payment pattern:
+
+```bash
+cd mcp-sdk
+
+npm run demo 0   # Full onboarding flow
+npm run demo 1   # Per-call x402 payment
+npm run demo 2   # Session-bound channel architecture
+npm run demo 3   # Batch channel (10 calls, 1 settlement)
+npm run demo 4   # Stream channel (30-second window)
+npm run demo 5   # Channel settlement lifecycle
+npm run demo 6   # Multi-provider agent workflow
+npm run demo 7   # Observability and audit
+```
+
+---
+
+## Verify Everything Works
+
+```bash
+npx kite whoami
+```
+
+```
+  EOA Address:     0xabc...
+  AA Wallet:       0xdef...
+  Agent ID:        1
+  Session Key:     0x875...
+  Session Status:  Active
+```
+
+---
+
+## What's Next
+
+| Goal | Go to |
+|---|---|
+| Understand the payment protocol | [x402 Payments →](../concepts/x402-payments) |
+| Use payment channels | [Payment Channels →](../concepts/payment-channels) |
+| Build a paid API | [Guide: Build a Paid API →](../guides/build-a-paid-api) |
+| Integrate with Claude | [Guide: Connect Claude →](../guides/connect-claude) |
+| Full SDK reference | [SDK Reference →](../sdk/client) |

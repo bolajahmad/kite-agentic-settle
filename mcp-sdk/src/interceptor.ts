@@ -50,15 +50,13 @@ function selectOffer(offers: X402Offer[]): X402Offer {
     if (preferred) return preferred;
   }
 
-  return [...offers].sort(
-    (a, b) => {
-      const aAmount = BigInt(a.maxAmountRequired);
-      const bAmount = BigInt(b.maxAmountRequired);
-      if (aAmount < bAmount) return -1;
-      if (aAmount > bAmount) return 1;
-      return 0;
-    },
-  )[0];
+  return [...offers].sort((a, b) => {
+    const aAmount = BigInt(a.maxAmountRequired);
+    const bAmount = BigInt(b.maxAmountRequired);
+    if (aAmount < bAmount) return -1;
+    if (aAmount > bAmount) return 1;
+    return 0;
+  })[0];
 }
 
 export class PaymentInterceptor {
@@ -181,7 +179,6 @@ export class PaymentInterceptor {
       result = await this.payViaX402(offer, opts);
     }
 
-    console.log({ result });
     opts.onPayment?.(result);
 
     this.usage.log({

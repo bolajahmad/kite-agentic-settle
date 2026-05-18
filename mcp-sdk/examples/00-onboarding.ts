@@ -36,7 +36,8 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { KITE_TESTNET, KiteSettleClient } from "../src/index.js";
-import { getCredential } from "../src/vars.js";
+import { prompt } from "../src/utils/index.js";
+import { getCredential, setCredential } from "../src/vars.js";
 import { createLogger } from "./lib/logger.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ const PAYMENT_TOKEN =
 
 // Small funding amounts — just enough to exercise the payment demos
 const NATIVE_FUND = parseUnits("0.001", 18); // 0.001 KITE
-const STABLE_FUND = parseUnits("0.5", 18); // 0.5 DmUSDT / USDT
+const STABLE_FUND = parseUnits("0.1", 18); // 1 unit of StableToken (DmUSDT or USDT testnet)
 
 const ERC20_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
@@ -62,7 +63,6 @@ const kiteChain = {
 } as const;
 
 // ── Main ───────────────────────────────────────────────────────────────────────
-
 export async function run() {
   const logger = createLogger();
 
@@ -74,11 +74,20 @@ export async function run() {
   // ── Step 1: Load credential ──────────────────────────────────────────────
   logger.step("Load EOA credential");
 
-  const credential = getCredential();
+  let credential = getCredential();
   if (!credential) {
-    throw new Error(
-      "No credential found. Run 'npx kite init' first to store your EOA private key.",
+    logger.info("No credential found in local config.");
+    logger.info("Enter your EOA private key or seed phrase to continue.");
+    logger.info(
+      "(It will be saved to ~/.kite-agent-pay/config.json for future runs)\n",
     );
+    const entered = await prompt("  Seed phrase or private key: ", true);
+    if (!entered || !entered.trim()) {
+      throw new Error("No credential provided. Aborting.");
+    }
+    setCredential(entered.trim());
+    credential = entered.trim();
+    logger.info("  Credential saved.\n");
   }
 
   const privateKeyHex = (
@@ -190,7 +199,7 @@ export async function run() {
     // ── Step 4: Pre-flight check ─────────────────────────────────────────
     logger.step("Pre-flight: verify USDT gas balance for onboarding");
 
-    const MIN_USDT = parseUnits("1", 18);
+    const MIN_USDT = parseUnits("0.1", 18);
     const totalUsdt = aaPaymentToken + eoaPaymentToken;
 
     if (totalUsdt < MIN_USDT) {
@@ -365,7 +374,7 @@ export async function run() {
     "Next step": "npm run demo 1  — per-call payment with x402",
   });
 
-  logger.complete("Onboarding demo finished ✓");
+  logger.complete("Onboarding demo finished");
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

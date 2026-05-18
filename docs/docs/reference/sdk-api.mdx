@@ -1,0 +1,216 @@
+---
+sidebar_position: 1
+title: SDK API Reference
+description: Complete KiteSettleClient method signatures and types
+---
+
+# SDK API Reference
+
+## Installation
+
+```bash
+npm install @kite-agentic-pay/sdk
+```
+
+## Types
+
+```typescript
+type Address = `0x${string}`;
+type Hex = `0x${string}`;
+
+interface KiteConfig {
+  credential?: string;       // Private key (hex) or path to config.json
+  agentId?: string;          // Numeric agent ID as string
+  rpcUrl?: string;           // Override RPC URL
+  bundlerUrl?: string;       // Override bundler URL
+  chainId?: number;          // Override chain ID
+}
+
+interface ChannelConfig {
+  provider: Address;
+  token: Address;
+  deposit: bigint;
+  maxSpend: bigint;
+  maxPerCall: bigint;
+  maxDuration: number;        // seconds
+}
+
+interface OpenChannelResult {
+  channelId: Hex;
+  txHash: Hex;
+  status: "opening" | "open";
+}
+
+interface ChannelInfo {
+  channelId: Hex;
+  provider: Address;
+  token: Address;
+  deposit: bigint;
+  spent: bigint;
+  status: "opening" | "open" | "settling" | "closed";
+  lastSeq: number;
+}
+
+interface PaymentReceipt {
+  channelId: Hex;
+  seq: number;
+  cumulativeCost: bigint;
+  timestamp: number;
+  signature: Hex;
+}
+```
+
+## KiteSettleClient
+
+### `KiteSettleClient.create(config)`
+
+```typescript
+static async create(config: KiteConfig): Promise<KiteSettleClient>
+```
+
+Creates and returns an initialized client instance.
+
+---
+
+### `client.onboard(options)`
+
+```typescript
+async onboard(options: {
+  name: string;
+  category?: string;
+  uri?: string;
+  sessionDays?: number;      // default: 30
+  budget?: number;           // USDT total, default: 10
+  maxPerCall?: number;       // USDT per call, default: 1
+}): Promise<{ agentId: string; wallet: Address; sessionKey: Address }>
+```
+
+---
+
+### `client.fetchWithPayment(url, options?)`
+
+```typescript
+async fetchWithPayment(
+  url: string,
+  options?: RequestInit & {
+    channelId?: Hex;
+    token?: Address;
+  }
+): Promise<Response>
+```
+
+Makes a fetch request, handles 402 challenges automatically.
+
+---
+
+### `client.callPaidApi(url, options?)`
+
+```typescript
+async callPaidApi<T>(
+  url: string,
+  options?: RequestInit & {
+    channelId?: Hex;
+  }
+): Promise<T>
+```
+
+Like `fetchWithPayment` but parses and returns JSON.
+
+---
+
+### `client.openChannel(config)`
+
+```typescript
+async openChannel(config: ChannelConfig): Promise<OpenChannelResult>
+```
+
+---
+
+### `client.waitForChannel(channelId, options?)`
+
+```typescript
+async waitForChannel(
+  channelId: Hex,
+  options?: {
+    timeout?: number;       // ms, default: 60000
+    pollInterval?: number;  // ms, default: 3000
+  }
+): Promise<ChannelInfo>
+```
+
+---
+
+### `client.callOnChannel(channelId, url, options?)`
+
+```typescript
+async callOnChannel<T>(
+  channelId: Hex,
+  url: string,
+  options?: RequestInit
+): Promise<T>
+```
+
+---
+
+### `client.initiateSettlement(channelId)`
+
+```typescript
+async initiateSettlement(channelId: Hex): Promise<{ txHash: Hex }>
+```
+
+---
+
+### `client.finalizeChannel(channelId)`
+
+```typescript
+async finalizeChannel(channelId: Hex): Promise<{ txHash: Hex }>
+```
+
+Force-finalizes a channel after the dispute window.
+
+---
+
+### `client.getBalance(token?)`
+
+```typescript
+async getBalance(token?: Address): Promise<bigint>
+```
+
+Returns DmUSDT balance (or specified token) of the AA wallet.
+
+---
+
+### `client.getAgentInfo(agentId?)`
+
+```typescript
+async getAgentInfo(agentId?: string): Promise<{
+  id: string;
+  owner: Address;
+  wallet: Address;
+  uri: string;
+}>
+```
+
+---
+
+### `client.listChannels()`
+
+```typescript
+async listChannels(): Promise<ChannelInfo[]>
+```
+
+Returns all channels from local store.
+
+---
+
+### `client.checkRules(amount, provider, token)`
+
+```typescript
+checkRules(
+  amount: bigint,
+  provider: Address,
+  token: Address
+): { allow: boolean; reason?: string }
+```
+
+Evaluates the configured decision rules against a proposed payment.

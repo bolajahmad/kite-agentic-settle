@@ -1,0 +1,90 @@
+---
+sidebar_position: 3
+title: MCP Server (kite-mcp)
+description: The standalone Kite MCP server package
+---
+
+# MCP Server Package
+
+The `kite-mcp/` package is the standalone MCP server that wraps the SDK as AI-consumable tools. This is what enables Claude, OpenAI Agents, and LangChain to make paid API calls on behalf of users.
+
+## Architecture
+
+```
+kite-mcp/
+├── src/
+│   ├── server.ts   ← Express app, route registration
+│   ├── mcp.ts      ← MCP protocol handler (SSE, streamable HTTP)
+│   └── tools.ts    ← All 7 tool definitions and handlers
+```
+
+The server is intentionally stateless — it loads credentials from the local file system and delegates all logic to `@kite-agentic-pay/sdk`.
+
+## Starting
+
+```bash
+cd kite-mcp
+npm install
+npm run dev
+```
+
+Or via CLI:
+
+```bash
+npx kite run --port 3100
+```
+
+## Configuration
+
+```env
+PORT=3100
+AGENT_CREDENTIAL=0x...          # Override stored credential
+NODE_ENV=development
+```
+
+## Key Files
+
+### `tools.ts`
+
+Each MCP tool is defined as a `{ name, description, inputSchema, handler }` object:
+
+```typescript
+export const callPaidApiTool = {
+  name: "call_paid_api",
+  description: "Call a paid API endpoint...",
+  inputSchema: { type: "object", properties: { url: ..., agentId: ... } },
+  handler: async (params) => {
+    const client = await KiteSettleClient.create({ agentId: params.agentId });
+    const response = await client.fetchWithPayment(params.url, {}, {
+      paymentMode: params.mode || "perCall",
+    });
+    return { data: await response.json(), receipt: ... };
+  },
+};
+```
+
+### `mcp.ts`
+
+Handles the MCP protocol: SSE event stream, JSON-RPC message dispatch, tool enumeration, and tool invocation.
+
+### `server.ts`
+
+Express app that registers all routes:
+- `/mcp/sse` — SSE transport
+- `/mcp` — Streamable HTTP transport
+- `/mcp/messages` — POST message channel
+- `/api/tools/*` — HTTP proxy endpoints
+
+## Extending the Server
+
+To add a new tool:
+
+1. Define the tool in `tools.ts` with `name`, `description`, `inputSchema`, and `handler`
+2. Register it in the tool registry in `mcp.ts`
+3. Optionally add a dedicated HTTP proxy route in `server.ts`
+
+## Related Pages
+
+- [MCP: Overview →](../mcp/overview)
+- [MCP: Tool Reference →](../mcp/tool-reference)
+- [MCP: Claude Desktop →](../mcp/claude-desktop)

@@ -1,0 +1,168 @@
+---
+sidebar_position: 3
+title: Querying
+description: Example GraphQL queries for the Kite subgraph
+---
+
+# Querying the Subgraph
+
+## Endpoint
+
+```
+POST https://api.goldsky.com/api/public/<project>/subgraphs/kite-agentic-pay/1.0.0/gn
+Content-Type: application/json
+```
+
+Or use the GraphQL playground by navigating to the URL in a browser.
+
+## Common Queries
+
+### Get All Agents for an EOA
+
+```graphql
+query AgentsByOwner($owner: String!) {
+  agents(where: { owner: $owner }) {
+    id
+    agentURI
+    active
+    aaWallet {
+      id
+    }
+    sessions(where: { status: "Active" }) {
+      id
+      validUntil
+      budget
+      amountUsed
+    }
+  }
+}
+```
+
+Variables:
+```json
+{ "owner": "0xYourEOAAddress" }
+```
+
+---
+
+### Get Payment History for an Agent
+
+```graphql
+query PaymentsByAgent($agentId: String!, $limit: Int!) {
+  payments(
+    where: { agent: $agentId }
+    orderBy: timestamp
+    orderDirection: desc
+    first: $limit
+  ) {
+    id
+    amount
+    type
+    provider
+    token
+    timestamp
+    txHash
+  }
+}
+```
+
+---
+
+### Get All Channels for an Agent
+
+```graphql
+query ChannelsByAgent($agentId: String!) {
+  channels(where: { agent: $agentId, status_in: ["OPEN", "ACTIVE"] }) {
+    id
+    provider
+    deposit
+    maxSpend
+    status
+    activatedAt
+  }
+}
+```
+
+---
+
+### Get Session Status
+
+```graphql
+query SessionInfo($sessionKey: String!) {
+  session(id: $sessionKey) {
+    status
+    validUntil
+    budget
+    amountUsed
+    callCount
+    aaWallet {
+      id
+    }
+  }
+}
+```
+
+---
+
+### Total Spend Across All Agents
+
+```graphql
+query TotalSpend($owner: String!) {
+  user(id: $owner) {
+    agents {
+      id
+      payments {
+        amount
+        type
+      }
+    }
+  }
+}
+```
+
+---
+
+### Recent Settlements
+
+```graphql
+query RecentSettlements($limit: Int!) {
+  channels(
+    where: { status: "CLOSED" }
+    orderBy: closedAt
+    orderDirection: desc
+    first: $limit
+  ) {
+    id
+    agent { id }
+    provider
+    deposit
+    settledAmount
+    refundAmount
+    closedAt
+  }
+}
+```
+
+## SDK Integration
+
+```typescript
+const SUBGRAPH_URL = "https://api.goldsky.com/...";
+
+async function querySubgraph(query: string, variables: Record<string, unknown>) {
+  const response = await fetch(SUBGRAPH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+  });
+  const { data, errors } = await response.json();
+  if (errors) throw new Error(errors[0].message);
+  return data;
+}
+
+const { agents } = await querySubgraph(AGENTS_BY_OWNER_QUERY, { owner: myEOA });
+```
+
+## Related Pages
+
+- [Indexer Entities →](./entities)
+- [Indexer Deployment →](./deployment)

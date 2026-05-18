@@ -1,0 +1,166 @@
+---
+sidebar_position: 2
+title: Payment Flow
+description: Step-by-step walkthrough of per-call, channel open, receipt accumulation, and settlement
+---
+
+# Payment Flow
+
+## Per-Call (x402) Flow
+
+The simplest payment model. Each API call carries a fresh signed receipt.
+
+```mermaid
+flowchart TD
+    A[Agent calls fetchWithPayment] --> B{Provider response}
+    B -->|402 Payment Required| C[Parse payment challenge]
+    B -->|200 OK| Z[Return data]
+    C --> D[Load session key from local store]
+    D --> E[Sign EIP-712 Payment struct]
+    E --> F[Add X-PAYMENT header to request]
+    F --> G[Retry request to provider]
+    G --> H[Provider calls executePayment on KiteAAWallet]
+    H --> I{Validation checks}
+    I -->|Session active?| J{yes}
+    I -->|Nonce fresh?| J
+    I -->|Amount <= valueLimit?| J
+    I -->|Cumulative <= maxValueAllowed?| J
+    I -->|Signature valid?| J
+    J --> K[Transfer tokens to provider]
+    K --> L[Provider returns 200 OK]
+    L --> Z
+```
+
+**Gas cost:** One on-chain transaction per API call (`executePayment`).
+
+---
+
+## Channel Open Flow
+
+Opening a payment channel pre-funds the session and sets terms.
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant SDK
+    participant PaymentChannel
+    participant KiteAAWallet
+    participant Provider
+
+    Agent->>SDK: openChannel(provider, deposit, maxSpend, ...)
+    SDK->>SDK: Load session key
+    SDK->>PaymentChannel: openChannel(provider, token, mode, deposit, ...)
+    PaymentChannel->>IdentityRegistry: validateSession(sessionKey)
+    IdentityRegistry-->>PaymentChannel: Session valid ✓
+    PaymentChannel->>KiteAAWallet: lockFunds(aaWallet, token, deposit)
+    KiteAAWallet-->>PaymentChannel: Funds locked ✓
+    PaymentChannel-->>SDK: ChannelOpened event → channelId
+    SDK-->>Agent: { channelId, txHash }
+
+    Note over Provider: Backend watcher detects ChannelOpened
+    Provider->>PaymentChannel: activateChannel(channelId)
+    PaymentChannel-->>Provider: ChannelActivated event
+    Note over PaymentChannel: Status: Active
+```
+
+**Gas cost:** Two on-chain transactions (one by consumer: `openChannel`, one by provider: `activateChannel`).
+
+---
+
+## Receipt Accumulation Flow
+
+Once a channel is active, calls accumulate off-chain receipts.
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant SDK
+    participant Provider
+    participant LocalStore
+
+    loop Each API call
+        Agent->>SDK: callOnChannel(channelId, url)
+        SDK->>Provider: GET /api/stream + X-Channel-Id + X-Last-Receipt-*
+        Provider->>Provider: Validate last receipt (seq, cost, sig)
+        Provider->>Provider: Compute new receipt (seq+1, newCost)
+        Provider->>Provider: Sign new receipt with EIP-712
+        Provider-->>SDK: 200 OK + X-Receipt-* headers
+        SDK->>SDK: Validate receipt (seq continuity, cost increase)
+        SDK->>LocalStore: Persist receipt
+        SDK-->>Agent: Response data
+    end
+```
+
+**Gas cost:** Zero — all receipt exchange is off-chain.
+
+**Receipts are cumulative:** Receipt at `seq=10` covers the cost of calls 1–10. Only the last receipt matters for settlement.
+
+---
+
+## Settlement Flow
+
+Either party initiates settlement. The contract verifies the highest submitted receipt.
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant PaymentChannel
+    participant Provider
+    participant KiteAAWallet
+
+    Agent->>PaymentChannel: initiateSettlement(channelId, seq, cost, hash, sig)
+    Note over PaymentChannel: Status: SettlementPending
+    Note over PaymentChannel: Challenge window opens (1 hour)
+
+    alt Cooperative settlement (recommended)
+        Provider->>PaymentChannel: approveSettlement(channelId, merkleRoot)
+        Note over PaymentChannel: Challenge window skipped
+    else Disputed settlement
+        Note over PaymentChannel: (1 hour passes)
+        Agent->>PaymentChannel: finalize(channelId, merkleRoot)
+    end
+
+    PaymentChannel->>Provider: Transfer highestClaimedCost
+    PaymentChannel->>KiteAAWallet: unlockFunds(deposit - highestClaimedCost)
+    KiteAAWallet->>Agent: Refund ✓
+    Note over PaymentChannel: Status: Closed
+```
+
+**Gas cost:** 1–2 transactions (initiate + finalize, or single `approveSettlement`).
+
+---
+
+## Full Channel Lifecycle Summary
+
+| Phase | Who acts | Gas? | What happens |
+|---|---|---|---|
+| Open | Consumer (agent) | Yes | Locks deposit, sets channel terms |
+| Activate | Provider | Yes | Acknowledges channel, enables calls |
+| Calls | Off-chain | No | Provider signs receipts, consumer persists them |
+| Initiate settlement | Consumer or provider | Yes | Submits last receipt, starts challenge window |
+| Approve settlement | Provider | Yes | Cooperative close (skips challenge) |
+| Finalize | Anyone | Yes | After challenge window; distributes funds |
+
+---
+
+## Gas Cost Comparison
+
+| Scenario | x402 | Channel |
+|---|---|---|
+| 1 call | 1 tx | 3 tx (open + activate + settle) |
+| 5 calls | 5 tx | 3 tx |
+| 10 calls | 10 tx | 3 tx |
+| 100 calls | 100 tx | 3 tx |
+| 1000 calls | 1000 tx | 3 tx |
+
+Channels pay fixed overhead regardless of call count. Break-even is around 3–5 calls depending on gas prices.
+
+---
+
+## Related Pages
+
+- [x402 Payments →](../concepts/x402-payments) — Deep dive on per-call payment
+- [Payment Channels →](../concepts/payment-channels) — Channel concepts and types
+- [Channel Settlement →](../channels/settlement) — Settlement mechanics in detail
+- [Demo 3: Batch Flow →](../simulations/batch-flow)
+- [Demo 5: Channel Settlement →](../simulations/recovery)

@@ -1,0 +1,100 @@
+---
+sidebar_position: 2
+title: Session Security
+description: How to keep session keys secure
+---
+
+# Session Security
+
+Session keys are the hot signing keys used in normal operation. They are stored in `~/.kite-agent-pay/vars.json` and used by every payment. Here is how to keep them safe.
+
+## What a Session Key Can Do
+
+A session key can:
+- Sign x402 payment receipts up to `maxPerCall`
+- Sign channel receipts up to `maxPerCall` per call
+- Not exceed the on-chain `budget` limit
+- Not exceed the `validUntil` expiry
+
+A session key **cannot**:
+- Register new session keys
+- Withdraw funds from the AA wallet
+- Modify session rules
+- Exceed the on-chain spending caps
+
+## File Permissions
+
+The SDK sets `vars.json` to `0600` (owner read/write only). Verify:
+
+```bash
+ls -la ~/.kite-agent-pay/vars.json
+# -rw------- 1 you staff 512 Jan 01 14:22 vars.json
+```
+
+If the permissions are wrong:
+
+```bash
+chmod 0600 ~/.kite-agent-pay/vars.json
+chmod 0600 ~/.kite-agent-pay/config.json
+chmod 0700 ~/.kite-agent-pay/
+```
+
+## Session Expiry
+
+Configure sessions with shorter validity for higher-security environments:
+
+```bash
+# 7-day session instead of 30-day
+npx kite session start --agent 1 --days 7 --budget 5
+```
+
+Shorter sessions reduce the attack window if a key is stolen.
+
+## Spending Caps
+
+Set conservative per-call and total budget caps:
+
+```bash
+npx kite onboard \
+  --name "My Agent" \
+  --days 7 \
+  --budget 5    # 5 USDT max total
+```
+
+Even if the session key is stolen, the attacker is limited to 5 USDT.
+
+## Immediate Revocation
+
+If you suspect a session key is compromised:
+
+```bash
+npx kite session revoke --key 0xSessionKeyAddress
+```
+
+This submits a transaction to `KiteAAWallet.revokeSession()`. Any subsequent payment signed by that key will be rejected by the contract within the next block.
+
+## Multiple Sessions
+
+You can have multiple session keys simultaneously — one per machine, one per agent, one per time period. This isolates risk: compromising one session does not compromise others.
+
+```bash
+# Session for dev machine
+npx kite session start --agent 1 --days 7
+
+# Session for production machine
+npx kite session start --agent 1 --days 7
+```
+
+## What About the EOA Credential?
+
+The EOA credential (`config.json`) is higher risk — it can register new sessions with arbitrary limits. Best practices:
+
+- Keep it on a machine with full disk encryption
+- Never copy it into a cloud service, clipboard, or CI/CD environment
+- Consider using a hardware wallet and signing onboarding transactions manually
+
+## Related Pages
+
+- [Security: Threat Model →](./threat-model)
+- [Security: Tradeoffs →](./tradeoffs)
+- [CLI: kite session →](../cli/agents)

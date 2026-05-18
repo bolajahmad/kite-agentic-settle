@@ -33,8 +33,8 @@ import { createLogger } from "./lib/logger.js";
 import { createDemoClient, formatUsdc } from "./lib/setup.js";
 
 // Demo configuration
-const AGENT_ID = "3";
-const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
+const AGENT_ID = "8";
+const SESSION_KEY = "0x6869Be52272d679eC4D4020796EdE9091546Cdc3";
 const STREAM_DURATION_SECONDS = 30; // 30 second window for demo
 const CALL_INTERVAL_MS = 3000; // Call every 3 seconds
 

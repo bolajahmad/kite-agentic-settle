@@ -1,0 +1,148 @@
+---
+sidebar_position: 3
+title: PaymentChannel
+description: The payment channel contract — open, activate, settle, finalize
+---
+
+# PaymentChannel
+
+The `PaymentChannel` contract manages all batch and stream payment channels. It holds token deposits during an active channel and distributes them on settlement.
+
+**Deployed:** `0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb`  
+**Network:** Kite AI Testnet (chain ID 2368)
+
+## Channel Lifecycle
+
+```
+openChannel() → OPEN
+    ↓
+activateChannel() → ACTIVE (provider activates)
+    ↓
+[off-chain receipts exchanged]
+    ↓
+initiateSettlement() → SETTLEMENT_PENDING
+    ↓
+approveSettlement() → CLOSED (cooperative)
+    OR
+finalizeChannel() → CLOSED (after challenge window)
+```
+
+## Functions
+
+### `openChannel(params)`
+
+```solidity
+function openChannel(
+    address sessionKey,
+    address provider,
+    address token,
+    uint256 deposit,
+    ChannelTerms calldata terms
+) external returns (bytes32 channelId);
+
+struct ChannelTerms {
+    uint256 maxSpend;
+    uint256 maxPerCall;
+    uint256 maxDuration;
+}
+```
+
+Transfers `deposit` from the caller's AA wallet to this contract.
+
+### `activateChannel(channelId)`
+
+Only callable by the provider specified in `openChannel`. Transitions channel from `OPEN` to `ACTIVE`.
+
+```solidity
+function activateChannel(bytes32 channelId) external;
+```
+
+### `initiateSettlement(channelId, receipt)`
+
+Agent calls this to start settlement with their highest receipt.
+
+```solidity
+function initiateSettlement(
+    bytes32 channelId,
+    ChannelReceipt calldata receipt
+) external;
+
+struct ChannelReceipt {
+    bytes32 channelId;
+    uint256 sequenceNumber;
+    uint256 cumulativeCost;
+    bytes signature;
+}
+```
+
+### `approveSettlement(channelId, agreedAmount)`
+
+Provider calls this during the challenge window to cooperatively close.
+
+```solidity
+function approveSettlement(bytes32 channelId, uint256 agreedAmount) external;
+```
+
+### `finalizeChannel(channelId)`
+
+Either party calls this after the challenge window expires.
+
+```solidity
+function finalizeChannel(bytes32 channelId) external;
+```
+
+### `getChannel(channelId)`
+
+Read all channel state.
+
+```solidity
+function getChannel(bytes32 channelId) external view returns (
+    address agent,
+    address provider,
+    address sessionKey,
+    address token,
+    uint256 deposit,
+    ChannelTerms memory terms,
+    ChannelStatus status,
+    uint256 settledAmount,
+    uint256 refundAmount,
+    uint40 settlementTimestamp
+);
+```
+
+## EIP-712 Receipt Verification
+
+The contract verifies receipts using EIP-712:
+
+```
+Domain: {
+    name: "KitePaymentChannel",
+    version: "1",
+    chainId: 2368,
+    verifyingContract: 0x8EC6B059...
+}
+Type: Receipt {
+    channelId: bytes32,
+    sequenceNumber: uint256,
+    cumulativeCost: uint256
+}
+```
+
+Only the session key registered for a channel can produce valid receipt signatures.
+
+## Events
+
+```solidity
+event ChannelOpened(bytes32 indexed channelId, address agent, address provider, uint256 deposit);
+event ChannelActivated(bytes32 indexed channelId);
+event SettlementInitiated(bytes32 indexed channelId, uint256 requestedAmount);
+event SettlementApproved(bytes32 indexed channelId, uint256 settledAmount, uint256 refund);
+event ChannelFinalized(bytes32 indexed channelId, uint256 settledAmount, uint256 refund);
+```
+
+## Related Pages
+
+- [Payment Channels Concept →](../concepts/payment-channels)
+- [Channel Opening →](../channels/opening)
+- [Channel Settlement →](../channels/settlement)
+- [AttestationRegistry →](./attestation-registry)

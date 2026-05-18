@@ -1,0 +1,108 @@
+---
+sidebar_position: 4
+title: LangChain
+description: Use Kite payment tools as LangChain tools
+---
+
+# LangChain Integration
+
+The MCP server exposes a LangChain-compatible schema endpoint. You can use this to create LangChain `DynamicTool` or `StructuredTool` instances that dispatch to the Kite MCP server.
+
+## Get Tool Schema
+
+```bash
+curl http://localhost:3100/api/tools/schema/langchain
+```
+
+## Direct HTTP Tool
+
+The simplest integration is to call the tool proxy endpoints directly:
+
+```typescript
+import { DynamicTool } from "@langchain/core/tools";
+
+const callPaidApiTool = new DynamicTool({
+  name: "call_paid_api",
+  description: "Call a paid API endpoint. Handles x402 payment automatically using the agent's session key.",
+  func: async (input: string) => {
+    const params = JSON.parse(input);
+    const response = await fetch("http://localhost:3100/api/tools/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool: "call_paid_api", params }),
+    });
+    const result = await response.json();
+    return JSON.stringify(result);
+  },
+});
+
+const checkBalanceTool = new DynamicTool({
+  name: "check_balance",
+  description: "Check the deposited balance in the Kite AA wallet for an EOA address.",
+  func: async (input: string) => {
+    const { address } = JSON.parse(input);
+    const response = await fetch(`http://localhost:3100/api/tools/balance?address=${address}`);
+    const result = await response.json();
+    return JSON.stringify(result);
+  },
+});
+```
+
+## Using with a LangChain Agent
+
+```typescript
+import { ChatOpenAI } from "@langchain/openai";
+import { AgentExecutor, createOpenAIFunctionsAgent } from "langchain/agents";
+import { ChatPromptTemplate } from "@langchain/core/prompts";
+
+const llm = new ChatOpenAI({ model: "gpt-4o", temperature: 0 });
+
+const tools = [callPaidApiTool, checkBalanceTool];
+
+const prompt = ChatPromptTemplate.fromMessages([
+  ["system", "You are an AI agent that can make paid API calls using Kite Agentic Pay."],
+  ["human", "{input}"],
+  ["placeholder", "{agent_scratchpad}"],
+]);
+
+const agent = await createOpenAIFunctionsAgent({ llm, tools, prompt });
+
+const executor = new AgentExecutor({ agent, tools, verbose: true });
+
+const result = await executor.invoke({
+  input: "Fetch the protocol report from http://localhost:4000/api/data/protocol-report using agent ID 1",
+});
+
+console.log(result.output);
+```
+
+## Auto-Loading All Tools
+
+You can auto-generate all LangChain tools from the schema endpoint:
+
+```typescript
+async function loadKiteTools(mcpServerUrl: string) {
+  const schema = await fetch(`${mcpServerUrl}/api/tools/schema/langchain`).then(r => r.json());
+
+  return schema.map((tool: any) => new DynamicTool({
+    name: tool.name,
+    description: tool.description,
+    func: async (input: string) => {
+      const params = JSON.parse(input);
+      const response = await fetch(`${mcpServerUrl}/api/tools/invoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: tool.name, params }),
+      });
+      return JSON.stringify(await response.json());
+    },
+  }));
+}
+
+const tools = await loadKiteTools("http://localhost:3100");
+```
+
+## Related Pages
+
+- [OpenAI Agents →](./openai-agents) — OpenAI function-calling integration
+- [MCP Tool Reference →](./tool-reference) — All 7 tool definitions

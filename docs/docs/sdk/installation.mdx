@@ -1,0 +1,76 @@
+---
+sidebar_position: 1
+title: Installation
+description: Install the Kite Agentic Pay SDK
+---
+
+# SDK Installation
+
+## Package
+
+The SDK is published as `@kite-agentic-pay/sdk` from the `mcp-sdk/` workspace package.
+
+```bash
+npm install @kite-agentic-pay/sdk
+# or
+yarn add @kite-agentic-pay/sdk
+# or
+pnpm add @kite-agentic-pay/sdk
+```
+
+## Requirements
+
+- Node.js 18 or later
+- TypeScript 5+ (for type definitions)
+- An EOA private key or seed phrase (12 or 24 words)
+- Kite AI Testnet KITE for gas
+
+## ES Module
+
+The SDK uses ES modules with `"type": "module"` in `package.json`. Import with:
+
+```typescript
+import { KiteSettleClient, KITE_TESTNET } from "@kite-agentic-pay/sdk";
+```
+
+If you are using CommonJS, use a dynamic import:
+
+```javascript
+const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+```
+
+## Network Configuration
+
+The SDK ships with a `KITE_TESTNET` config object:
+
+```typescript
+import { KITE_TESTNET } from "@kite-agentic-pay/sdk";
+
+console.log(KITE_TESTNET.chainId);   // 2368
+console.log(KITE_TESTNET.rpcUrl);    // https://rpc-testnet.gokite.ai
+console.log(KITE_TESTNET.token);     // DmUSDT address
+```
+
+## Credential Setup
+
+Before using the SDK, store your EOA credential:
+
+```bash
+npx kite init
+```
+
+Or set it programmatically:
+
+```typescript
+import { setCredential } from "@kite-agentic-pay/sdk";
+
+setCredential("your-private-key-or-seed-phrase");
+```
+
+Credentials are stored at `~/.kite-agent-pay/config.json` with `0600` permissions.
+
+## Next Steps
+
+- [KiteSettleClient →](./client) — The primary SDK class
+- [Payments →](./payments) — Making paid API calls
+- [Channels →](./channels) — Opening and settling payment channels

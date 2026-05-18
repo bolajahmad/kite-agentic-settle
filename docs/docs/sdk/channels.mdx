@@ -1,0 +1,140 @@
+---
+sidebar_position: 4
+title: Channels
+description: Opening, calling through, and settling payment channels with the SDK
+---
+
+# SDK Channels
+
+## Open a Channel
+
+```typescript
+import { KiteSettleClient, KITE_TESTNET } from "@kite-agentic-pay/sdk";
+import { parseUnits } from "viem";
+
+const client = await KiteSettleClient.create({ credential, agentId: "1" });
+
+const channel = await client.openChannel({
+  provider: "0xProviderAddress",
+  token: KITE_TESTNET.token as `0x${string}`,
+  deposit: parseUnits("5.0", 18),     // 5 USDT deposited upfront
+  maxSpend: parseUnits("4.5", 18),    // max 4.5 USDT total
+  maxPerCall: parseUnits("0.5", 18),  // max 0.5 USDT per call
+  maxDuration: 3600,                   // channel expires in 1 hour
+  mode: "prepaid",
+});
+
+console.log(channel.channelId);  // bytes32 hex
+console.log(channel.txHash);     // open transaction hash
+```
+
+## Wait for Activation
+
+After `openChannel()`, the provider must call `activateChannel()`. In the demo setup, the backend's channel watcher does this automatically. You can wait:
+
+```typescript
+// Poll until active (provider's watcher activates within seconds)
+let status = await client.getChannelStatus(channel.channelId);
+while (status !== "Active") {
+  await new Promise(r => setTimeout(r, 2000));
+  status = await client.getChannelStatus(channel.channelId);
+}
+```
+
+## Make Calls on Channel
+
+```typescript
+for (let i = 0; i < 10; i++) {
+  const response = await client.callOnChannel(
+    channel.channelId,
+    "http://localhost:4000/api/stream/intelligence",
+    { method: "GET" }
+  );
+  const data = await response.json();
+  console.log(`Call ${i + 1}:`, data);
+}
+```
+
+Each call:
+- Sends `X-Channel-Id` header to the provider
+- Receives a signed receipt in the response
+- Persists the receipt locally before returning
+
+## Initiate Settlement
+
+```typescript
+const settleTx = await client.initiateSettlement(channel.channelId);
+console.log("Settlement initiated:", settleTx);
+```
+
+If the provider runs a settlement watcher (as the demo backend does), it will call `approveSettlement()` automatically and the channel closes cooperatively.
+
+## Force Finalize
+
+If the provider does not cooperate within the 1-hour challenge window:
+
+```typescript
+await client.finalizeChannel(channel.channelId);
+```
+
+This settles based on the highest receipt submitted during the challenge window.
+
+## Check Channel Status
+
+```typescript
+const info = await client.getChannelInfo(channel.channelId);
+console.log(info.status);         // "OPEN" | "ACTIVE" | "SETTLEMENT_PENDING" | "CLOSED"
+console.log(info.deposit);        // BigInt
+console.log(info.settledAmount);  // BigInt (after settlement)
+console.log(info.refundAmount);   // BigInt (after settlement)
+```
+
+## Local Channel Store
+
+All channel state and receipts are persisted automatically to `~/.kite-agent-pay/channels/<channelId>/`.
+
+```typescript
+import { ChannelStore } from "@kite-agentic-pay/sdk";
+
+const store = new ChannelStore();
+const receipts = store.getReceipts(channel.channelId);
+console.log(`${receipts.length} receipts stored locally`);
+
+const lastReceipt = store.getLastReceipt(channel.channelId);
+console.log(lastReceipt?.sequenceNumber, lastReceipt?.cumulativeCost);
+```
+
+## Complete Channel Flow Example
+
+```typescript
+const client = await KiteSettleClient.create({ credential, agentId: "1" });
+
+// 1. Open channel
+const channel = await client.openChannel({
+  provider: PROVIDER_ADDRESS,
+  token: DM_USDT,
+  deposit: parseUnits("2.0", 18),
+  maxSpend: parseUnits("1.8", 18),
+  maxPerCall: parseUnits("0.2", 18),
+  maxDuration: 1800,  // 30 minutes
+});
+
+// 2. Make 5 calls
+for (let i = 0; i < 5; i++) {
+  const res = await client.callOnChannel(channel.channelId, API_URL);
+  const data = await res.json();
+  console.log(`Call ${i + 1}:`, data.summary);
+}
+
+// 3. Settle
+await client.initiateSettlement(channel.channelId);
+console.log("Channel settled. Unused deposit refunded to AA wallet.");
+```
+
+## Related Pages
+
+- [Payment Channels Concept →](../concepts/payment-channels)
+- [Channel Opening →](../channels/opening)
+- [Channel Settlement →](../channels/settlement)
+- [Demo 3: Batch Flow →](../simulations/batch-flow)
+- [Demo 4: Stream Flow →](../simulations/stream-flow)

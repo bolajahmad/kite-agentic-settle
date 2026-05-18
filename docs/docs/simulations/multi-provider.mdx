@@ -1,0 +1,92 @@
+---
+sidebar_position: 6
+title: Multi-Provider Agent
+description: Demo 6 — An agent that pays multiple providers simultaneously
+---
+
+# Demo 6: Multi-Provider Agent
+
+This demo shows a single agent managing separate payment channels with multiple providers simultaneously — the pattern for building agentic workflows that consume many paid data sources.
+
+**Source:** `mcp-sdk/examples/06-multi-provider-agent.ts`
+
+## What It Does
+
+1. Opens separate channels with 3 different provider endpoints
+2. Fans out requests to all three in parallel
+3. Aggregates the results
+4. Settles all channels independently
+
+## Running It
+
+```bash
+cd mcp-sdk
+npm run demo 6
+```
+
+## Expected Output
+
+```
+  Demo 6: Multi-Provider Agent
+  ─────────────────────────────────────────────────
+  Agent ID: 1
+  
+  → Opening channels with 3 providers...
+    Provider A (protocol-report):  ✓ Channel 0xaaa...
+    Provider B (market-data):      ✓ Channel 0xbbb...
+    Provider C (intelligence):     ✓ Channel 0xccc...
+  
+  → Fanning out queries in parallel...
+    [ProviderA] ✓ protocol-report received (0.40 USDT)
+    [ProviderB] ✓ market-data received    (0.25 USDT)
+    [ProviderC] ✓ intelligence received   (0.50 USDT)
+  
+  → Aggregated insight: ...
+  
+  → Settling all channels...
+    Channel 0xaaa: ✓ settled (0.40 USDT)
+    Channel 0xbbb: ✓ settled (0.25 USDT)
+    Channel 0xccc: ✓ settled (0.50 USDT)
+  
+  Total paid: 1.15 USDT across 3 providers, 3 on-chain txs
+```
+
+## Code Pattern
+
+```typescript
+const client = await KiteSettleClient.create({ credential, agentId: "1" });
+
+// Open channels with multiple providers
+const channels = await Promise.all([
+  client.openChannel({ provider: PROVIDER_A, deposit: parseUnits("2.0", 18), ... }),
+  client.openChannel({ provider: PROVIDER_B, deposit: parseUnits("2.0", 18), ... }),
+  client.openChannel({ provider: PROVIDER_C, deposit: parseUnits("2.0", 18), ... }),
+]);
+
+// Fan out — all calls in parallel
+const [reportData, marketData, intelData] = await Promise.all([
+  client.callOnChannel(channels[0].channelId, PROVIDER_A_URL).then(r => r.json()),
+  client.callOnChannel(channels[1].channelId, PROVIDER_B_URL).then(r => r.json()),
+  client.callOnChannel(channels[2].channelId, PROVIDER_C_URL).then(r => r.json()),
+]);
+
+// Aggregate
+const insight = aggregate(reportData, marketData, intelData);
+console.log(insight);
+
+// Settle all
+await Promise.all(channels.map(ch => client.initiateSettlement(ch.channelId)));
+```
+
+## When to Use This Pattern
+
+- Building orchestrator agents that aggregate multiple data sources
+- Using different providers for different data categories
+- Isolating spend per provider for accounting purposes
+- Allowing per-provider session key scoping
+
+## Related Pages
+
+- [SDK: Channels →](../sdk/channels)
+- [Demo 3: Batch Flow →](./batch-flow)
+- [Payment Channels Concept →](../concepts/payment-channels)

@@ -1,0 +1,74 @@
+---
+sidebar_position: 1
+title: Local Development
+description: Run the full Kite stack locally
+---
+
+# Local Development
+
+This page explains how to run the entire Kite stack on your machine for development.
+
+## Service Map
+
+| Service | Port | Directory | Command |
+|---|---|---|---|
+| Backend Provider | 4000 | `backend/` | `npm run dev` |
+| MCP Server | 3100 | `kite-mcp/` | `npm run dev` |
+| Hardhat Node | 8545 | `contracts/` | `npx hardhat node` |
+
+## Option A: Testnet (Recommended for Getting Started)
+
+Use the already-deployed contracts on Kite AI Testnet (chain 2368). No local chain needed.
+
+```bash
+# Terminal 1: Backend
+cd backend && npm install && npm run dev
+
+# Terminal 2: MCP (optional — only for Claude/LangChain integration)
+cd kite-mcp && npm install && npm run dev
+
+# Terminal 3: Use the SDK/CLI
+npx kite onboard --name "Dev Agent"
+npx kite fund 10
+cd mcp-sdk/examples && npx ts-node run.ts 01-percall-payment
+```
+
+## Option B: Local Hardhat (For Contract Development)
+
+```bash
+# Terminal 1: Local chain
+cd contracts && npx hardhat node
+
+# Terminal 2: Deploy contracts
+cd contracts && npx hardhat run scripts/deploy.js --network localhost
+
+# Terminal 3: Backend (pointing to localhost)
+CHAIN_ID=31337 RPC_URL=http://127.0.0.1:8545 cd backend && npm run dev
+```
+
+## Verifying Everything Works
+
+```bash
+# Check backend
+curl http://localhost:4000/health
+
+# Check MCP server  
+curl http://localhost:3100/api/tools/schema | python3 -m json.tool
+
+# Check agent identity
+npx kite whoami
+```
+
+## Common Issues
+
+| Issue | Fix |
+|---|---|
+| `ECONNREFUSED 4000` | Start backend: `cd backend && npm run dev` |
+| `contract not found` | Check `CHAIN_ID` env var matches your network |
+| `insufficient funds` | `npx kite fund 10` |
+| Module not found | `npm install` in the affected directory |
+
+## Related Pages
+
+- [Run the Local Demo →](../guides/run-local-demo)
+- [Testnet Deployment →](./testnet)

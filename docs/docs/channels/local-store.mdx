@@ -1,0 +1,119 @@
+---
+sidebar_position: 5
+title: Local Channel Store
+description: How channel state and receipts are stored locally
+---
+
+# Local Channel Store
+
+All channel state and receipts are stored in the local file system. No database, no cloud sync — just files.
+
+## Directory Structure
+
+```
+~/.kite-agent-pay/
+├── config.json                   ← EOA credential
+├── vars.json                     ← Agent ID, session key, addresses
+└── channels/
+    └── 0xabc123.../              ← One directory per channelId
+        ├── meta.json             ← Channel open parameters
+        └── receipts.json         ← All receipts (append-only)
+```
+
+## meta.json
+
+```json
+{
+  "channelId": "0xabc123...",
+  "provider": "0xProviderEOA...",
+  "token": "0xDmUSDT...",
+  "deposit": "5000000000000000000",
+  "maxSpend": "4500000000000000000",
+  "maxPerCall": "500000000000000000",
+  "maxDuration": 3600,
+  "openedAt": 1700000000,
+  "txHash": "0xdef456...",
+  "status": "Active"
+}
+```
+
+## receipts.json
+
+```json
+[
+  {
+    "channelId": "0xabc123...",
+    "sequenceNumber": "1",
+    "cumulativeCost": "400000000000000000",
+    "signature": "0x...",
+    "timestamp": 1700000010
+  },
+  {
+    "channelId": "0xabc123...",
+    "sequenceNumber": "2",
+    "cumulativeCost": "800000000000000000",
+    "signature": "0x...",
+    "timestamp": 1700000025
+  }
+]
+```
+
+Receipts are append-only. The SDK always uses the last entry (highest sequence number) for settlement.
+
+## Programmatic Access
+
+```typescript
+import { ChannelStore } from "@kite-agentic-pay/sdk";
+
+const store = new ChannelStore();
+
+// List all channels
+const channels = store.listChannels();
+
+// Get all receipts for a channel
+const receipts = store.getReceipts(channelId);
+
+// Get last (highest seq) receipt
+const last = store.getLastReceipt(channelId);
+
+// Get channel metadata
+const meta = store.getMeta(channelId);
+
+// Add a recovered receipt
+store.addReceipt(channelId, receipt);
+```
+
+## Backup
+
+```bash
+# Backup the entire agent pay directory
+cp -r ~/.kite-agent-pay/ ~/kite-backup-$(date +%Y%m%d)/
+```
+
+## Restore on a New Machine
+
+```bash
+# Restore from backup
+cp -r ~/kite-backup-20250101/ ~/.kite-agent-pay/
+
+# Verify identity
+npx kite whoami
+```
+
+The SDK will pick up the credential, agent, session, and channel state from the restored directory.
+
+## File Permissions
+
+| File | Permissions | Why |
+|---|---|---|
+| `config.json` | `0600` | Contains EOA private key |
+| `vars.json` | `0600` | Contains session key address |
+| `channels/` | `0700` | Contains payment receipts |
+
+The SDK sets these permissions automatically when writing files.
+
+## Related Pages
+
+- [Channel Recovery →](./recovery) — Recovering from lost state
+- [Local-First Architecture →](../concepts/local-first-architecture) — Why local storage is primary
+- [Security: Session Security →](../security/session-security) — How keys are protected

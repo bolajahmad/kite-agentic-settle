@@ -1,0 +1,92 @@
+---
+sidebar_position: 4
+title: Stream Channel Flow
+description: Demo 4 — Time-bounded streaming channel with multiple rapid calls
+---
+
+# Demo 4: Stream Channel Flow
+
+This demo shows a stream channel — a channel designed for high-frequency, real-time data streaming. It uses the same underlying `PaymentChannel` contract but with very short durations and rapid call sequences.
+
+**Source:** `mcp-sdk/examples/04-stream-channel-flow.ts`
+
+## What It Does
+
+1. Opens a stream channel with a 30-minute lifetime
+2. Makes 10+ rapid calls simulating real-time streaming data
+3. Shows the cumulative receipt progression in real time
+4. Settles and reports on throughput
+
+## Running It
+
+```bash
+cd mcp-sdk
+npm run demo 4
+```
+
+## Expected Output
+
+```
+  Demo 4: Stream Channel Flow
+  ─────────────────────────────────────────────────
+  Mode: stream (30-minute window)
+  Endpoint: http://localhost:4000/api/stream/intelligence
+
+  Opening stream channel...
+  ✓ Channel active, streaming...
+
+  [14:22:01] seq=1  cost=0.10  cumTotal=0.10 USDT
+  [14:22:02] seq=2  cost=0.10  cumTotal=0.20 USDT
+  [14:22:03] seq=3  cost=0.10  cumTotal=0.30 USDT
+  [14:22:04] seq=4  cost=0.10  cumTotal=0.40 USDT
+  [14:22:05] seq=5  cost=0.10  cumTotal=0.50 USDT
+  ...
+  [14:22:10] seq=10 cost=0.10  cumTotal=1.00 USDT
+
+  → Settling stream channel...
+  ✓ Closed. Provider earned 1.00 USDT, refund 4.00 USDT
+
+  Throughput: 10 calls in 10 seconds
+```
+
+## Differences from Batch
+
+| | Batch | Stream |
+|---|---|---|
+| Typical duration | 1–24 hours | Minutes to hours |
+| Typical call frequency | Infrequent | Rapid (per-second) |
+| Typical call cost | 0.10–1.00 USDT | 0.01–0.10 USDT |
+| Settlement | Explicit when done | Auto or time-triggered |
+
+## Code Pattern
+
+```typescript
+const channel = await client.openChannel({
+  provider: PROVIDER_ADDRESS,
+  token: DM_USDT,
+  deposit: parseUnits("5.0", 18),
+  maxSpend: parseUnits("4.5", 18),
+  maxPerCall: parseUnits("0.1", 18),  // small per-call cap
+  maxDuration: 1800,                   // 30-minute window
+  mode: "prepaid",
+});
+
+// Rapid calls with await — each one returns immediately
+const interval = setInterval(async () => {
+  const response = await client.callOnChannel(channel.channelId, STREAM_URL);
+  const data = await response.json();
+  console.log(data);
+}, 1000);
+
+// Stop after 10 seconds
+setTimeout(async () => {
+  clearInterval(interval);
+  await client.initiateSettlement(channel.channelId);
+}, 10000);
+```
+
+## Related Pages
+
+- [Demo 3: Batch Flow →](./batch-flow)
+- [Channel Receipts →](../channels/receipts) — How cumulative receipts work
+- [Demo 5: Settlement →](./recovery)

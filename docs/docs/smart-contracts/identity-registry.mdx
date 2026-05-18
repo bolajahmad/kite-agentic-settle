@@ -1,0 +1,106 @@
+---
+sidebar_position: 1
+title: IdentityRegistry
+description: The on-chain agent NFT registry — minting, resolving, and linking to AA wallets
+---
+
+# IdentityRegistry
+
+The `IdentityRegistry` contract is the source of truth for all agents in the Kite protocol. It mints ERC-721 agent NFTs and stores their metadata and AA wallet links.
+
+**Deployed:** `0xE4C30627C02791bF12241021f2fC320b43991cb1`  
+**Network:** Kite AI Testnet (chain ID 2368)
+
+## What It Stores
+
+Each agent NFT includes:
+
+| Field | Type | Description |
+|---|---|---|
+| `owner` | address | EOA that owns this agent |
+| `agentURI` | string | JSON metadata (name, category, version) |
+| `aaWallet` | address | Linked `KiteAAWallet` contract |
+| `active` | bool | Whether the agent is currently active |
+
+## Functions
+
+### `registerAgent(agentURI, aaWallet)`
+
+Mints a new agent NFT. Emits `AgentRegistered(tokenId, owner, agentURI, aaWallet)`.
+
+```solidity
+function registerAgent(
+    string calldata agentURI,
+    address aaWallet
+) external returns (uint256 tokenId);
+```
+
+```typescript
+// SDK usage
+const tokenId = await client.registerAgent(agentURI, aaWalletAddress);
+```
+
+### `resolveAgent(tokenId)`
+
+Returns all metadata for an agent NFT.
+
+```solidity
+function resolveAgent(uint256 tokenId) external view returns (
+    address owner,
+    string memory agentURI,
+    address aaWallet,
+    bool active
+);
+```
+
+```typescript
+const agent = await client.resolveAgent("1");
+console.log(agent.owner, agent.agentURI, agent.aaWallet, agent.active);
+```
+
+### `setActive(tokenId, active)`
+
+The agent owner can deactivate or reactivate their agent.
+
+```solidity
+function setActive(uint256 tokenId, bool active) external;
+```
+
+### `getAgentsByOwner(owner)`
+
+Returns all tokenIds owned by an EOA.
+
+```solidity
+function getAgentsByOwner(address owner) external view returns (uint256[] memory);
+```
+
+## Agent URI Format
+
+The `agentURI` field stores a JSON string (or IPFS CID) with agent metadata:
+
+```json
+{
+  "name": "Data Analyst Agent",
+  "description": "Fetches and summarizes protocol metrics",
+  "category": "analytics",
+  "version": "1.0.0",
+  "capabilities": ["x402", "channel"],
+  "model": "gpt-4o"
+}
+```
+
+For the demo setup, this is stored inline as a JSON string. For production, store on IPFS and use the CID.
+
+## Events
+
+```solidity
+event AgentRegistered(uint256 indexed tokenId, address indexed owner, string agentURI, address aaWallet);
+event AgentUpdated(uint256 indexed tokenId, string agentURI);
+event AgentDeactivated(uint256 indexed tokenId);
+```
+
+## Related Pages
+
+- [Agent Identity Concept →](../concepts/agent-identity)
+- [KiteAAWallet Contract →](./kite-aa-wallet)
+- [AttestationRegistry →](./attestation-registry)

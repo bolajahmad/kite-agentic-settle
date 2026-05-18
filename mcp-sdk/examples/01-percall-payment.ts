@@ -25,8 +25,10 @@
  */
 
 // Demo configuration - replace with your agent and session
-const AGENT_ID = "3";
-const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
+const AGENT_ID = "8";
+const SESSION_KEY = "0x6869Be52272d679eC4D4020796EdE9091546Cdc3";
+const PAYMENT_TOKEN =
+  "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63" as `0x${string}`;
 
 import { createLogger } from "./lib/logger.js";
 import { createDemoClient, formatUsdc } from "./lib/setup.js";
@@ -64,9 +66,13 @@ export async function run() {
     const vaultAddress = await client.getOwnerAAWalletAddress();
     logger.info(`ClientAgentVault address: ${vaultAddress}`);
     const balance = await client.getDepositedBalance(undefined, vaultAddress);
+    const paymentTokenBalance = await client.getDepositedBalance(
+      PAYMENT_TOKEN,
+      vaultAddress,
+    );
     logger.data("Balance Before Calls", {
-      raw: balance.toString(),
-      formatted: formatUsdc(balance),
+      balance: formatUsdc(balance),
+      paymentToken: formatUsdc(paymentTokenBalance),
     });
 
     if (balance === 0n) {
@@ -185,15 +191,25 @@ export async function run() {
 
     // ── Check balance after payment ───────────────────────────────────
     logger.step("Check ClientAgentVault balance after payment");
-    const balanceAfter = await client.getDepositedBalance(undefined, vaultAddress);
+    const balanceAfter = await client.getDepositedBalance(
+      undefined,
+      vaultAddress,
+    );
+    const paymentTokenBalanceAfter = await client.getDepositedBalance(
+      PAYMENT_TOKEN,
+      vaultAddress,
+    );
     logger.data("Balance After Calls", {
-      raw: balanceAfter.toString(),
       formatted: formatUsdc(balanceAfter),
+      paymentToken: formatUsdc(paymentTokenBalanceAfter),
     });
 
     const spent = balance - balanceAfter;
-    if (spent > 0n) {
-      logger.success(`Payment settled: ${formatUsdc(spent)} spent`);
+    const spentPUsdt = paymentTokenBalance - paymentTokenBalanceAfter;
+    if (spent > 0n || spentPUsdt > 0n) {
+      logger.success(
+        `Payment settled: ${formatUsdc(spent || spentPUsdt)} spent`,
+      );
     } else {
       logger.info("No balance change (payment may be pending or failed)");
     }

@@ -1,0 +1,225 @@
+---
+sidebar_position: 2
+title: KiteSettleClient
+description: The primary SDK class for payments, channels, and agent identity
+---
+
+# KiteSettleClient
+
+`KiteSettleClient` is the primary class in the SDK. It manages agent identity, session keys, payment execution, and channel lifecycle.
+
+## Creating a Client
+
+### From stored credential
+
+```typescript
+import { KiteSettleClient } from "@kite-agentic-pay/sdk";
+
+// Uses credential stored by `kite init`
+const client = await KiteSettleClient.create({});
+
+// With explicit credential (overrides stored)
+const client = await KiteSettleClient.create({
+  credential: "0xYourPrivateKey...",
+});
+
+// With specific agent and session
+const client = await KiteSettleClient.create({
+  credential: "0xYourPrivateKey...",
+  agentId: "1",
+  sessionKey: "0xSessionKeyAddress...",
+});
+```
+
+### Read-only (no signing)
+
+```typescript
+const client = KiteSettleClient.createReadOnly();
+// Can call getAgentsByOwner, getDepositedBalance, etc.
+// Cannot sign payments or open channels
+```
+
+## Client Properties
+
+```typescript
+client.address           // Active signing address (session key or EOA)
+client.eoaAddress        // EOA address
+client.sessionKeyAddress // Current session key address (if in agent mode)
+client.agentId           // Current agent ID (if in agent mode)
+```
+
+## Onboarding
+
+### `onboard(options, onStep?)`
+
+Complete one-step agent setup: deploys AA wallet, registers agent NFT, creates session key.
+
+```typescript
+const result = await client.onboard(
+  {
+    agentURI: JSON.stringify({
+      name: "My Agent",
+      description: "AI data agent",
+      version: "1.0.0",
+    }),
+    validDays: 30,
+    sessionRule: {
+      timeWindow: 86400n,              // 1-day rate window
+      budget: parseUnits("10.0", 18), // 10 USDT lifetime budget
+    },
+  },
+  (step) => console.log(`→ ${step}`)  // Progress callback
+);
+
+console.log(result.agentId);           // "1"
+console.log(result.aaWalletAddress);   // "0xdef..."
+console.log(result.sessionKeyAddress); // "0x875..."
+console.log(result.sessionId);         // bytes32 session ID
+result.txHashes.forEach(tx => console.log(tx.step, tx.hash));
+```
+
+## Payments
+
+### `fetchWithPayment(url, requestInit, options?)`
+
+Drop-in replacement for `fetch` that handles x402 automatically.
+
+```typescript
+const response = await client.fetchWithPayment(
+  "http://localhost:4000/api/data/protocol-report",
+  { method: "GET" },
+  { paymentMode: "perCall" }
+);
+
+const data = await response.json();
+```
+
+### `callPaidApi(options)`
+
+Lower-level paid call with explicit configuration.
+
+```typescript
+const { data, receipt, channelId } = await client.callPaidApi({
+  url: "http://localhost:4000/api/data/protocol-report",
+  method: "GET",
+  paymentMode: "perCall",  // or "channel", "batch", "stream", "auto"
+  maxAmount: parseUnits("1.0", 18),
+});
+```
+
+## Channels
+
+### `openChannel(options)`
+
+Open a new payment channel.
+
+```typescript
+const channel = await client.openChannel({
+  provider: "0xProviderAddress",
+  token: DM_USDT_TOKEN,
+  deposit: parseUnits("5.0", 18),
+  maxSpend: parseUnits("4.5", 18),
+  maxPerCall: parseUnits("0.5", 18),
+  maxDuration: 3600,
+  mode: "prepaid",
+});
+```
+
+### `callOnChannel(channelId, url, options?)`
+
+Make a call through an existing channel.
+
+```typescript
+const response = await client.callOnChannel(
+  channel.channelId,
+  "http://localhost:4000/api/stream/intelligence",
+  { method: "GET" }
+);
+```
+
+### `initiateSettlement(channelId)`
+
+Start channel settlement.
+
+```typescript
+await client.initiateSettlement(channel.channelId);
+```
+
+### `finalizeChannel(channelId)`
+
+Force-finalize after challenge window expires.
+
+```typescript
+await client.finalizeChannel(channel.channelId);
+```
+
+## Wallet Operations
+
+### `getOwnerAAWalletAddress()`
+
+Get the AA wallet address for the current EOA.
+
+```typescript
+const aaWallet = await client.getOwnerAAWalletAddress();
+```
+
+### `getDepositedBalance(token?, walletAddress?)`
+
+Check deposited balance in the AA wallet.
+
+```typescript
+const balance = await client.getDepositedBalance(undefined, aaWallet);
+// Returns BigInt in token units (18 decimals for DmUSDT)
+
+const formatted = formatUnits(balance, 18); // "4.50"
+```
+
+### `deposit(token, amount)`
+
+Fund the AA wallet.
+
+```typescript
+await client.deposit(DM_USDT_TOKEN, parseUnits("10.0", 18));
+```
+
+### `withdraw(token, amount)`
+
+Withdraw from AA wallet to EOA.
+
+```typescript
+await client.withdraw(DM_USDT_TOKEN, parseUnits("5.0", 18));
+```
+
+## Identity Queries
+
+### `getAgentsByOwner(address)`
+
+```typescript
+const agents = await client.getAgentsByOwner(eoaAddress);
+// Returns: { agentId, metadata, active, aaWallet }[]
+```
+
+### `getSessionsByAgent(agentId)`
+
+```typescript
+const sessions = await client.getSessionsByAgent("1");
+// Returns: { sessionKey, status, validUntil, valueLimit, maxLimit }[]
+```
+
+### `getChannelsByAgent(agentId)`
+
+```typescript
+const channels = await client.getChannelsByAgent("1");
+// Returns: Channel[] with status, deposit, settledAmount, etc.
+```
+
+### `getPaymentsByAgent(agentId)`
+
+```typescript
+const payments = await client.getPaymentsByAgent("1");
+// Returns: Payment[] with amount, recipient, type, txHash, etc.
+```
+
+## Full Method Reference
+
+See [SDK API Reference →](../reference/sdk-api) for complete method signatures with types.

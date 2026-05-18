@@ -1,0 +1,115 @@
+---
+sidebar_position: 4
+title: Deployment
+description: Deploying the Kite subgraph to The Graph or Goldsky
+---
+
+# Subgraph Deployment
+
+## Prerequisites
+
+- [Goldsky CLI](https://docs.goldsky.com/introduction) or Graph CLI
+- Goldsky API key (for Goldsky deployment)
+
+## Project Structure
+
+```
+subgraph/
+├── schema.graphql       ← Entity definitions
+├── subgraph.yaml        ← Data source config, event handlers
+├── networks.json        ← Network-specific contract addresses
+├── src/
+│   ├── identity.ts      ← IdentityRegistry event handlers
+│   ├── channel.ts       ← PaymentChannel event handlers
+│   ├── wallet.ts        ← KiteAAWallet event handlers
+│   └── attestation.ts   ← AttestationRegistry event handlers
+└── tests/               ← Matchstick unit tests
+```
+
+## Generate Types
+
+After any schema change:
+
+```bash
+cd subgraph
+npm run codegen
+```
+
+## Build
+
+```bash
+npm run build
+```
+
+## Deploy to Goldsky
+
+```bash
+# Login
+goldsky login
+
+# Deploy
+goldsky subgraph deploy kite-agentic-pay/1.0.0 \
+  --path ./build \
+  --network kite-testnet \
+  --from-abi ./abis
+```
+
+Or using the npm script:
+
+```bash
+npm run deploy:goldsky
+```
+
+## Deploy to The Graph (Hosted)
+
+```bash
+# Login
+graph auth --product hosted-service <YOUR_ACCESS_TOKEN>
+
+# Deploy
+graph deploy --product hosted-service <GITHUB_USER>/kite-agentic-pay
+```
+
+## Updating Contracts
+
+If contract addresses change (e.g., after a redeploy), update `networks.json`:
+
+```json
+{
+  "kite-testnet": {
+    "IdentityRegistry": {
+      "address": "0xE4C30627C02791bF12241021f2fC320b43991cb1",
+      "startBlock": 1234567
+    },
+    "PaymentChannel": {
+      "address": "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb",
+      "startBlock": 1234568
+    },
+    "AttestationRegistry": {
+      "address": "0x2F72b719679FD0b92712D03a1E16909F18d55660",
+      "startBlock": 1234569
+    }
+  }
+}
+```
+
+Then redeploy with a new version:
+
+```bash
+goldsky subgraph deploy kite-agentic-pay/1.0.1 ...
+```
+
+## Running Locally
+
+```bash
+cd subgraph
+docker-compose up
+npm run deploy:local
+```
+
+This starts a local Graph node with PostgreSQL and IPFS.
+
+## Related Pages
+
+- [Indexer Overview →](./overview)
+- [Indexer Entities →](./entities)

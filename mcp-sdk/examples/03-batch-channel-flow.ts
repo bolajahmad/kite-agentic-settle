@@ -34,8 +34,8 @@ import { createLogger } from "./lib/logger.js";
 import { createDemoClient, formatUsdc, parseUsdc } from "./lib/setup.js";
 
 // Demo configuration
-const AGENT_ID = "3";
-const SESSION_KEY = "0x875255dCe60F03fa645E64792701A57D1B1c678A";
+const AGENT_ID = "8";
+const SESSION_KEY = "0x6869Be52272d679eC4D4020796EdE9091546Cdc3";
 const MAX_CALLS = 10;
 
 export async function run() {
@@ -143,8 +143,9 @@ export async function run() {
       mode: "prepaid",
     });
 
-    const { txHash: openTxHash, channelId: newChannelId } =
-      await client.getContractService().openChannelViaVaultBatch(
+    const { txHash: openTxHash, channelId: newChannelId } = await client
+      .getContractService()
+      .openChannelViaVaultBatch(
         client.sessionKeyAddress as `0x${string}`,
         vaultAddress as `0x${string}`,
         providerAddress,
@@ -163,7 +164,9 @@ export async function run() {
     }
     const channelId = newChannelId;
 
-    logger.success("Channel opened on-chain (via ClientAgentVault batch — gas sponsored)");
+    logger.success(
+      "Channel opened on-chain (via ClientAgentVault batch — gas sponsored)",
+    );
     logger.data("Channel Info", {
       channelId: channelId,
       txHash: openTxHash,

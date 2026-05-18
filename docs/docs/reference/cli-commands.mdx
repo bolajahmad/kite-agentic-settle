@@ -1,0 +1,213 @@
+---
+sidebar_position: 2
+title: CLI Commands
+description: All kite CLI commands and flags
+---
+
+# CLI Commands
+
+## Global
+
+```
+kite [command] [options]
+  --help     Show help
+  --version  Show version
+```
+
+---
+
+## `kite init`
+
+Initialize credential storage.
+
+```
+kite init [options]
+  --key <privateKey>   Import an existing private key
+  --output <path>      Path for config.json (default: ~/.kite-agent-pay/config.json)
+```
+
+---
+
+## `kite onboard`
+
+Register a new agent.
+
+```
+kite onboard [options]
+  --name <string>         Agent display name (required)
+  --category <string>     Agent category (default: "general")
+  --uri <url>             Agent metadata URI
+  --days <number>         Session validity in days (default: 30)
+  --budget <number>       Session budget in USDT (default: 10)
+  --max-per-call <number> Max per-call spend in USDT (default: 1)
+```
+
+---
+
+## `kite whoami`
+
+Show current agent identity.
+
+```
+kite whoami
+  --agent <id>   Show a specific agent (default: first registered)
+```
+
+---
+
+## `kite agent`
+
+```
+kite agent register    Register agent on-chain (low-level)
+kite agent list        List registered agents for your EOA
+kite agent info <id>   Show agent details
+```
+
+---
+
+## `kite session`
+
+```
+kite session start [options]
+  --agent <id>         Agent ID
+  --days <number>      Validity period
+  --budget <number>    USDT budget
+  --max-per-call <n>   USDT per call limit
+
+kite session revoke [options]
+  --key <address>      Session key address to revoke
+
+kite session list [options]
+  --agent <id>         Filter by agent
+```
+
+---
+
+## `kite resolve`
+
+Resolve an agent's on-chain record.
+
+```
+kite resolve <agentId|address>
+```
+
+---
+
+## `kite call`
+
+Make a paid API call.
+
+```
+kite call [options]
+  --url <url>          Target URL (required)
+  --agent <id>         Agent ID to use
+  --channel <id>       Use a specific channel
+  --method <method>    HTTP method (default: GET)
+  --body <json>        Request body (JSON)
+```
+
+---
+
+## `kite balance`
+
+Check AA wallet balance.
+
+```
+kite balance [options]
+  --agent <id>         Agent ID
+  --token <address>    Token address (default: DmUSDT)
+```
+
+---
+
+## `kite fund`
+
+Deposit tokens into AA wallet.
+
+```
+kite fund <amount> [options]
+  --agent <id>         Agent ID
+  --token <address>    Token (default: DmUSDT)
+```
+
+---
+
+## `kite withdraw`
+
+Withdraw tokens from AA wallet.
+
+```
+kite withdraw <amount> [options]
+  --agent <id>         Agent ID
+  --to <address>       Recipient (default: EOA)
+```
+
+---
+
+## `kite usage`
+
+Show payment history.
+
+```
+kite usage [options]
+  --agent <id>         Agent ID
+  --limit <n>          Number of records (default: 20)
+  --since <date>       Filter by date (ISO 8601)
+```
+
+---
+
+## `kite channel`
+
+```
+kite channel list [--agent <id>]
+kite channel open [options]
+  --provider <address>   Provider EOA
+  --deposit <usdt>       Deposit amount
+  --max-per-call <usdt>  Max per call
+  --duration <seconds>   Max duration (default: 3600)
+
+kite channel settle <channelId>
+kite channel finalize <channelId>
+kite channel info <channelId>
+```
+
+---
+
+## `kite run`
+
+Start the MCP server.
+
+```
+kite run [options]
+  --port <number>      Port (default: 3100)
+  --transport <type>   sse | stdio | streamable-http (default: sse)
+  --agent <id>         Default agent ID
+```
+
+---
+
+## `kite simulate`
+
+Run a simulation scenario.
+
+```
+kite simulate <scenario> [options]
+  Scenarios: percall | session | batch | stream | settle | multi
+
+  --agent <id>         Agent ID
+  --provider <address> Provider address
+  --calls <n>          Number of calls (for batch/stream)
+```
+
+---
+
+## `kite signer`
+
+Low-level signing utilities.
+
+```
+kite signer sign <message>      Sign arbitrary message
+kite signer verify <message> <sig>
+kite signer address              Show session key address
+```

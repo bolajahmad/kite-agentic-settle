@@ -1,0 +1,70 @@
+---
+sidebar_position: 2
+title: kite init
+description: Store your EOA credential locally for CLI and SDK use
+---
+
+# kite init
+
+Stores your EOA private key or seed phrase in the local credential store.
+
+## Usage
+
+```bash
+npx kite init
+```
+
+Prompts for your seed phrase or private key (input is hidden):
+
+```
+  KiteSettler — EOA Setup
+  ──────────────────────────────────────────────────
+  Enter your EOA seed phrase or private key.
+  This will be stored locally in a dedicated config file (never committed to git).
+
+  Seed phrase or private key: ████████████████
+  Stored credential in /Users/you/.kite-agent-pay/config.json
+
+  Next steps:
+    npx kite onboard --name "My Agent"   — register agent on-chain
+    npx kite whoami                      — verify identity
+```
+
+## What It Does
+
+1. Reads your seed phrase or private key from stdin (hidden)
+2. Stores it in `~/.kite-agent-pay/config.json` with file permissions `0600`
+3. Never transmits it to any server
+
+## Storage Location
+
+```
+~/.kite-agent-pay/
+├── config.json    ← EOA credential (set by kite init)
+└── vars.json      ← Agent IDs, session keys (set by kite onboard)
+```
+
+Both files are mode `0600` — owner read/write only.
+
+## Clearing Credentials
+
+```bash
+npx kite clean
+```
+
+This deletes `config.json` and `vars.json`. Use this when switching accounts or decommissioning a machine.
+
+:::warning
+`kite clean` permanently deletes your local credentials. Make sure you have your seed phrase backed up before running it.
+:::
+
+## Security Notes
+
+- The credential is stored as-is (not encrypted at rest). Protect your home directory.
+- The file is never committed to git if you follow `.gitignore` best practices.
+- If your machine is compromised, session keys are more at risk than the EOA credential (session keys have bounded spending limits; the EOA is only used for onboarding transactions).
+
+## Related
+
+- [kite onboard →](./agents) — Next step after init
+- [Security: Session Security →](../security/session-security) — How keys are protected

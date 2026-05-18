@@ -1,0 +1,108 @@
+---
+sidebar_position: 5
+title: Decision Engine
+description: The auto-approve and AI-based payment decision system
+---
+
+# Decision Engine
+
+## What Is the Decision Engine?
+
+The **decision engine** (`src/decide.ts`) is the component that determines whether a payment should be approved before it is signed. It runs locally and can be configured with rules, thresholds, and AI-driven policies.
+
+This is a significant differentiator from simple payment SDKs — Kite agents do not blindly approve every payment request. They evaluate it first.
+
+## Why It Matters
+
+Without a decision engine:
+- A malicious provider could request 100 USDT for a call that should cost 0.40 USDT
+- A slow provider could issue many small requests that collectively exceed your budget
+- A rogue MCP tool could redirect payments to an unexpected recipient
+
+With a decision engine, the SDK evaluates each payment against your configured rules before signing.
+
+## Basic Usage
+
+```typescript
+import { decide } from "@kite-agentic-pay/sdk";
+
+const decision = await decide({
+  amount: parseUnits("0.40", 18),
+  recipient: "0xProviderAddress",
+  token: DM_USDT_TOKEN,
+  sessionKey: "0xSessionKey",
+  agentId: "1",
+}, {
+  maxPerCall: parseUnits("1.0", 18),    // reject if > 1 USDT per call
+  allowedRecipients: ["0xProviderA", "0xProviderB"],
+  requireApprovalAbove: parseUnits("5.0", 18),  // ask human above 5 USDT
+});
+
+if (decision.approved) {
+  // proceed with signing
+} else {
+  console.error("Payment rejected:", decision.reason);
+}
+```
+
+## Decision Rules
+
+| Rule | Type | Description |
+|---|---|---|
+| `maxPerCall` | BigInt | Reject if amount exceeds this cap |
+| `allowedRecipients` | address[] | Reject if recipient not in list |
+| `blockedRecipients` | address[] | Reject if recipient in list |
+| `requireApprovalAbove` | BigInt | Pause and request human approval if amount exceeds cap |
+| `autoApprove` | boolean | Skip evaluation and approve everything (default: false) |
+
+## AI-Driven Decisions
+
+The decision engine can be extended with an AI policy function:
+
+```typescript
+import { decide } from "@kite-agentic-pay/sdk";
+
+const decision = await decide(paymentRequest, {
+  aiPolicy: async (request) => {
+    // Your custom logic — could call an AI model
+    const isReasonable = request.amount <= parseUnits("2.0", 18);
+    return {
+      approved: isReasonable,
+      reason: isReasonable ? "Within threshold" : "Amount too high",
+    };
+  },
+});
+```
+
+This allows agents to implement spend policies that go beyond simple numeric thresholds — for example, allowing higher amounts for trusted providers or blocking payments during off-hours.
+
+## Checking Rules
+
+```typescript
+import { checkRules } from "@kite-agentic-pay/sdk";
+
+const result = checkRules(paymentRequest, sessionRules);
+// Returns: { passed: boolean, violations: string[] }
+```
+
+## Integration with KiteSettleClient
+
+The decision engine is invoked automatically inside `fetchWithPayment` and `callPaidApi` when rules are configured:
+
+```typescript
+const client = await KiteSettleClient.create({
+  credential,
+  paymentPolicy: {
+    maxPerCall: parseUnits("1.0", 18),
+    allowedRecipients: [PROVIDER_ADDRESS],
+  },
+});
+
+// Payment will be evaluated against the policy before signing
+await client.fetchWithPayment(url, {}, { paymentMode: "perCall" });
+```
+
+## Related Pages
+
+- [Session Keys →](../concepts/session-keys) — The on-chain equivalent of decision limits
+- [Security: Threat Model →](../security/threat-model) — What threats decision rules help mitigate

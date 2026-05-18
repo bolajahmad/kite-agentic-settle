@@ -1,0 +1,126 @@
+---
+sidebar_position: 5
+title: Deploy a Provider
+description: How to deploy the Kite backend provider to production
+---
+
+# Guide: Deploy a Provider
+
+This guide covers deploying the reference backend provider to a production server.
+
+## What You're Deploying
+
+The backend provider (`backend/`) is a Node.js Express server that:
+- Accepts x402 payments from agents
+- Supports payment channel gating
+- Runs background watchers for channel activation and settlement
+
+## Prerequisites
+
+- A VPS or cloud instance with Node.js 18+
+- A provider EOA private key (this is your payment receiving address)
+- USDT/DmUSDT to fund initial operations (optional)
+
+## Step 1: Clone and Install
+
+```bash
+git clone <your-fork>
+cd backend
+npm install
+npm run build
+```
+
+## Step 2: Environment Configuration
+
+Create `.env`:
+
+```env
+NODE_ENV=production
+PORT=4000
+PROVIDER_PRIVATE_KEY=0xYourPrivateKey
+PROVIDER_ADDRESS=0xYourEOAAddress
+RPC_URL=https://rpc-testnet.gokite.ai
+CHAIN_ID=2368
+BUNDLER_URL=https://bundler-service.staging.gokite.ai/rpc/
+```
+
+:::warning Private Key Security
+Never commit `.env` to version control. Use environment variable injection from your hosting platform (Railway, Fly.io, Heroku, etc.).
+:::
+
+## Step 3: Start with PM2
+
+```bash
+npm install -g pm2
+pm2 start dist/server.js --name kite-provider
+pm2 startup
+pm2 save
+```
+
+## Step 4: Nginx Reverse Proxy
+
+```nginx
+server {
+    listen 80;
+    server_name api.yourprovider.com;
+
+    location / {
+        proxy_pass http://localhost:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+Enable SSL with Certbot:
+
+```bash
+certbot --nginx -d api.yourprovider.com
+```
+
+## Step 5: Register as a Provider
+
+Register your provider's AA wallet on-chain:
+
+```bash
+npx kite agent register --name "My Provider" --category provider --url https://api.yourprovider.com
+```
+
+Agents can now discover your provider by querying the subgraph.
+
+## Step 6: Health Check
+
+```bash
+curl https://api.yourprovider.com/health
+# {"status":"ok","block":123456}
+```
+
+## Step 7: Monitoring
+
+The background watchers log activity to stdout. With PM2:
+
+```bash
+pm2 logs kite-provider
+```
+
+Key log patterns to watch:
+- `Channel activated:` — agent opened a channel to you
+- `Settlement signed:` — you signed a cooperative settlement
+- `Force finalize:` — a channel was force-finalized (check receipt records)
+
+## Scaling Considerations
+
+The reference backend is single-process. For production scale:
+- Use Redis for channel receipt storage instead of local files
+- Run multiple worker processes behind a load balancer
+- Ensure receipt storage is shared across all workers (or use sticky sessions)
+
+## Related Pages
+
+- [Backend Provider Reference →](../backend/server)
+- [Provider API Reference →](../backend/provider-api)
+- [Build a Paid API →](./build-a-paid-api)

@@ -1,0 +1,177 @@
+---
+sidebar_position: 4
+title: Payment Commands
+description: kite call, kite balance, kite fund, kite withdraw, kite channel
+---
+
+# Payment Commands
+
+## kite call
+
+Make a single paid API call using x402.
+
+```bash
+npx kite call --url <url> [options]
+```
+
+**Options:**
+
+| Flag | Description |
+|---|---|
+| `--url <url>` | Target endpoint (required) |
+| `--method <method>` | HTTP method (default: `GET`) |
+| `--max <amount>` | Maximum amount to pay per call |
+| `--data <json>` | Request body JSON |
+
+**Example:**
+
+```bash
+npx kite call --url http://localhost:4000/api/data/protocol-report
+```
+
+Output:
+
+```
+  Calling http://localhost:4000/api/data/protocol-report...
+  Payment: 0.40 USDT
+  Receipt: seq=1, cumCost=0.40
+  ✓ 200 OK
+
+  { "report": "Protocol metrics as of 2025-01-01..." }
+```
+
+---
+
+## kite balance
+
+Check your AA wallet's deposited balance.
+
+```bash
+npx kite balance [--address <addr>] [--token <addr>]
+```
+
+```
+  AA Wallet: 0xdef456...
+  Balance:   9.60 USDT
+```
+
+---
+
+## kite fund
+
+Send tokens from your EOA to your AA wallet.
+
+```bash
+npx kite fund [amount]
+```
+
+```bash
+npx kite fund 20
+```
+
+```
+  Approving 20 USDT transfer...
+  Depositing to AA Wallet 0xdef456...
+  ✓ Funded. New balance: 20.00 USDT
+```
+
+---
+
+## kite withdraw
+
+Withdraw funds from your AA wallet back to your EOA.
+
+```bash
+npx kite withdraw [amount]
+```
+
+---
+
+## kite usage
+
+View payment history for your agent.
+
+```bash
+npx kite usage [--agent <id>] [--limit 20]
+```
+
+```
+  Agent 1 Payment History
+  ──────────────────────────────────────────────────
+  2025-01-01 14:22  x402   0.40 USDT  protocol-report   0xabc...tx
+  2025-01-01 14:23  x402   0.40 USDT  market/BTCUSDT    0xdef...tx
+  2025-01-01 14:25  ch     1.20 USDT  (batch of 3)      0xghi...tx
+  ──────────────────────────────────────────────────
+  Total spent: 2.00 USDT across 4 calls
+```
+
+---
+
+## kite channel
+
+Manage payment channels.
+
+```bash
+npx kite channel <subcommand>
+```
+
+**Subcommands:**
+
+### `kite channel open`
+
+```bash
+npx kite channel open \
+  --provider 0xProviderAddress \
+  --deposit 5 \
+  --max-per-call 0.5 \
+  --duration 3600
+```
+
+### `kite channel call`
+
+Make a call through an open channel.
+
+```bash
+npx kite channel call --channel <id> --url <url>
+```
+
+### `kite channel list`
+
+```bash
+npx kite channel list
+```
+
+```
+  CHANNEL ID   STATUS   DEPOSIT   SPENT   PROVIDER
+  0xabc...     Active   5.00      1.20    0xProv...
+```
+
+### `kite channel status`
+
+```bash
+npx kite channel status --channel <id>
+```
+
+### `kite channel close`
+
+Initiate settlement (cooperative close).
+
+```bash
+npx kite channel close --channel <id>
+```
+
+### `kite channel force-close`
+
+Force finalize after challenge window.
+
+```bash
+npx kite channel force-close --channel <id>
+```
+
+---
+
+## Related Pages
+
+- [kite runtime →](./runtime) — Run MCP server
+- [SDK Channels →](../sdk/channels) — Programmatic channel management
+- [Channel Settlement →](../channels/settlement)

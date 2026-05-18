@@ -1,0 +1,159 @@
+---
+sidebar_position: 3
+title: Build a Paid API
+description: How to build a price-gated API that accepts Kite payments
+---
+
+# Guide: Build a Paid API
+
+This guide walks through building a provider — an API that requires Kite payments before returning data.
+
+## What You'll Build
+
+An Express API with:
+- An x402-gated endpoint (per-call payments)
+- A channel-gated endpoint (batch/stream payments)
+- A background watcher that activates channels automatically
+
+## Step 1: Setup
+
+```bash
+mkdir my-paid-api && cd my-paid-api
+npm init -y
+npm install express @kite-agentic-pay/sdk
+```
+
+## Step 2: Configure Provider Identity
+
+Your provider needs an EOA that receives payments. Set it in `.env`:
+
+```env
+PROVIDER_PRIVATE_KEY=0xYourProviderPrivateKey
+PORT=4000
+```
+
+## Step 3: x402 Endpoint
+
+```typescript
+import express from "express";
+import { x402Middleware } from "@kite-agentic-pay/sdk/middleware";
+import { parseUnits } from "viem";
+import { config } from "dotenv";
+
+config();
+
+const app = express();
+
+const PRICE = parseUnits("0.40", 18);  // 0.40 USDT
+
+app.get(
+  "/api/report",
+  x402Middleware({
+    price: PRICE,
+    providerAddress: process.env.PROVIDER_ADDRESS as `0x${string}`,
+  }),
+  (req, res) => {
+    // Only runs if payment validated
+    res.json({
+      report: "Protocol report data here...",
+      timestamp: Date.now(),
+    });
+  }
+);
+
+app.listen(4000);
+console.log("Provider API running on port 4000");
+```
+
+## Step 4: Channel Endpoint
+
+```typescript
+import { channelMiddleware } from "@kite-agentic-pay/sdk/middleware";
+
+const PRICE_PER_CALL = parseUnits("0.10", 18);
+
+app.get(
+  "/api/stream",
+  channelMiddleware({
+    pricePerCall: PRICE_PER_CALL,
+    providerAddress: process.env.PROVIDER_ADDRESS as `0x${string}`,
+  }),
+  (req, res) => {
+    res.json({ data: "Stream data chunk", seq: req.channelSeq });
+  }
+);
+```
+
+## Step 5: Channel Activation Watcher
+
+Without this, agents can open channels but they'll never activate:
+
+```typescript
+import { ChannelWatcher } from "@kite-agentic-pay/sdk";
+
+const watcher = new ChannelWatcher({
+  providerKey: process.env.PROVIDER_PRIVATE_KEY as `0x${string}`,
+  pollInterval: 15_000,  // 15 seconds
+  onChannelOpened: async (channelId) => {
+    console.log(`Activating channel ${channelId}`);
+    // SDK handles the activateChannel() call
+  },
+});
+
+watcher.start();
+console.log("Channel watcher started");
+```
+
+## Step 6: Settlement Watcher (Optional)
+
+For automatic cooperative settlement:
+
+```typescript
+import { SettlementWatcher } from "@kite-agentic-pay/sdk";
+
+const settlementWatcher = new SettlementWatcher({
+  providerKey: process.env.PROVIDER_PRIVATE_KEY as `0x${string}`,
+  onSettlementRequested: async (channelId, requestedAmount) => {
+    // Verify against your local receipt records
+    const localReceipt = getLocalReceipt(channelId);
+    if (localReceipt && localReceipt.cumulativeCost >= requestedAmount) {
+      // Approve — agent's claim matches our records
+      return requestedAmount;
+    }
+    // Dispute — submit our receipt instead
+    return localReceipt?.cumulativeCost ?? 0n;
+  },
+});
+
+settlementWatcher.start();
+```
+
+## Step 7: Test It
+
+Start your provider:
+
+```bash
+node server.js
+```
+
+Test from another terminal using the CLI:
+
+```bash
+npx kite call --url http://localhost:4000/api/report
+```
+
+## What the Middleware Does
+
+`x402Middleware`:
+1. Returns 402 with challenge JSON on first request
+2. Validates `X-PAYMENT` header on second request
+3. Verifies the session key is active on-chain
+4. Checks the payment amount matches the configured price
+5. Calls `next()` if valid — your handler runs
+
+## Related Pages
+
+- [Backend Provider Reference →](../backend/server)
+- [Provider API Reference →](../backend/provider-api)
+- [x402 Payments Concept →](../concepts/x402-payments)
+- [Channel Opening →](../channels/opening)

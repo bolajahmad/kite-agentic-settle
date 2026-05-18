@@ -1,0 +1,100 @@
+---
+sidebar_position: 4
+title: AttestationRegistry
+description: On-chain anchoring of Merkle roots for receipt auditing
+---
+
+# AttestationRegistry
+
+The `AttestationRegistry` contract allows providers and agents to anchor cryptographic proofs of payment receipt batches on-chain. This enables auditable payment history without storing every receipt on-chain.
+
+**Deployed:** `0x2F72b719679FD0b92712D03a1E16909F18d55660`  
+**Network:** Kite AI Testnet (chain ID 2368)
+
+## What It Does
+
+For any channel, either the agent or provider can compute a Merkle root of all receipts and anchor it on-chain. This creates a tamper-proof audit trail:
+
+- The Merkle root proves a set of receipts existed at a given block
+- Individual receipts can be verified against the root using Merkle proofs
+- Useful for accounting, disputes, and cross-device recovery
+
+## Functions
+
+### `anchorMerkleRoot(channelId, merkleRoot, receiptCount)`
+
+Submit a Merkle root for a batch of receipts.
+
+```solidity
+function anchorMerkleRoot(
+    bytes32 channelId,
+    bytes32 merkleRoot,
+    uint256 receiptCount
+) external;
+```
+
+Emits `MerkleRootAnchored(channelId, merkleRoot, receiptCount, submitter, blockNumber)`.
+
+### `verifyReceipt(channelId, merkleRoot, leaf, proof)`
+
+Verify that a receipt is included in an anchored Merkle root.
+
+```solidity
+function verifyReceipt(
+    bytes32 channelId,
+    bytes32 merkleRoot,
+    bytes32 leaf,
+    bytes32[] calldata proof
+) external view returns (bool);
+```
+
+### `getAnchors(channelId)`
+
+Get all anchored Merkle roots for a channel.
+
+```solidity
+function getAnchors(bytes32 channelId) external view returns (
+    bytes32[] memory roots,
+    uint256[] memory counts,
+    uint256[] memory blockNumbers
+);
+```
+
+## SDK Usage
+
+```typescript
+// Anchor current receipt batch
+await client.anchorReceipts(channelId);
+// Computes Merkle root from local receipts.json and submits
+
+// Verify a specific receipt is included
+const proof = client.generateMerkleProof(channelId, receiptIndex);
+const valid = await client.verifyReceiptOnChain(channelId, receipt, proof);
+```
+
+## When to Use
+
+| Scenario | Recommendation |
+|---|---|
+| Short channels (< 10 calls) | Skip — not worth the gas |
+| Long channels (> 50 calls) | Anchor after every 20–30 receipts |
+| High-value channels | Anchor after every call (belt and suspenders) |
+| Recovery scenario | Anchor before settlement |
+
+## Events
+
+```solidity
+event MerkleRootAnchored(
+    bytes32 indexed channelId,
+    bytes32 merkleRoot,
+    uint256 receiptCount,
+    address submitter,
+    uint256 blockNumber
+);
+```
+
+## Related Pages
+
+- [Channel Receipts →](../channels/receipts)
+- [Channel Recovery →](../channels/recovery)
+- [PaymentChannel Contract →](./payment-channel)

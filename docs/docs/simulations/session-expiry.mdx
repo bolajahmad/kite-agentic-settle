@@ -1,0 +1,76 @@
+---
+sidebar_position: 2
+title: Session-Bound Channel
+description: Demo 2 — Session key bound to a channel with automatic expiry
+---
+
+# Demo 2: Session-Bound Channel
+
+This demo shows how a session key can be scoped to a specific channel — useful when you want different agents or roles to have separate payment budgets.
+
+**Source:** `mcp-sdk/examples/02-session-bound-channel.ts`
+
+## What It Does
+
+1. Opens a channel with terms
+2. Creates a session key that is bound to that specific channel
+3. Makes calls through the channel using the bound session key
+4. Demonstrates that the session cannot be used outside the channel
+
+## Running It
+
+```bash
+cd mcp-sdk
+npm run demo 2
+```
+
+## Expected Output
+
+```
+  Demo 2: Session-Bound Channel
+  ─────────────────────────────────────────────────
+  Agent ID:   1
+  
+  → Opening channel...
+    Channel ID: 0xabc...
+    Deposit: 5.00 USDT
+  ✓ Channel active
+
+  → Creating session key bound to channel...
+    Session Key: 0x875...
+    Valid for: 30 days
+    Budget: 5.00 USDT (same as channel deposit)
+  ✓ Session registered on-chain
+
+  → Making 3 calls on channel...
+    Call 1: ✓ (seq=1, cumCost=0.40)
+    Call 2: ✓ (seq=2, cumCost=0.80)
+    Call 3: ✓ (seq=3, cumCost=1.20)
+  
+  → Attempting call outside channel (should fail)...
+    ✗ Rejected: Session not authorized for this provider
+  
+  → Channel summary:
+    Calls made: 3
+    Total spent: 1.20 USDT
+    Remaining deposit: 3.80 USDT
+```
+
+## When to Use Session-Bound Channels
+
+| Use Case | Pattern |
+|---|---|
+| Multi-agent system | One session key per agent, each bound to separate channels |
+| Role-based access | Read-only agent has capped session budget |
+| API key per client | Separate channel per customer, each with own session |
+
+## Key Points
+
+- Session keys can be scoped to specific providers (by putting provider address in the session rule)
+- The session budget and channel deposit are independent caps — both enforce separately
+- Session binding is optional; most channels use the default agent session key
+
+## Related Pages
+
+- [Session Keys Concept →](../concepts/session-keys)
+- [Demo 3: Batch Flow →](./batch-flow)

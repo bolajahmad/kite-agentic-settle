@@ -1,0 +1,109 @@
+---
+sidebar_position: 2
+title: Claude Desktop
+description: Connect Claude Desktop to Kite via MCP SSE transport
+---
+
+# Claude Desktop Integration
+
+Claude Desktop can connect to the Kite MCP server via SSE. Once connected, Claude can make paid API calls, manage channels, and check balances on your behalf — using your locally stored session key.
+
+## Step 1: Start the MCP Server
+
+```bash
+npx kite run --port 3100 --transport sse
+```
+
+Verify it is running:
+
+```bash
+curl http://localhost:3100/api/tools/schema | head -20
+```
+
+## Step 2: Configure Claude Desktop
+
+Find the configuration file:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+Add the Kite server:
+
+```json
+{
+  "mcpServers": {
+    "kite": {
+      "url": "http://localhost:3100/mcp/sse"
+    }
+  }
+}
+```
+
+If you have other MCP servers already configured, add `"kite"` alongside them.
+
+## Step 3: Restart Claude Desktop
+
+Claude Desktop re-reads its config at startup. Quit and reopen the app.
+
+## Step 4: Verify Tools Are Available
+
+In a new conversation, check the tools list. You should see Kite tools. Then try:
+
+> "Check my Kite balance for agent ID 1."
+
+Claude will call `check_balance` and report back.
+
+## Step 5: Make a Paid API Call
+
+Start the backend (provider side):
+
+```bash
+cd backend && npm run dev
+```
+
+Then ask Claude:
+
+> "Call the protocol report endpoint at http://localhost:4000/api/data/protocol-report using agent ID 1."
+
+Claude will:
+1. Call `call_paid_api` with `{ url: "...", agentId: "1", autopay: true }`
+2. Your MCP server receives the call
+3. The SDK fetches the URL, handles the 402 challenge
+4. Signs a payment with your session key
+5. Receives the API response
+6. Returns it to Claude
+
+Claude will show you the response and mention that it cost, e.g., `0.40 USDT`.
+
+## Stdio Transport (Alternative)
+
+If you prefer stdio (Claude runs the server as a subprocess):
+
+```json
+{
+  "mcpServers": {
+    "kite": {
+      "command": "npx",
+      "args": ["kite", "run", "--transport", "stdio"]
+    }
+  }
+}
+```
+
+With stdio, you do not need to start the server manually — Claude starts it when needed.
+
+## Troubleshooting
+
+| Issue | Fix |
+|---|---|
+| Tools not appearing | Confirm server is running: `curl localhost:3100/api/tools/schema` |
+| `Session not found` | Run `npx kite onboard` and restart the server |
+| `Insufficient balance` | Run `npx kite fund 10` |
+| `Session expired` | Run `npx kite session start --agent 1` |
+| Connection refused | Check the port matches the config (default: 3100) |
+
+## Related Pages
+
+- [MCP Tool Reference →](./tool-reference) — All 7 tools with full parameter tables
+- [MCP Overview →](./overview) — Transport options
+- [Quickstart →](../introduction/quickstart) — Full setup from scratch
