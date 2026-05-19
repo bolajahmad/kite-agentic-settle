@@ -24,6 +24,10 @@ import { homedir } from "node:os";
 
 const KITE_DIR = join(homedir(), ".kite-agent-pay");
 const VARS_FILE = join(KITE_DIR, "vars.json");
+// Dedicated config file for EOA credential (set by `kite init`).
+// Kept separate from vars.json so the credential is never co-mingled with
+// agent session keys and can be cleared independently.
+const CONFIG_FILE = join(KITE_DIR, "config.json");
 
 // ── Internal helpers ───────────────────────────────────────────────
 
@@ -137,7 +141,72 @@ export function resolveVar(value: string): string {
   // 3. Actionable error
   throw new Error(
     `Variable "${key}" is not set.\n` +
-      `  Run:  npx kite vars set ${key}\n` +
-      `  Or:   export ${key}="..."`
+      `  Run onboarding:  npx kite init  /  npx kite onboard\n` +
+      `  Or set env var:  export ${key}="..."`
   );
+}
+
+// ── EOA credential helpers (kite init) ────────────────────────────
+// The EOA private key / seed phrase stored by `kite init` is kept in a
+// separate file so it is never co-mingled with session/agent vars.
+
+function loadConfig(): Record<string, string> {
+  if (!existsSync(CONFIG_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveConfig(cfg: Record<string, string>): void {
+  ensureDir();
+  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2) + "\n", {
+    mode: 0o600,
+  });
+  chmodSync(CONFIG_FILE, 0o600);
+}
+
+/** Get the EOA credential stored by `kite init`. Falls back to PRIVATE_KEY env var. */
+/** Get the EOA credential stored by `kite init`. Falls back to PRIVATE_KEY env var.
+ *  Migration fallback: also reads from legacy vars.json if config.json is empty. */
+export function getCredential(): string | undefined {
+  // Primary: dedicated config.json
+  const fromConfig = loadConfig()["PRIVATE_KEY"];
+  if (fromConfig) return fromConfig;
+
+  // Env var
+  if (process.env.PRIVATE_KEY) return process.env.PRIVATE_KEY;
+
+  // Migration fallback: old location in vars.json
+  const fromVars = load()["PRIVATE_KEY"];
+  if (fromVars) return fromVars;
+
+  return undefined;
+}
+
+/** Store the EOA credential in the dedicated config file. */
+export function setCredential(value: string): void {
+  const cfg = loadConfig();
+  cfg["PRIVATE_KEY"] = value;
+  saveConfig(cfg);
+}
+
+/** Check whether an EOA credential is available (file or env). */
+export function hasCredential(): boolean {
+  return !!(loadConfig()["PRIVATE_KEY"] ?? process.env.PRIVATE_KEY);
+}
+
+/** Delete the stored EOA credential. Returns true if it existed. */
+export function clearCredential(): boolean {
+  const cfg = loadConfig();
+  if (!("PRIVATE_KEY" in cfg)) return false;
+  delete cfg["PRIVATE_KEY"];
+  saveConfig(cfg);
+  return true;
+}
+
+/** Absolute path to the dedicated credential config file. */
+export function getConfigPath(): string {
+  return CONFIG_FILE;
 }

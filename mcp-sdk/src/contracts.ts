@@ -4,9 +4,13 @@ import {
   encodeFunctionData,
   formatUnits,
   http,
+  zeroAddress,
+  type Hex,
   type PublicClient,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import {
+  clientAgentVaultAbi,
   erc20Abi,
   identityRegistryAbi,
   kiteAAWalletAbi,
@@ -14,6 +18,7 @@ import {
   walletFactoryAbi,
 } from "./abis.js";
 import type { ChannelState, KiteConfig } from "./types.js";
+import { getCredential } from "./vars.js";
 
 export class ContractService {
   private readonly client: PublicClient;
@@ -36,7 +41,97 @@ export class ContractService {
   }
 
   getKiteAAWalletAddress(): string {
-    return this.config.contracts.kiteAAWallet;
+    const wallet = this.config.contracts.kiteAAWallet;
+    if (!wallet) {
+      throw new Error(
+        "kiteAAWallet is not configured. Pass walletContract dynamically or set config.contracts.kiteAAWallet.",
+      );
+    }
+    return wallet;
+  }
+
+  async resolveWalletContractForSession(
+    sessionKey: string,
+  ): Promise<`0x${string}` | null> {
+    try {
+      const session = (await this.validateSession(sessionKey)) as readonly [
+        boolean,
+        bigint,
+        `0x${string}`,
+        `0x${string}`,
+        bigint,
+      ];
+      const walletContract = session[3];
+      if (
+        walletContract &&
+        walletContract !== "0x0000000000000000000000000000000000000000"
+      ) {
+        return walletContract;
+      }
+    } catch {
+      // Session may not exist yet. Callers can fall back to agent-level wallet resolution.
+    }
+    return null;
+  }
+
+  async getAgentWalletFromRegistry(
+    agentId: bigint,
+  ): Promise<{ walletContract: `0x${string}`; user: `0x${string}` } | null> {
+    const result = await this.client.readContract({
+      address: this.config.contracts.identityRegistry as `0x${string}`,
+      abi: identityRegistryAbi,
+      functionName: "getAgentWallet",
+      args: [agentId],
+    });
+    console.log({
+      result,
+      agentId,
+      IdReg: this.config.contracts.identityRegistry,
+    });
+
+    const walletContract = result[0];
+    const user = result[1];
+    if (
+      !walletContract ||
+      walletContract === "0x0000000000000000000000000000000000000000"
+    ) {
+      return null;
+    }
+    return { walletContract, user };
+  }
+
+  async getWalletUserBalance(
+    walletContract: `0x${string}`,
+    _walletOwner: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<bigint> {
+    return (await this.client.readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [walletContract],
+    })) as bigint;
+  }
+
+  async getAvailableBalance(
+    walletContract: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<bigint> {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: clientAgentVaultAbi,
+      functionName: "getAvailableBalance",
+      args: [token],
+    })) as bigint;
+  }
+
+  async getDeposit(walletContract: `0x${string}`): Promise<bigint> {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: clientAgentVaultAbi,
+      functionName: "getDeposit",
+      args: [],
+    })) as bigint;
   }
 
   // -- Helpers --
@@ -118,30 +213,40 @@ export class ContractService {
     return { txHash: result.hash, agentId };
   }
 
-  /** Register a session key on IdentityRegistry (via KiteAAWallet proxy). */
-  async registerSessionOnRegistry(
-    agentId: bigint,
-    sessionKey: string,
-    user: string,
-    walletContract: string,
-    valueLimit: bigint,
-    maxValueAllowed: bigint,
-    validUntil: bigint,
-    blockedAgents: bigint[] = [],
-  ): Promise<string> {
+  /** Register a session key on IdentityRegistry. */
+  async registerSessionOnRegistry(params: {
+    agentId: bigint;
+    sessionKey: string;
+    user: string;
+    walletContract: string;
+    validUntil: bigint;
+    blockedAgents?: bigint[];
+  }): Promise<string> {
     const data = encodeFunctionData({
       abi: identityRegistryAbi,
       functionName: "registerSession",
       args: [
-        agentId,
-        sessionKey as `0x${string}`,
-        user as `0x${string}`,
-        walletContract as `0x${string}`,
-        valueLimit,
-        maxValueAllowed,
-        validUntil,
-        blockedAgents,
+        params.agentId,
+        params.sessionKey as `0x${string}`,
+        params.user as `0x${string}`,
+        params.walletContract as `0x${string}`,
+        params.validUntil,
+        params.blockedAgents ?? [],
       ],
+    });
+    const result = await this.sendTx(
+      this.config.contracts.identityRegistry,
+      data,
+    );
+    return result.hash;
+  }
+
+  /** Revoke a session on IdentityRegistry. */
+  async revokeSessionOnRegistry(sessionKey: string): Promise<string> {
+    const data = encodeFunctionData({
+      abi: identityRegistryAbi,
+      functionName: "revokeSession",
+      args: [sessionKey as `0x${string}`],
     });
     const result = await this.sendTx(
       this.config.contracts.identityRegistry,
@@ -184,6 +289,37 @@ export class ContractService {
     })) as string;
   }
 
+  /**
+   * Fetch owner, agentURI, and AA wallet for an agent in a single parallel read.
+   * No credential required — works on any ContractService instance.
+   */
+  async getAgentInfo(agentId: bigint): Promise<{
+    agentId: string;
+    owner: string | null;
+    agentURI: string | null;
+    walletContract: string | null;
+    registeredOwner: string | null;
+  }> {
+    const [ownerResult, uriResult, walletResult] = await Promise.allSettled([
+      this.getAgentOwner(agentId),
+      this.getAgentURI(agentId),
+      this.getAgentWalletFromRegistry(agentId),
+    ]);
+    return {
+      agentId: agentId.toString(),
+      owner: ownerResult.status === "fulfilled" ? ownerResult.value : null,
+      agentURI: uriResult.status === "fulfilled" ? uriResult.value : null,
+      walletContract:
+        walletResult.status === "fulfilled"
+          ? (walletResult.value?.walletContract ?? null)
+          : null,
+      registeredOwner:
+        walletResult.status === "fulfilled"
+          ? (walletResult.value?.user ?? null)
+          : null,
+    };
+  }
+
   // ── IdentityRegistry session queries ─────────────────────────────
 
   /** Read session status from IdentityRegistry. */
@@ -198,12 +334,26 @@ export class ContractService {
 
   /** Full session rule*/
   async getSessionFromRegistry(sessionKey: string) {
-    return await this.client.readContract({
-      address: this.config.contracts.identityRegistry as `0x${string}`,
-      abi: identityRegistryAbi,
-      functionName: "getSession",
-      args: [sessionKey as `0x${string}`],
-    });
+    try {
+      return await this.client.readContract({
+        address: this.config.contracts.identityRegistry as `0x${string}`,
+        abi: identityRegistryAbi,
+        functionName: "getSession",
+        args: [sessionKey as `0x${string}`],
+      });
+    } catch {
+      // Some deployed versions expose a different getSession return shape.
+      // Fall back to validateSession and normalize to the expected tuple shape.
+      const [active, agentId, user, walletContract, validUntil] =
+        (await this.validateSession(sessionKey)) as readonly [
+          boolean,
+          bigint,
+          `0x${string}`,
+          `0x${string}`,
+          bigint,
+        ];
+      return [agentId, user, walletContract, validUntil, [], active] as const;
+    }
   }
 
   /** All session keys ever registered for the given agent (by IdentityRegistry tokenId). */
@@ -222,17 +372,19 @@ export class ContractService {
   // -- KiteAAWallet --
 
   async registerUser(): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "register",
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
   async isUserRegistered(address: string): Promise<boolean> {
+    const walletContract = this.getKiteAAWalletAddress();
     return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      address: walletContract as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "isRegistered",
       args: [address as `0x${string}`],
@@ -250,38 +402,80 @@ export class ContractService {
     return result.hash;
   }
 
-  async depositToWallet(token: string, amount: bigint): Promise<string> {
-    // First approve
-    const approveData = encodeFunctionData({
-      abi: erc20Abi,
-      functionName: "approve",
-      args: [this.config.contracts.kiteAAWallet as `0x${string}`, amount],
-    });
-    await this.sendTx(token, approveData);
-
-    // Then deposit
-    const depositData = encodeFunctionData({
-      abi: kiteAAWalletAbi,
-      functionName: "deposit",
-      args: [token as `0x${string}`, amount],
-    });
-    const result = await this.sendTx(
-      this.config.contracts.kiteAAWallet,
-      depositData,
+  /** Derive the ClientAgentVault (AA wallet) address for any EOA address. */
+  async resolveVaultWalletAddressFor(
+    eoaAddress: string,
+  ): Promise<`0x${string}`> {
+    const { GokiteAASDK } = await import("gokite-aa-sdk");
+    const aaSdk = new GokiteAASDK(
+      this.config.networkName || "kite_testnet",
+      this.config.rpcUrl,
+      this.config.bundlerUrl || "",
     );
+    return aaSdk.getAccountAddress(
+      eoaAddress as `0x${string}`,
+    ) as `0x${string}`;
+  }
+
+  /** Derive the ClientAgentVault address for this client's own EOA. */
+  async resolveOwnerVaultWalletAddress(): Promise<`0x${string}`> {
+    return this.resolveVaultWalletAddressFor(this.eoaAddress);
+  }
+
+  async depositToWallet(token: string, amount: bigint): Promise<string> {
+    const walletContract = await this.resolveOwnerVaultWalletAddress();
+
+    if ((token as `0x${string}`) === zeroAddress) {
+      const depositData = encodeFunctionData({
+        abi: clientAgentVaultAbi,
+        functionName: "addDeposit",
+        args: [],
+      });
+      const result = await this.sendTx(walletContract, depositData, amount);
+      return result.hash;
+    }
+
+    const supported = await this.isVaultTokenSupported(
+      walletContract,
+      token as `0x${string}`,
+    );
+    if (!supported) {
+      await this.addVaultSupportedToken(walletContract, token as `0x${string}`);
+    }
+
+    const transferData = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [walletContract, amount],
+    });
+    const result = await this.sendTx(token, transferData);
     return result.hash;
   }
 
   async withdrawFromWallet(token: string, amount: bigint): Promise<string> {
-    const withdrawData = encodeFunctionData({
-      abi: kiteAAWalletAbi,
-      functionName: "withdraw",
-      args: [token as `0x${string}`, amount],
+    const walletContract = await this.resolveOwnerVaultWalletAddress();
+
+    if ((token as `0x${string}`) === zeroAddress) {
+      const withdrawData = encodeFunctionData({
+        abi: clientAgentVaultAbi,
+        functionName: "withdrawDepositTo",
+        args: [this.eoaAddress as `0x${string}`, amount],
+      });
+      const result = await this.sendTx(walletContract, withdrawData);
+      return result.hash;
+    }
+
+    const transferOutData = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [this.eoaAddress as `0x${string}`, amount],
     });
-    const result = await this.sendTx(
-      this.config.contracts.kiteAAWallet,
-      withdrawData,
-    );
+    const executeData = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "execute",
+      args: [token as `0x${string}`, 0n, transferOutData],
+    });
+    const result = await this.sendTx(walletContract, executeData);
     return result.hash;
   }
 
@@ -293,6 +487,7 @@ export class ContractService {
     validUntil: bigint,
     blockedAgents: bigint[] = [],
   ): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "addSessionKeyRule",
@@ -305,7 +500,7 @@ export class ContractService {
         blockedAgents,
       ],
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
@@ -314,28 +509,31 @@ export class ContractService {
     provider: string,
     blocked: boolean,
   ): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "setBlockedProvider",
       args: [provider as `0x${string}`, blocked],
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
   async revokeSessionKey(sessionKey: string): Promise<string> {
+    const walletContract = this.getKiteAAWalletAddress();
     const data = encodeFunctionData({
       abi: kiteAAWalletAbi,
       functionName: "revokeSessionKey",
       args: [sessionKey as `0x${string}`],
     });
-    const result = await this.sendTx(this.config.contracts.kiteAAWallet, data);
+    const result = await this.sendTx(walletContract, data);
     return result.hash;
   }
 
   async isNonceUsed(sessionKey: string, nonce: bigint): Promise<boolean> {
+    const walletContract = this.getKiteAAWalletAddress();
     return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      address: walletContract as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "isNonceUsed",
       args: [sessionKey as `0x${string}`, nonce],
@@ -343,8 +541,9 @@ export class ContractService {
   }
 
   async getSessionSpent(sessionKey: string): Promise<bigint> {
+    const walletContract = this.getKiteAAWalletAddress();
     return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
+      address: walletContract as `0x${string}`,
       abi: kiteAAWalletAbi,
       functionName: "getSessionSpent",
       args: [sessionKey as `0x${string}`],
@@ -355,12 +554,7 @@ export class ContractService {
     token: `0x${string}`,
     address: `0x${string}`,
   ): Promise<bigint> {
-    return await this.client.readContract({
-      address: this.config.contracts.kiteAAWallet as `0x${string}`,
-      abi: kiteAAWalletAbi,
-      functionName: "getUserBalance",
-      args: [address, token],
-    });
+    return await this.getTokenBalance(token, address);
   }
 
   async getTokenBalance(
@@ -385,32 +579,51 @@ export class ContractService {
     maxSpend: bigint,
     maxDuration: number,
     maxPerCall: bigint,
+    walletContractOverride?: string,
   ): Promise<{ txHash: string; channelId: `0x${string}` | undefined }> {
     const signerAddress = this.wdkAccount.getAddress() as string;
     const user = this.eoaAddress as `0x${string}`;
-    const walletContract = this.config.contracts.kiteAAWallet as `0x${string}`;
+    let walletContract = walletContractOverride as `0x${string}` | undefined;
+
+    if (!walletContract) {
+      const resolvedWallet =
+        await this.resolveWalletContractForSession(signerAddress);
+      if (resolvedWallet) {
+        walletContract = resolvedWallet;
+      }
+    }
+    if (!walletContract) {
+      walletContract = this.config.contracts.kiteAAWallet as
+        | `0x${string}`
+        | undefined;
+    }
+    if (!walletContract) {
+      throw new Error(
+        "Unable to resolve walletContract for channel open. Pass channelConfig.walletContract or configure contracts.kiteAAWallet.",
+      );
+    }
 
     // ── Pre-flight diagnostics ──────────────────────────────────────
-    // Balance check: for prepaid the deposit comes from the EOA's
-    // KiteAAWallet balance — the agent/signer itself has no ERC20 tokens.
+    // Balance check: for prepaid the deposit comes from the AA wallet's
+    // ERC-20 balance, which PaymentChannel pulls via transferFrom.
     let balance = 0n;
     if (mode === 0 && deposit > 0n) {
-      balance = await this.getDepositedTokenBalance(
-        token as `0x${string}`,
+      balance = await this.getWalletUserBalance(
+        walletContract,
         user,
+        token as `0x${string}`,
       );
     }
 
     if (mode === 0) {
       if (balance < deposit) {
         throw new Error(
-          `Insufficient KiteAAWallet balance: have ${formatUnits(balance, 18)}, need ${formatUnits(deposit, 18)}`,
+          `Insufficient AA wallet balance: have ${formatUnits(balance, 18)}, need ${formatUnits(deposit, 18)}`,
         );
       }
     }
 
-    // No ERC20 approve needed — KiteAAWallet.withdrawForChannel transfers
-    // directly from the wallet contract to PaymentChannel.
+    // The AA wallet must have approved PaymentChannel before openChannel.
 
     // ── Simulate the call to surface the revert reason ──────────────
     try {
@@ -419,6 +632,7 @@ export class ContractService {
         abi: paymentChannelAbi,
         functionName: "openChannel",
         args: [
+          signerAddress as `0x${string}`,
           provider as `0x${string}`,
           token as `0x${string}`,
           mode,
@@ -443,6 +657,7 @@ export class ContractService {
       abi: paymentChannelAbi,
       functionName: "openChannel",
       args: [
+        signerAddress as `0x${string}`,
         provider as `0x${string}`,
         token as `0x${string}`,
         mode,
@@ -469,6 +684,194 @@ export class ContractService {
     return { txHash: result.hash, channelId };
   }
 
+  /**
+   * Opens a payment channel via ClientVault.executeBatch using GokiteAASDK.
+   * Sends a proper UserOp (not a raw tx) so the session key never pays gas.
+   *
+   * The batch atomically:
+   *  1. ERC20.approve(paymentChannel, maxSpend)   — from walletContract
+   *  2. PaymentChannel.openChannel(sessionKey, …) — msg.sender == walletContract
+   *
+   * The bundler handles gas sponsorship via the configured paymaster.
+   */
+  async openChannelViaVaultBatch(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    provider: string,
+    token: string,
+    mode: number,
+    deposit: bigint,
+    maxSpend: bigint,
+    maxDuration: number,
+    maxPerCall: bigint,
+  ): Promise<{ txHash: string; channelId: `0x${string}` | undefined }> {
+    // Initialize GokiteAASDK for proper UserOp submission
+    const { GokiteAASDK } = await import("gokite-aa-sdk");
+    const aaSdk = new GokiteAASDK(
+      this.config.networkName || "kite_testnet",
+      this.config.rpcUrl,
+      this.config.bundlerUrl || "",
+    );
+
+    const derivedAaWallet = aaSdk.getAccountAddress(
+      this.eoaAddress as `0x${string}`,
+    ) as `0x${string}`;
+    if (derivedAaWallet.toLowerCase() !== walletContract.toLowerCase()) {
+      throw new Error(
+        `AA wallet mismatch: session resolves to ${walletContract}, but GokiteAASDK(owner=${this.eoaAddress}) derives ${derivedAaWallet}`,
+      );
+    }
+
+    // Build batch calldata for executeBatch on the wallet
+    const batchRequest = {
+      targets: [
+        token as `0x${string}`,
+        this.config.contracts.paymentChannel as `0x${string}`,
+      ],
+      values: [0n, 0n],
+      callDatas: [
+        // 1. approve — token allows paymentChannel to spend maxSpend
+        encodeFunctionData({
+          abi: erc20Abi,
+          functionName: "approve",
+          args: [
+            this.config.contracts.paymentChannel as `0x${string}`,
+            maxSpend,
+          ],
+        }),
+        // 2. openChannel — pass sessionKey explicitly; walletContract is msg.sender
+        encodeFunctionData({
+          abi: paymentChannelAbi,
+          functionName: "openChannel",
+          args: [
+            sessionKeyAddress,
+            provider as `0x${string}`,
+            token as `0x${string}`,
+            mode,
+            deposit,
+            maxSpend,
+            BigInt(maxDuration),
+            maxPerCall,
+            walletContract,
+          ],
+        }),
+      ],
+    };
+
+    // Extract private key for signing
+    const keyPair = (this.wdkAccount as any)?.keyPair;
+    if (!keyPair?.privateKey) {
+      throw new Error(
+        "Session key private key not available for UserOp signing",
+      );
+    }
+    const pkHex =
+      `0x${Buffer.from(keyPair.privateKey).toString("hex")}` as `0x${string}`;
+    const sessionAccount = privateKeyToAccount(pkHex);
+
+    // Sign functions for UserOp:
+    // 1) session-key signature (desired path)
+    // 2) owner EOA signature (bkp-compatible fallback)
+    const signerStrategies: Array<{
+      label: string;
+      sign: (userOpHash: string) => Promise<string>;
+    }> = [
+      {
+        label: "session-key",
+        sign: async (userOpHash: string) =>
+          sessionAccount.signMessage({ message: { raw: userOpHash as Hex } }),
+      },
+    ];
+
+    const ownerPkRaw = getCredential();
+    if (ownerPkRaw) {
+      const ownerPk = (
+        ownerPkRaw.startsWith("0x") ? ownerPkRaw : `0x${ownerPkRaw}`
+      ) as `0x${string}`;
+      const ownerAccount = privateKeyToAccount(ownerPk);
+      if (
+        ownerAccount.address.toLowerCase() === this.eoaAddress.toLowerCase()
+      ) {
+        signerStrategies.push({
+          label: "owner-eoa",
+          sign: async (userOpHash: string) =>
+            ownerAccount.signMessage({
+              message: { raw: userOpHash as Hex },
+            }),
+        });
+      }
+    }
+
+    const decodeChannelOpened = async (txHash: string) => {
+      const event = await this.waitAndDecodeLogs(
+        txHash,
+        paymentChannelAbi,
+        "ChannelOpened",
+      );
+      const channelId = event?.args?.channelId as `0x${string}` | undefined;
+      return { txHash, channelId };
+    };
+
+    let lastError: Error | null = null;
+    const paymentToken = "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63";
+
+    for (const strategy of signerStrategies) {
+      try {
+        console.log(
+          `  Sending UserOp via AA with token payment for channel open (signer=${strategy.label})...`,
+        );
+
+        const baseUserOp = await (aaSdk as any).createUserOperation(
+          this.eoaAddress as `0x${string}`,
+          batchRequest,
+        );
+        const paymentResult = await aaSdk.sendUserOperationWithPayment(
+          this.eoaAddress as `0x${string}`,
+          batchRequest,
+          baseUserOp,
+          paymentToken,
+          strategy.sign,
+          undefined,
+          { maxRetries: 60, interval: 5000 },
+        );
+        const paymentStatus = (paymentResult as any).status as
+          | {
+              status?: string;
+              transactionHash?: `0x${string}`;
+              reason?: string;
+            }
+          | undefined;
+        if (paymentStatus?.status && paymentStatus.status !== "success") {
+          throw new Error(
+            paymentStatus.reason ??
+              `Token-payment UserOp did not succeed (${paymentStatus.status})`,
+          );
+        }
+
+        const txHash =
+          paymentStatus?.transactionHash ?? paymentResult.userOpHash;
+        console.log(`  Token-payment UserOp included. Receipt tx: ${txHash}`);
+        return await decodeChannelOpened(txHash);
+      } catch (err: any) {
+        const reason =
+          err?.cause?.reason ??
+          err?.cause?.shortMessage ??
+          err?.shortMessage ??
+          err?.message ??
+          String(err);
+        lastError = new Error(
+          `AA channel open failed (signer=${strategy.label}): ${reason}`,
+        );
+      }
+    }
+
+    console.error(
+      `[openChannelViaVaultBatch] UserOp failed for ${walletContract}:`,
+      lastError?.message ?? "Unknown UserOp failure",
+    );
+    throw lastError ?? new Error("Unknown UserOp failure");
+  }
+
   async activateChannel(channelId: `0x${string}`): Promise<string> {
     const data = encodeFunctionData({
       abi: paymentChannelAbi,
@@ -482,6 +885,219 @@ export class ContractService {
     return result.hash;
   }
 
+  /**
+   * Send a single contract call as a UserOp through the ClientAgentVault (AA wallet).
+   * The AA wallet becomes msg.sender, so no native gas is required from the session key.
+   *
+   * @param sessionKeyAddress - The active session key address (used to derive/verify the signer).
+   * @param walletContract    - Expected AA wallet address (ClientAgentVault).
+   * @param callData          - Encoded function call data for the PaymentChannel contract.
+   */
+  private async _sendVaultAATransaction(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    callData: `0x${string}`,
+  ): Promise<string> {
+    const { GokiteAASDK } = await import("gokite-aa-sdk");
+    const aaSdk = new GokiteAASDK(
+      this.config.networkName || "kite_testnet",
+      this.config.rpcUrl,
+      this.config.bundlerUrl || "",
+    );
+
+    const derivedAaWallet = aaSdk.getAccountAddress(
+      this.eoaAddress as `0x${string}`,
+    ) as `0x${string}`;
+    if (derivedAaWallet.toLowerCase() !== walletContract.toLowerCase()) {
+      throw new Error(
+        `AA wallet mismatch: session resolves to ${walletContract}, but GokiteAASDK(owner=${this.eoaAddress}) derives ${derivedAaWallet}`,
+      );
+    }
+
+    const batchRequest = {
+      targets: [this.config.contracts.paymentChannel as `0x${string}`],
+      values: [0n],
+      callDatas: [callData],
+    };
+
+    const keyPair = (this.wdkAccount as any)?.keyPair;
+    if (!keyPair?.privateKey) {
+      throw new Error(
+        "Session key private key not available for UserOp signing",
+      );
+    }
+    const pkHex =
+      `0x${Buffer.from(keyPair.privateKey).toString("hex")}` as `0x${string}`;
+    const sessionAccount = privateKeyToAccount(pkHex);
+
+    const signerStrategies: Array<{
+      label: string;
+      sign: (userOpHash: string) => Promise<string>;
+    }> = [
+      {
+        label: "session-key",
+        sign: async (userOpHash: string) =>
+          sessionAccount.signMessage({ message: { raw: userOpHash as Hex } }),
+      },
+    ];
+
+    const ownerPkRaw = getCredential();
+    if (ownerPkRaw) {
+      const ownerPk = (
+        ownerPkRaw.startsWith("0x") ? ownerPkRaw : `0x${ownerPkRaw}`
+      ) as `0x${string}`;
+      const ownerAccount = privateKeyToAccount(ownerPk);
+      if (
+        ownerAccount.address.toLowerCase() === this.eoaAddress.toLowerCase()
+      ) {
+        signerStrategies.push({
+          label: "owner-eoa",
+          sign: async (userOpHash: string) =>
+            ownerAccount.signMessage({
+              message: { raw: userOpHash as Hex },
+            }),
+        });
+      }
+    }
+
+    let lastError: Error | null = null;
+    const paymentToken =
+      "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63" as `0x${string}`;
+
+    for (const strategy of signerStrategies) {
+      try {
+        console.log(
+          `  Sending UserOp via AA with token payment (signer=${strategy.label})...`,
+        );
+
+        const baseUserOp = await (aaSdk as any).createUserOperation(
+          this.eoaAddress as `0x${string}`,
+          batchRequest,
+        );
+        const tokenResult = await aaSdk.sendUserOperationWithPayment(
+          this.eoaAddress as `0x${string}`,
+          batchRequest,
+          baseUserOp,
+          paymentToken,
+          strategy.sign,
+          undefined,
+          { maxRetries: 60, interval: 5000 },
+        );
+        const tokenStatus = (tokenResult as any).status as
+          | {
+              status?: string;
+              transactionHash?: `0x${string}`;
+              reason?: string;
+            }
+          | undefined;
+        if (tokenStatus?.status && tokenStatus.status !== "success") {
+          throw new Error(
+            tokenStatus.reason ??
+              `Token-payment UserOp did not succeed (${tokenStatus.status})`,
+          );
+        }
+
+        const txHash = tokenStatus?.transactionHash ?? tokenResult.userOpHash;
+        console.log(`  UserOp included. Receipt tx: ${txHash}`);
+        return txHash;
+      } catch (tokenErr: any) {
+        const reason =
+          tokenErr?.cause?.reason ??
+          tokenErr?.cause?.shortMessage ??
+          tokenErr?.shortMessage ??
+          tokenErr?.message ??
+          String(tokenErr);
+        lastError = new Error(
+          `AA tx failed (signer=${strategy.label}): ${reason}`,
+        );
+      }
+    }
+
+    throw (
+      lastError ??
+      new Error("Unknown UserOp failure in _sendVaultAATransaction")
+    );
+  }
+
+  /**
+   * Initiate settlement through AA wallet via UserOp so session consumers do not pay native gas.
+   * The wallet executes PaymentChannel.initiateSettlement(...) as msg.sender.
+   */
+  async initiateSettlementViaVaultAA(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    channelId: `0x${string}`,
+    sequenceNumber: number,
+    cumulativeCost: bigint,
+    timestamp: number,
+    providerSignature: `0x${string}`,
+    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000",
+  ): Promise<string> {
+    const callData = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "initiateSettlement",
+      args: [
+        channelId,
+        sessionKeyAddress,
+        BigInt(sequenceNumber),
+        cumulativeCost,
+        BigInt(timestamp),
+        providerSignature,
+        merkleRoot,
+      ],
+    });
+    return this._sendVaultAATransaction(
+      sessionKeyAddress,
+      walletContract,
+      callData,
+    );
+  }
+
+  /**
+   * Finalize a payment channel through AA wallet via UserOp (gasless).
+   * The wallet executes PaymentChannel.finalize(...) as msg.sender.
+   * Call this after the challenge window has closed following initiateSettlement.
+   */
+  async finalizeViaVaultAA(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    channelId: `0x${string}`,
+    merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000",
+  ): Promise<string> {
+    const callData = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "finalize",
+      args: [channelId, merkleRoot],
+    });
+    return this._sendVaultAATransaction(
+      sessionKeyAddress,
+      walletContract,
+      callData,
+    );
+  }
+
+  /**
+   * Force-close an expired channel through AA wallet via UserOp (gasless).
+   * The wallet executes PaymentChannel.forceCloseExpired(...) as msg.sender.
+   * Use for channels that have expired without a provider-initiated settlement.
+   */
+  async forceCloseExpiredViaVaultAA(
+    sessionKeyAddress: `0x${string}`,
+    walletContract: `0x${string}`,
+    channelId: `0x${string}`,
+  ): Promise<string> {
+    const callData = encodeFunctionData({
+      abi: paymentChannelAbi,
+      functionName: "forceCloseExpired",
+      args: [channelId],
+    });
+    return this._sendVaultAATransaction(
+      sessionKeyAddress,
+      walletContract,
+      callData,
+    );
+  }
+
   async initiateSettlement(
     channelId: `0x${string}`,
     sequenceNumber: number,
@@ -490,11 +1106,13 @@ export class ContractService {
     providerSignature: `0x${string}`,
     merkleRoot: `0x${string}` = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
   ): Promise<string> {
+    const signerAddress = this.wdkAccount.getAddress() as string;
     const data = encodeFunctionData({
       abi: paymentChannelAbi,
       functionName: "initiateSettlement",
       args: [
         channelId,
+        signerAddress as `0x${string}`,
         BigInt(sequenceNumber),
         cumulativeCost,
         BigInt(timestamp),
@@ -668,6 +1286,144 @@ export class ContractService {
       functionName: "getWallet",
       args: [owner as `0x${string}`],
     })) as string;
+  }
+
+  // -- ClientAgentVault sessions --
+
+  async createVaultSession(params: {
+    walletContract: string;
+    sessionId: `0x${string}`;
+    sessionKey: string;
+    rules?: Array<{
+      timeWindow: bigint;
+      budget: bigint;
+      initialWindowStartTime: bigint;
+      targetProviders: `0x${string}`[];
+    }>;
+  }): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "createSession",
+      args: [
+        params.sessionId,
+        params.sessionKey as `0x${string}`,
+        (params.rules ?? []).map((rule) => ({
+          timeWindow: rule.timeWindow,
+          budget: rule.budget,
+          initialWindowStartTime: rule.initialWindowStartTime,
+          targetProviders: rule.targetProviders,
+        })),
+      ],
+    });
+
+    const result = await this.sendTx(params.walletContract, data);
+    return result.hash;
+  }
+
+  async addVaultSpendingRules(params: {
+    walletContract: string;
+    sessionId: `0x${string}`;
+    rules: Array<{
+      timeWindow: bigint;
+      budget: bigint;
+      initialWindowStartTime: bigint;
+      targetProviders: `0x${string}`[];
+    }>;
+  }): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "addSpendingRules",
+      args: [
+        params.sessionId,
+        params.rules.map((rule) => ({
+          timeWindow: rule.timeWindow,
+          budget: rule.budget,
+          initialWindowStartTime: rule.initialWindowStartTime,
+          targetProviders: rule.targetProviders,
+        })),
+      ],
+    });
+
+    const result = await this.sendTx(params.walletContract, data);
+    return result.hash;
+  }
+
+  /** Remove a session from the vault (revoke). */
+  async removeVaultSession(
+    walletContract: string,
+    sessionId: `0x${string}`,
+  ): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "removeSession",
+      args: [sessionId],
+    });
+    const result = await this.sendTx(walletContract, data);
+    return result.hash;
+  }
+
+  /** Check whether a token is enabled on the ClientAgentVault. */
+  async isVaultTokenSupported(
+    walletContract: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<boolean> {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: clientAgentVaultAbi,
+      functionName: "isTokenSupported",
+      args: [token],
+    })) as boolean;
+  }
+
+  /** Enable an ERC-20 token on the ClientAgentVault (owner-only). */
+  async addVaultSupportedToken(
+    walletContract: `0x${string}`,
+    token: `0x${string}`,
+  ): Promise<string> {
+    const data = encodeFunctionData({
+      abi: clientAgentVaultAbi,
+      functionName: "addSupportedToken",
+      args: [token],
+    });
+    const result = await this.sendTx(walletContract, data);
+    return result.hash;
+  }
+
+  /** Get spending rules for a session on the ClientAgentVault. */
+  async getVaultSpendingRules(
+    walletContract: `0x${string}`,
+    sessionId: `0x${string}`,
+  ): Promise<
+    Array<{
+      rule: {
+        timeWindow: bigint;
+        budget: bigint;
+        initialWindowStartTime: bigint;
+        targetProviders: `0x${string}`[];
+      };
+      usage: {
+        amountUsed: bigint;
+        currentTimeWindowStartTime: bigint;
+      };
+    }>
+  > {
+    return (await this.client.readContract({
+      address: walletContract,
+      abi: clientAgentVaultAbi,
+      functionName: "getSpendingRules",
+      args: [sessionId],
+    })) as Array<{
+      rule: {
+        timeWindow: bigint;
+        budget: bigint;
+        initialWindowStartTime: bigint;
+        targetProviders: `0x${string}`[];
+      };
+      usage: {
+        amountUsed: bigint;
+        currentTimeWindowStartTime: bigint;
+      };
+    }>;
   }
 
   // -- KiteAAWallet executePayment --

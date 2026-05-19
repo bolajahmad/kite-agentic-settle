@@ -1,0 +1,106 @@
+---
+sidebar_position: 2
+title: Connect Claude
+description: How to connect Claude Desktop to Kite so Claude can pay for APIs
+---
+
+# Guide: Connect Claude Desktop to Kite
+
+This guide sets up Claude Desktop to use the Kite MCP server so Claude can autonomously make paid API calls on your behalf.
+
+## Prerequisites
+
+- Claude Desktop installed (download from [claude.ai/download](https://claude.ai/download))
+- Completed `npx kite onboard` (you have an agent ID and session key)
+- Backend provider running (`cd backend && npm run dev`)
+
+## Step 1: Start the MCP Server
+
+```bash
+npx kite run --port 3100 --transport sse
+```
+
+Verify it's running:
+
+```bash
+curl http://localhost:3100/api/tools/schema | python3 -m json.tool | head -20
+```
+
+## Step 2: Configure Claude Desktop
+
+Open the config file:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "kite": {
+      "url": "http://localhost:3100/mcp/sse"
+    }
+  }
+}
+```
+
+## Step 3: Restart Claude Desktop
+
+Quit and reopen the app. The Kite tools should appear in the tools list (click the tools icon in the chat input).
+
+## Step 4: Test
+
+In a new Claude conversation:
+
+> "Check my Kite balance for agent ID 1."
+
+Claude should call `check_balance` and return the deposited balance.
+
+> "Fetch the protocol report from http://localhost:4000/api/data/protocol-report using agent ID 1 and pay automatically."
+
+Claude should call `call_paid_api` and return the report content. You'll see it mention the payment cost.
+
+## Step 5: Make Claude Use Channels
+
+For repeated calls:
+
+> "Open a payment channel with provider 0xProviderEOA for agent 1 with a 5 USDT deposit, then use that channel to fetch protocol reports 5 times."
+
+Claude will:
+1. Call `open_channel`
+2. Call `call_paid_api` with the returned `channelId` five times
+3. Optionally prompt you to settle the channel
+
+## What Claude Can See
+
+Claude can see all 7 Kite tools and their schemas. It knows:
+- Which parameters are required vs optional
+- What each tool returns
+- How to chain tools (open a channel, then use it)
+
+Claude will not use your session key directly — the MCP server handles that internally.
+
+## Stdio Alternative
+
+If you prefer Claude to manage the server lifecycle:
+
+```json
+{
+  "mcpServers": {
+    "kite": {
+      "command": "npx",
+      "args": ["kite", "run", "--transport", "stdio"],
+      "env": {
+        "HOME": "/Users/yourname"
+      }
+    }
+  }
+}
+```
+
+With stdio, you don't need to run the server manually.
+
+## Related Pages
+
+- [MCP: Claude Desktop →](../mcp/claude-desktop)
+- [MCP: Tool Reference →](../mcp/tool-reference)
+- [Build an Agent →](./build-an-agent)

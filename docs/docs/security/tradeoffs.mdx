@@ -1,0 +1,88 @@
+---
+sidebar_position: 3
+title: Tradeoffs
+description: Honest assessment of Kite's design choices and their limitations
+---
+
+# Tradeoffs
+
+Kite makes deliberate design choices that have real tradeoffs. This page is an honest assessment of what you give up and what you gain.
+
+## Local-First Storage
+
+**What you gain:** No cloud dependency. No central server to hack. No account to compromise. Every signing operation happens on your machine with your key.
+
+**What you give up:** Local state can be lost. If `~/.kite-agent-pay/` is deleted and not backed up, you lose receipt history, session keys, and channel state. Recovery is partial — you can reconstruct channel IDs and agent identity from the subgraph, but unanchored receipts may be unrecoverable.
+
+**Our verdict:** For AI agents running locally, local-first is the right default. For production deployments serving many users, you would want to layer on a backup service.
+
+---
+
+## Payment Channels vs Per-Call
+
+**What you gain with channels:** 2 on-chain transactions regardless of how many API calls you make. Massive gas savings at scale.
+
+**What you give up with channels:** Capital lockup. When you open a 5 USDT channel, that 5 USDT is locked in the `PaymentChannel` contract until settlement. If you have many small channels open simultaneously, your working capital is fragmented.
+
+**Settlement risk:** If you lose your receipts and the provider is unresponsive, you cannot prove you spent only N USDT. The worst case is the provider claims you owe the full deposit.
+
+**Our verdict:** Use channels for high-frequency, low-cost calls. Use per-call x402 for infrequent, higher-value calls. The demo's decision engine helps automate this choice.
+
+---
+
+## Hot Session Keys
+
+**What you gain:** No user interaction per payment. The agent signs autonomously without prompting for a passphrase on every call.
+
+**What you give up:** The session key sits on disk unencrypted. If an attacker can read `vars.json`, they have a live signing key (bounded by session limits, but live).
+
+**Compared to alternatives:**
+- Hardware wallets require physical confirmation per call — incompatible with autonomous agents
+- Remote signing servers require network calls per payment — latency, availability risk, and a new trust boundary
+
+**Our verdict:** For AI agents making micro-payments, bounded hot session keys are the right tradeoff. The spending caps are the safety valve.
+
+---
+
+## EVM-Only (For Now)
+
+**What you gain:** Battle-tested EVM tooling, EIP-712 signing standards, viem/ethers.js ecosystem.
+
+**What you give up:** Agents on Solana, Cosmos, or other chains cannot use Kite natively without a bridging layer.
+
+**Our verdict:** EVM coverage with AA wallets supports most of the DeFi and AI payment use cases today. Cross-chain expansion is on the roadmap.
+
+---
+
+## Testnet Status
+
+**What you gain:** Zero financial risk during development and experimentation.
+
+**What you give up:** Testnet tokens (DmUSDT) have no real-world value. The contracts have not been formally audited. Chain reliability may differ from mainnet.
+
+**Our verdict:** Kite is currently a hackathon / early-stage protocol. Do not use it for real money yet.
+
+---
+
+## No Data Integrity Guarantees
+
+**What you gain:** Simplicity. Kite focuses on one problem: authentic, bounded micro-payments.
+
+**What you give up:** Kite does not verify that the API response you received is accurate or hasn't been tampered with. You pay the right person the right amount — but whether the data is correct is your responsibility.
+
+**Our verdict:** Combine Kite with provider signing / IPFS content hashes if data integrity is critical to your use case. These are complementary, not competing concerns.
+
+---
+
+## Summary
+
+| Design Choice | Benefit | Cost |
+|---|---|---|
+| Local-first | No central server | State can be lost |
+| Payment channels | Gas efficiency | Capital lockup |
+| Hot session keys | Autonomous agents | Unencrypted disk key |
+| EVM-only | Battle-tested tooling | No cross-chain |
+| Testnet | Zero risk | No real value |
+| No data integrity | Simplicity | You trust provider data |
+
+Kite is designed for a specific use case: autonomous AI agents making micro-payments at high frequency. For that use case, these tradeoffs are the right ones.

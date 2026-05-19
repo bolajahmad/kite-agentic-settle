@@ -364,8 +364,8 @@ export class KitePaymentClient {
   }
 
   /**
-   * Full onboarding: register EOA, create agent + session key, optionally fund.
-   * Replaces the multi-step frontend wizard.
+    * Full onboarding: ensure AA wallet, create agentId, and create session key + session rule.
+    * Replaces the multi-step frontend wizard.
    */
   async onboard(
     options: OnboardOptions,

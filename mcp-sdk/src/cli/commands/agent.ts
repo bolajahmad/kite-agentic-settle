@@ -1,9 +1,10 @@
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parseUnits } from "viem";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { prompt } from "../../utils/index.js";
-import { getVar } from "../../vars.js";
+import { getCredential, getVar } from "../../vars.js";
 import { findFlag } from "../index.js";
 
 function header(title: string) {
@@ -141,8 +142,6 @@ type AgentCLIArgs = {
   valueLimit: string;
   totalLimit: string;
   validDays: string;
-  fundAmount?: string;
-  gasAmount?: string;
 };
 async function deriveAgentArguments(args: string[]): Promise<AgentCLIArgs> {
   // accept expected CLI flags
@@ -150,8 +149,6 @@ async function deriveAgentArguments(args: string[]): Promise<AgentCLIArgs> {
   let valueLimitStr = findFlag(args, "--value-limit");
   let totalLimitStr = findFlag(args, "--limit");
   let validDaysStr = findFlag(args, "--valid-days");
-  let fundAmountStr = findFlag(args, "--fund");
-  let gasAmountStr = findFlag(args, "--gas");
 
   // Ensure important data is provided
   if (!metadataStr)
@@ -169,8 +166,6 @@ async function deriveAgentArguments(args: string[]): Promise<AgentCLIArgs> {
     valueLimit: valueLimitStr,
     totalLimit: totalLimitStr,
     validDays: validDaysStr,
-    fundAmount: fundAmountStr,
-    gasAmount: gasAmountStr,
   };
 }
 
@@ -322,14 +317,13 @@ async function cmdUpdateAgentUri(args: string[]) {
 }
 
 // ── Onboard command ───────────────────────────────────────────────────────────
-// Registeres a new User, Agent and creates a session for the agent.
-// If needed, will also fund the AAWallet with specified token.
+// Creates an agent NFT and session (vault + IdentityRegistry).
 export async function cmdOnboardAgent(args: string[]): Promise<void> {
   header("Kite Agent Pay — Onboard Agent");
   let credential: string | undefined;
 
   // If PRIVATE_KEY is set, or prompt
-  credential = getVar("PRIVATE_KEY");
+  credential = getCredential();
   if (!credential)
     credential = await prompt("  Provide seed phrase or private key: ", true);
   if (!credential)
@@ -337,18 +331,8 @@ export async function cmdOnboardAgent(args: string[]): Promise<void> {
       "Private key is required to onboard an agent. Set PRIVATE_KEY env var or provide it at the prompt.",
     );
 
-  let { metadata, validDays, valueLimit, totalLimit, fundAmount, gasAmount } =
+  const { metadata, validDays, valueLimit, totalLimit } =
     await deriveAgentArguments(args);
-
-  const wantFund = await prompt("  Fund wallet? (y/N): ");
-  if (wantFund.toLowerCase() === "y") {
-    if (!fundAmount)
-      fundAmount =
-        (await prompt("  USDT amount to deposit [10.0]: ")) || "10.0";
-    if (!gasAmount)
-      gasAmount =
-        (await prompt("  Native gas to send in ETH [0.001]: ")) || "0.001";
-  }
 
   info("");
   info("Starting onboarding...");
@@ -362,20 +346,21 @@ export async function cmdOnboardAgent(args: string[]): Promise<void> {
     const result = await client.onboard(
       {
         agentURI,
-        valueLimit: valueLimit ?? undefined,
-        maxValueAllowed: totalLimit ?? undefined,
         validDays: validDays ? Number(validDays) : undefined,
-        fundAmount: fundAmount ?? undefined,
-        gasAmount: gasAmount ?? undefined,
+        sessionRule: {
+          timeWindow: 86400n,
+          budget: parseUnits(totalLimit || valueLimit || "10.0", 18),
+        },
       },
       (step) => info(`  → ${step}`),
     );
 
     header("Onboarding Complete");
     info(`  EOA Address:     ${result.eoaAddress}`);
+    info(`  AA Wallet:       ${result.aaWalletAddress}`);
     info(`  Agent ID:        ${result.agentId}`);
+    info(`  Session ID:      ${result.sessionId}`);
     info(`  Session key:     ${result.sessionKeyAddress}`);
-    info(`  Wallet balance:  ${result.walletUSDTBalance} USDT`);
     info("");
     for (const tx of result.txHashes) {
       if (tx.hash) info(`  ${tx.step}: ${tx.hash}`);

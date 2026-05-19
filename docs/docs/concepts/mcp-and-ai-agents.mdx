@@ -1,0 +1,152 @@
+---
+sidebar_position: 6
+title: MCP and AI Agents
+description: How Kite integrates with AI agent runtimes via the Model Context Protocol
+---
+
+# MCP and AI Agents
+
+## What Is MCP?
+
+The **Model Context Protocol (MCP)** is an open standard for connecting AI language models to external tools and data sources. It defines a JSON-RPC protocol that runtimes like Claude Desktop, Cursor, and OpenAI function-calling use to discover and invoke capabilities.
+
+Kite's MCP server exposes the payment infrastructure as a set of MCP tools — so any compatible AI runtime can make paid API calls, open payment channels, and check balances without any custom integration code.
+
+---
+
+## The Runtime Architecture
+
+```
+┌──────────────────────────────────────────────┐
+│         AI Runtime (Claude / GPT / etc.)     │
+└──────────────────┬───────────────────────────┘
+                   │ MCP JSON-RPC
+                   ▼
+┌──────────────────────────────────────────────┐
+│           Kite MCP Server (kite-mcp)         │
+│    Tools: call_paid_api, open_channel, ...   │
+└──────────────────┬───────────────────────────┘
+                   │ SDK calls
+                   ▼
+┌──────────────────────────────────────────────┐
+│         Kite SDK (@kite-agentic-pay/sdk)     │
+│    Local signing, channel store, indexer     │
+└──────────────────┬───────────────────────────┘
+                   │ on-chain
+                   ▼
+┌──────────────────────────────────────────────┐
+│    Kite AI Testnet (IdentityRegistry,        │
+│    KiteAAWallet, PaymentChannel)             │
+└──────────────────────────────────────────────┘
+```
+
+The AI runtime never touches private keys or blockchain directly. All payment logic runs through the MCP server, which uses the SDK, which signs locally.
+
+---
+
+## Available MCP Tools
+
+| Tool               | What it does                                                         |
+| ------------------ | -------------------------------------------------------------------- |
+| `call_paid_api`    | Make a paid API call — handles x402 or channel payment automatically |
+| `open_channel`     | Open a new payment channel with a provider                           |
+| `get_session_info` | List or inspect session keys for an agent                            |
+| `get_channel_info` | List or inspect payment channels for an agent                        |
+| `check_balance`    | Check AA wallet balance                                              |
+| `resolve_agent`    | Look up agent identity from IdentityRegistry                         |
+| `get_usage_logs`   | Retrieve payment audit logs                                          |
+
+See [MCP Tool Reference →](../mcp/tool-reference) for full parameter documentation.
+
+---
+
+## How a Paid Call Looks from Claude's Perspective
+
+When you connect Claude Desktop to Kite's MCP server, Claude can see the tools and use them transparently:
+
+**User prompt:**
+
+> "Check the protocol report at http://localhost:4000/api/data/protocol-report using agent ID 1."
+
+**Claude's internal reasoning:**
+
+> I'll use the `call_paid_api` tool with url="http://localhost:4000/api/data/protocol-report" and agentId="1".
+
+**What happens:**
+
+1. Claude calls the MCP tool
+2. The MCP server calls `client.fetchWithPayment()`
+3. The provider returns `402 Payment Required`
+4. The SDK signs the EIP-712 receipt locally
+5. The retry succeeds with `200 OK`
+6. Claude receives the data and responds to the user
+
+Claude handled a blockchain-settled micropayment without the user doing anything — and without Claude needing to understand EIP-712, session keys, or on-chain contracts.
+
+---
+
+## Connecting Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "kite": {
+      "url": "http://localhost:3100/mcp/sse"
+    }
+  }
+}
+```
+
+See [Claude Desktop Setup →](../mcp/claude-desktop) for full instructions.
+
+---
+
+## Connecting OpenAI / LangChain
+
+The MCP server exposes tool schemas in OpenAI format:
+
+```typescript
+const tools = await fetch("http://localhost:3100/api/tools/schema/openai").then(
+  (r) => r.json(),
+);
+
+const completion = await openai.chat.completions.create({
+  model: "gpt-4o",
+  tools,
+  messages: [{ role: "user", content: "Check balance for 0xabc..." }],
+});
+```
+
+See [OpenAI Integration →](../mcp/openai-agents) and [LangChain Integration →](../mcp/langchain).
+
+---
+
+## Identity and Sessions in MCP Context
+
+The MCP server loads session keys from `~/.kite-agent-pay/vars.json` when it starts. You do not pass private keys to MCP tool calls — the server handles session selection automatically based on the `agentId` parameter.
+
+This means:
+
+- The AI runtime never has access to private keys
+- Session selection is transparent to the AI
+- You can revoke a session without reconfiguring the AI runtime
+
+---
+
+## Runtime Isolation
+
+Each MCP server instance is bound to the credentials on the machine it runs on. Multiple AI runtimes can connect to the same MCP server (they share the same agent identity and session keys), but one MCP server cannot use another machine's session keys.
+
+For multi-machine setups, each machine runs its own MCP server with its own local credentials. They can share the same `agentId` (the on-chain identity) but use different session keys (different local credentials).
+
+---
+
+## Related Pages
+
+- [MCP Overview →](../mcp/overview) — Server setup and configuration
+- [Claude Desktop →](../mcp/claude-desktop) — Step-by-step Claude setup
+- [OpenAI Agents →](../mcp/openai-agents) — Function-calling integration
+- [LangChain →](../mcp/langchain) — LangChain tool integration
+- [MCP Tool Reference →](../mcp/tool-reference) — All tools with full parameter docs

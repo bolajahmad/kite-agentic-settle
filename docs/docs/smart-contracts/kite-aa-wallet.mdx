@@ -1,0 +1,131 @@
+---
+sidebar_position: 2
+title: KiteAAWallet
+description: The account abstraction wallet — session key management and token deposits
+---
+
+# KiteAAWallet
+
+The `KiteAAWallet` is a smart contract wallet (Account Abstraction, ERC-4337-compatible) deployed per agent. It holds token deposits and manages session key authorizations.
+
+**Factory:** `GokiteAccount` factory on Kite AI Testnet  
+**Network:** Kite AI Testnet (chain ID 2368)
+
+Each EOA gets one `KiteAAWallet`. The address is deterministically derived from the EOA — you can always compute it offline and deploy on first use.
+
+## What It Does
+
+1. **Token custody** — holds deposited tokens for paying APIs
+2. **Session key registry** — tracks which session keys are authorized and their limits
+3. **Spend enforcement** — enforces per-session spending caps on-chain
+4. **Withdrawal control** — only the owner EOA can withdraw
+
+## Functions
+
+### `deposit(token, amount)`
+
+Deposit ERC-20 tokens from the owner's EOA into the AA wallet.
+
+```solidity
+function deposit(address token, uint256 amount) external;
+```
+
+```typescript
+await client.deposit(DM_USDT_TOKEN, parseUnits("10.0", 18));
+```
+
+### `withdraw(token, amount)`
+
+Withdraw tokens back to the owner's EOA. Only callable by owner.
+
+```solidity
+function withdraw(address token, uint256 amount) external;
+```
+
+### `registerSession(sessionKey, rule)`
+
+Register a session key with spending rules. Can only be called by the wallet owner (via the EOA or a registered operator).
+
+```solidity
+function registerSession(
+    address sessionKey,
+    SessionRule calldata rule
+) external;
+
+struct SessionRule {
+    uint256 timeWindow;    // Rate limit window (seconds)
+    uint256 budget;        // Max total spend per window
+    uint40 validUntil;     // Expiry timestamp
+    address[] allowedTokens;
+}
+```
+
+### `revokeSession(sessionKey)`
+
+Immediately revoke a session key.
+
+```solidity
+function revokeSession(address sessionKey) external;
+```
+
+### `getSessionInfo(sessionKey)`
+
+Read current session status and remaining budget.
+
+```solidity
+function getSessionInfo(address sessionKey) external view returns (
+    bool active,
+    uint40 validUntil,
+    uint256 remainingBudget,
+    uint256 callCount
+);
+```
+
+### `getDepositedBalance(token)`
+
+Check deposited balance for a token.
+
+```solidity
+function getDepositedBalance(address token) external view returns (uint256);
+```
+
+## Derived Address
+
+The AA wallet address is deterministic based on the EOA:
+
+```typescript
+const aaWallet = await client.getOwnerAAWalletAddress();
+// Always returns the same address for your EOA
+```
+
+You can check if it is deployed yet:
+
+```typescript
+const isDeployed = await client.isAAWalletDeployed(aaWallet);
+// kite onboard deploys it if not yet deployed
+```
+
+## Session Key Lifecycle
+
+```
+registerSession(key, rule) → key is Active
+  ↓
+key signs payment receipts
+  ↓
+revokeSession(key) or validUntil passes → key is Revoked
+```
+
+## Events
+
+```solidity
+event Deposited(address indexed token, uint256 amount);
+event Withdrawn(address indexed token, uint256 amount, address to);
+event SessionRegistered(address indexed sessionKey, SessionRule rule);
+event SessionRevoked(address indexed sessionKey);
+```
+
+## Related Pages
+
+- [Session Keys Concept →](../concepts/session-keys)
+- [IdentityRegistry →](./identity-registry)
+- [PaymentChannel →](./payment-channel)

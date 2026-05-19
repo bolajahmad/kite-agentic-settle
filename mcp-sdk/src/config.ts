@@ -5,16 +5,24 @@ import type { KiteConfig } from "./types.js";
 export const KITE_TESTNET: KiteConfig = {
   rpcUrl: "https://rpc-testnet.gokite.ai",
   chainId: 2368,
+  networkName: "kite_testnet",
+  bundlerUrl: "https://bundler-service.staging.gokite.ai/rpc/",
   contracts: {
-    attestationRegistry: "0x3A8ce8DC1E700Ea16a31b731A575A650149960A9",
-    identityRegistry: "0x46A6cbc0Fd15936F4F67aABBc554f4CAf80281F9",
-    kiteAAWallet: "0xBfdbA4E11De8B3b82F910Dd3AE8e517Ce60b0bB2",
-    paymentChannel: "0x4791Ea0134eA66b40371A6Daf22d43e02bbB39f8",
+    attestationRegistry: "0x2F72b719679FD0b92712D03a1E16909F18d55660",
+    identityRegistry: "0xE4C30627C02791bF12241021f2fC320b43991cb1",
+    paymentChannel: "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb",
   },
+  // token: "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63",
   token: "0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489",
 };
 
 export const TOKENS = [
+  {
+    symbol: "USDT",
+    name: "USDT (Testnet)",
+    address: "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63",
+    decimals: 18,
+  },
   {
     symbol: "DmUSDT",
     name: "Kite Demo USDT",
@@ -31,12 +39,6 @@ export const TOKENS = [
     symbol: "USDC.e",
     name: "USDC Bridge",
     address: "0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e",
-    decimals: 6,
-  },
-  {
-    symbol: "USDT",
-    name: "USDT Bridged",
-    address: "0x3Fdd283C4c43A60398bf93CA01a8a8BD773a755b",
     decimals: 6,
   },
   {

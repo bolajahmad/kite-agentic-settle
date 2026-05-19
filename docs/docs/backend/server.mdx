@@ -1,0 +1,104 @@
+---
+sidebar_position: 1
+title: Backend Server
+description: The reference provider implementation — Express API with x402 and channel support
+---
+
+# Backend Server
+
+The `backend/` package is a reference implementation of a paid API provider. It demonstrates all three payment models and includes background watchers for channel automation.
+
+## What It Is
+
+A Node.js + Express server that:
+- Gates endpoints behind x402 payment challenges
+- Accepts channel-based receipts for streaming/batch modes
+- Manages its own channel activation and settlement watchers
+- Can run in flexible mode (provider chooses payment model per request)
+
+## Starting It
+
+```bash
+cd backend
+npm install
+npm run dev
+```
+
+Default port: **4000**
+
+## Environment Variables
+
+```env
+# Required
+DEPLOYER_PRIVATE_KEY=0xYourProviderPrivateKey
+
+# Optional
+PORT=4000
+NODE_ENV=development
+BACKEND_RPC_URL=https://rpc-testnet.gokite.ai
+```
+
+## Payment Models
+
+The backend supports three models simultaneously:
+
+### x402 (Per-Call)
+Every request triggers a 402 challenge. The client signs a payment and retries with an `X-PAYMENT` header. The server validates on-chain.
+
+**Endpoints:** `/api/data/*`
+
+### Channel (Batch/Stream)
+The client opens a channel on-chain, then sends receipts via `X-Channel-Id` and `X-Channel-Receipt` headers.
+
+**Endpoints:** `/api/stream/*`
+
+### Flex (Agent Decides)
+The server accepts either mode. The agent picks based on call frequency via the decision engine.
+
+**Endpoints:** `/api/flex/*`
+
+## API Routes
+
+| Route | Model | Price |
+|---|---|---|
+| `GET /api/data/protocol-report` | x402 | 0.40 USDT |
+| `GET /api/data/market/:pair` | x402 | 0.25 USDT |
+| `GET /api/data/intelligence` | x402 | 0.50 USDT |
+| `GET /api/stream/intelligence` | channel | 0.10 USDT/call |
+| `POST /api/flex/query` | flex | varies |
+| `GET /health` | none | — |
+
+## Background Watchers
+
+The backend runs two background processes:
+
+### Channel Watcher
+Monitors `ChannelOpened` events on-chain and automatically calls `activateChannel()` when a new channel is created with this provider. This is what makes channels work without manual coordination.
+
+### Settlement Watcher
+Monitors `SettlementRequested` events and automatically calls `approveSettlement()` when the requested amount matches the provider's receipt records.
+
+Both watchers poll the RPC every 15 seconds and are started automatically with `npm run dev`.
+
+## Adding a Price-Gated Route
+
+```typescript
+import { x402Middleware } from "./middlewares/x402";
+import { PRICE_PER_CALL } from "./config";
+
+router.get(
+  "/api/data/my-endpoint",
+  x402Middleware({ price: PRICE_PER_CALL }),
+  async (req, res) => {
+    // This handler only runs if payment validated
+    res.json({ data: "Your paid content here" });
+  }
+);
+```
+
+## Related Pages
+
+- [Provider API Reference →](./provider-api)
+- [MCP Server (kite-mcp) →](./mcp-server)
+- [x402 Payments Concept →](../concepts/x402-payments)
+- [Channel Opening →](../channels/opening)

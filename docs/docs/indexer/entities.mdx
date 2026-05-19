@@ -1,0 +1,139 @@
+---
+sidebar_position: 2
+title: Entities
+description: All GraphQL entities in the Kite subgraph
+---
+
+# Subgraph Entities
+
+## User
+
+Represents an EOA that has interacted with the protocol.
+
+```graphql
+type User {
+  id: ID!              # EOA address
+  agents: [Agent!]!    # Agent NFTs owned
+  wallets: [AAWallet!]!  # AA wallets owned
+  firstSeen: BigInt!   # First transaction block
+}
+```
+
+## Agent
+
+An agent NFT from `IdentityRegistry`.
+
+```graphql
+type Agent {
+  id: ID!              # tokenId as string
+  owner: User!         # EOA owner
+  agentURI: String!    # JSON metadata
+  aaWallet: AAWallet   # Linked AA wallet
+  active: Boolean!     # Active status
+  registeredAt: BigInt!  # Block number
+  sessions: [Session!]!  # All session keys
+  channels: [Channel!]!  # All payment channels
+  payments: [Payment!]!  # All payments made
+}
+```
+
+## AAWallet
+
+A `KiteAAWallet` contract instance.
+
+```graphql
+type AAWallet {
+  id: ID!              # Contract address
+  owner: User!         # EOA owner
+  agent: Agent         # Associated agent
+  deployedAt: BigInt!
+  balances: [TokenBalance!]!  # Deposited token balances
+  sessions: [Session!]!
+}
+```
+
+## Session
+
+A session key registered in an AA wallet.
+
+```graphql
+type Session {
+  id: ID!              # sessionKey address
+  aaWallet: AAWallet!
+  agent: Agent
+  status: String!      # "Active" | "Revoked" | "Expired"
+  validUntil: BigInt!  # Unix timestamp
+  budget: BigInt!      # Total budget in wei
+  timeWindow: BigInt!  # Rate window in seconds
+  amountUsed: BigInt!  # Cumulative spend
+  callCount: BigInt!   # Total calls made
+  registeredAt: BigInt!
+  revokedAt: BigInt
+}
+```
+
+## Channel
+
+A payment channel from `PaymentChannel`.
+
+```graphql
+type Channel {
+  id: ID!              # channelId (bytes32 hex)
+  agent: Agent!
+  provider: Bytes!     # Provider EOA address
+  sessionKey: Session!
+  token: Bytes!        # ERC-20 token address
+  deposit: BigInt!
+  maxSpend: BigInt!
+  maxPerCall: BigInt!
+  maxDuration: BigInt!
+  status: String!      # "OPEN" | "ACTIVE" | "SETTLEMENT_PENDING" | "CLOSED"
+  settledAmount: BigInt
+  refundAmount: BigInt
+  openedAt: BigInt!
+  activatedAt: BigInt
+  closedAt: BigInt
+  receipts: [ChannelReceipt!]!  # Anchored Merkle roots
+}
+```
+
+## Payment
+
+An x402 per-call payment (or channel settlement summary).
+
+```graphql
+type Payment {
+  id: ID!              # txHash-logIndex
+  agent: Agent!
+  session: Session!
+  provider: Bytes!
+  token: Bytes!
+  amount: BigInt!
+  type: String!        # "x402" | "channel"
+  channelId: Bytes     # Set for channel payments
+  txHash: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+}
+```
+
+## ChannelReceipt (Attestation)
+
+An anchored Merkle root from `AttestationRegistry`.
+
+```graphql
+type ChannelReceipt {
+  id: ID!              # txHash-logIndex
+  channel: Channel!
+  merkleRoot: Bytes!
+  receiptCount: BigInt!
+  submitter: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+}
+```
+
+## Related Pages
+
+- [Indexer Querying →](./querying) — Example queries for each entity
+- [Indexer Overview →](./overview)

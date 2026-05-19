@@ -2,33 +2,24 @@
 /**
  * Kite Agent Pay — Unified CLI
  *
- * npx kite vars set <key>       Store a secret variable (hidden prompt)
- * npx kite vars get <key>       Retrieve a variable value
- * npx kite vars list            List stored variable names
- * npx kite vars delete <key>    Delete a variable
- * npx kite vars path            Show vars file location
- *
- * npx kite init                 Interactive first-time onboarding
+ * npx kite init                 Store EOA credential (private key / seed phrase)
+ * npx kite onboard              One-step agent registration + session key setup
  * npx kite whoami               Show current agent identity
  *
  * npx kite call                 Call a paid API endpoint
  * npx kite balance              Show agent token balance
  * npx kite usage                Show usage logs
- * npx kite fund <token> [amt]    Fund wallet with test tokens
+ * npx kite fund <token> [amt]   Fund wallet with test tokens
  * npx kite withdraw [token] [amt]  Withdraw tokens from wallet (to EOA)
  * npx kite simulate             Run payment simulation
+ *
+ * Config is written only by: kite init, kite onboard, kite session create
+ * There is no manual vars command — use those commands to set credentials.
  */
 
 import { KiteSettleClient } from "../kite-settle-client.js";
 import { prompt } from "../utils/index.js";
-import {
-  deleteVar,
-  getVar,
-  getVarsPath,
-  hasVar,
-  listVars,
-  setVar,
-} from "../vars.js";
+import { getCredential, getConfigPath, setCredential, getVar } from "../vars.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -57,105 +48,66 @@ export function findFlag(args: string[], flag: string): string | undefined {
   return undefined;
 }
 
-// ── vars subcommand ────────────────────────────────────────────────
+function truncateText(text: string, maxLen = 120): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen - 1)}...`;
+}
 
-async function cmdVars(args: string[]) {
-  const sub = args[0];
-
-  switch (sub) {
-    case "set": {
-      const key = args[1];
-      if (!key) die("Usage: kite vars set <key>");
-
-      const value = await prompt(`  Enter value for ${key}: `, true);
-      if (!value) die("Value cannot be empty");
-
-      setVar(key, value);
-      info(`  Stored "${key}" in ${getVarsPath()}`);
-      break;
-    }
-
-    case "get": {
-      const key = args[1];
-      if (!key) die("Usage: kite vars get <key>");
-      const val = getVar(key);
-      if (val === undefined) die(`Variable "${key}" is not set`);
-      console.log(val);
-      break;
-    }
-
-    case "list": {
-      const keys = listVars();
-      if (keys.length === 0) {
-        info("No variables stored yet.");
-        info(`Run: npx kite vars set <key>`);
-      } else {
-        header("Stored Variables");
-        for (const k of keys) {
-          info(`  ${k}`);
-        }
-        console.log("");
+function decodeAgentMetadataURI(
+  agentURI: string,
+): { name?: string; shortDescription?: string } | null {
+  const trimmed = agentURI.trim();
+  const parseObject = (
+    text: string,
+  ): { name?: string; shortDescription?: string } | null => {
+    try {
+      const parsed = JSON.parse(text);
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        return null;
       }
-      break;
+      const obj = parsed as Record<string, unknown>;
+      const name = typeof obj.name === "string" ? obj.name.trim() : undefined;
+      const descValue =
+        typeof obj.description === "string"
+          ? obj.description
+          : typeof obj.shortDescription === "string"
+            ? obj.shortDescription
+            : undefined;
+      const shortDescription = descValue?.replace(/\s+/g, " ").trim();
+      return {
+        name: name || undefined,
+        shortDescription: shortDescription || undefined,
+      };
+    } catch {
+      return null;
     }
+  };
 
-    case "delete": {
-      const key = args[1];
-      if (!key) die("Usage: kite vars delete <key>");
-      if (deleteVar(key)) {
-        info(`  Deleted "${key}"`);
-      } else {
-        die(`Variable "${key}" does not exist`);
-      }
-      break;
-    }
-
-    case "path": {
-      console.log(getVarsPath());
-      break;
-    }
-
-    case "setup": {
-      // Show which essential vars are missing
-      const essential = ["PRIVATE_KEY"];
-      const missing = essential.filter((k) => !hasVar(k) && !process.env[k]);
-
-      if (missing.length === 0) {
-        info("All essential variables are set.");
-      } else {
-        header("Missing Variables");
-        for (const k of missing) {
-          info(`  ${k}  — Run: npx kite vars set ${k}`);
-        }
-        console.log("");
-      }
-      break;
-    }
-
-    default:
-      console.log(`
-  Usage: kite vars <command>
-
-  Commands:
-    set <key>      Store a secret variable (hidden input)
-    get <key>      Retrieve a variable value
-    list           List all stored variable names
-    delete <key>   Delete a variable
-    path           Show vars file location
-    setup          Check which variables are missing
-`);
+  if (trimmed.startsWith("{")) {
+    return parseObject(trimmed);
   }
+
+  const dataUriPrefix = "data:application/json;base64,";
+  if (trimmed.toLowerCase().startsWith(dataUriPrefix)) {
+    const b64 = trimmed.slice(dataUriPrefix.length);
+    return parseObject(Buffer.from(b64, "base64").toString("utf8"));
+  }
+
+  return parseObject(Buffer.from(trimmed, "base64").toString("utf8"));
 }
 
 // ── init subcommand ────────────────────────────────────────────────
-
 async function cmdInit() {
   header("KiteSettler — EOA Setup");
 
-  // Store seed phrase / private key in vars
-  const existing = getVar("PRIVATE_KEY");
+  // Store seed phrase / private key in dedicated config file
+  const existing = getCredential();
   if (existing) {
-    info("Credential already stored in vars.");
+    info("Credential already stored in config.");
     const overwrite = await prompt("  Overwrite? (y/N): ");
     if (overwrite.toLowerCase() !== "y") {
       info("Aborted.");
@@ -164,13 +116,13 @@ async function cmdInit() {
   }
 
   info("Enter your EOA seed phrase or private key.");
-  info("This will be stored locally in vars (never committed to git).\n");
+  info("This will be stored locally in a dedicated config file (never committed to git).\n");
 
   const credential = await prompt("  Seed phrase or private key: ", true);
   if (!credential) die("Credential cannot be empty");
 
-  setVar("PRIVATE_KEY", credential);
-  info(`  Stored PRIVATE_KEY in ${getVarsPath()}`);
+  setCredential(credential);
+  info(`  Stored credential in ${getConfigPath()}`);
 
   info("");
   info("Next steps:");
@@ -181,41 +133,97 @@ async function cmdInit() {
 
 // ── whoami subcommand ──────────────────────────────────────────────
 async function cmdWhoami(args: string[]) {
-  const agentIndexStr = findFlag(args, "--agent");
+  const agentIndexStr =
+    findFlag(args, "--agent") ??
+    findFlag(args, "--agent-id") ??
+    findFlag(args, "--agent-index") ??
+    findFlag(args, "-aid");
 
   try {
-    // Load credential from vars
-    const credential = getVar("PRIVATE_KEY");
-    if (!credential) die("No credential found. Run: npx kite init");
-
-    const client = await KiteSettleClient.create({ credential });
-
-    const isRegistered = await client.isRegistered();
+    // Load credential from vars (optional for agent-scoped whoami)
+    const credential = getCredential();
+    if (!credential && agentIndexStr == undefined) {
+      die("No credential found. Run: npx kite init or pass --agent <id>");
+    }
 
     if (agentIndexStr == undefined) {
+      const client = await KiteSettleClient.create({ credential });
+      const aaWalletAddress = await client
+        .getOwnerAAWalletAddress()
+        .catch(() => undefined);
+      const ownedAgents = await client
+        .getAgentsByOwner(client.eoaAddress)
+        .catch(() => []);
+      const hasOnchainAgents = ownedAgents.length > 0;
+
       info(`  EOA Address:    ${client.eoaAddress}`);
+      info(`  AA Wallet:      ${aaWalletAddress ?? "Unable to resolve"}`);
       info(
-        `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
+        `  Identity Status: ${hasOnchainAgents ? `Registered (${ownedAgents.length} agent${ownedAgents.length === 1 ? "" : "s"})` : "No registered agents found"}`,
       );
     } else {
-      const agentId = Number.parseInt(agentIndexStr, 10);
-      if (Number.isNaN(agentId) || agentId < 0) {
+      let agentId: bigint;
+      try {
+        agentId = BigInt(agentIndexStr);
+      } catch {
+        die(
+          "Invalid --agent value. Must be a non-negative integer (on-chain agentId).",
+        );
+      }
+      if (agentId < 0n) {
         die(
           "Invalid --agent value. Must be a non-negative integer (on-chain agentId).",
         );
       }
 
-      // Agents are NFTs (IdentityRegistry tokenIds) — they have no derived
-      // address. Show the session key info stored during `kite onboard`.
+      const agentInfo = await KiteSettleClient.createReadOnly().getAgentInfo(agentId);
+      const ownerOnchain = agentInfo.owner;
+      const agentURI = agentInfo.agentURI;
+      const decoded = agentURI ? decodeAgentMetadataURI(agentURI) : null;
+      const walletFromRegistry = agentInfo.walletContract
+        ? { walletContract: agentInfo.walletContract, user: agentInfo.registeredOwner ?? "" }
+        : null;
+
+      const credentialClient = credential
+        ? await KiteSettleClient.create({ credential }).catch(() => null)
+        : null;
+      const aaWalletAddress = credentialClient
+        ? await credentialClient
+            .getOwnerAAWalletAddress()
+            .catch(() => undefined)
+        : undefined;
+
+      // Agents are NFTs (IdentityRegistry tokenIds). Session keys are bound
+      // to the agent and stored locally during `kite onboard`.
       const sessionAddr = getVar(`SESSION_${agentId}_0_ADDRESS`);
       const ownerAddr = getVar(`AGENT_${agentId}_OWNER`);
+      const walletFromVars = getVar(`AGENT_${agentId}_WALLET`);
+      const resolvedOwner =
+        walletFromRegistry?.user ?? ownerOnchain ?? ownerAddr ?? "Unknown";
+      const resolvedWallet =
+        walletFromRegistry?.walletContract ??
+        walletFromVars ??
+        aaWalletAddress ??
+        "Unknown";
 
-      info(`  EOA Address:    ${ownerAddr ?? client.eoaAddress}`);
+      info(`  EOA Address:    ${resolvedOwner}`);
+      info(`  AA Wallet:      ${resolvedWallet}`);
       info(
-        `  EOA Status:         ${isRegistered ? "Registered on-chain" : "Not registered on-chain"}`,
+        `  Agent Status:    ${ownerOnchain ? "Found on IdentityRegistry" : "Not found on IdentityRegistry"}`,
       );
       info("\n");
       info(`    Agent ID:       ${agentId}  (NFT on IdentityRegistry)`);
+      if (decoded?.name) {
+        info(`    Agent Name:     ${decoded.name}`);
+      }
+      if (decoded?.shortDescription) {
+        info(
+          `    Description:    ${truncateText(decoded.shortDescription, 140)}`,
+        );
+      }
+      if (!decoded && agentURI) {
+        info(`    Metadata URI:   Present (non-decodable format)`);
+      }
       if (sessionAddr) {
         info(`    Session Key:    ${sessionAddr}`);
         info(`    Session Status: Stored (run onboard to renew)`);
@@ -236,23 +244,18 @@ function showHelp() {
   console.log(`
   Kite Agent Pay CLI
 
-  Configuration:
-    kite vars set <key>       Store a secret variable (hidden input)
-    kite vars get <key>       Retrieve a variable value
-    kite vars list            List stored variable names
-    kite vars delete <key>    Delete a variable
-    kite vars setup           Check which variables are missing
-    kite vars path            Show vars file path
-
-  Setup:
-    kite init                 Interactive first-time onboarding (EOA only)
-    kite onboard              One-step agent onboarding (register + session key) (EOA only)
+  Setup (run once — writes credentials to local config):
+    kite init                 Store your EOA private key / seed phrase
+    kite onboard              Register agent on-chain + create session key
     kite whoami               Show current agent identity
     kite clean                Delete stored config/credentials (prompts for confirmation)
     kite clean --agent <id>   Delete data for a specific agent only
     kite clean --session      Delete all session keys only
 
-  EOA commands (require PRIVATE_KEY — run by the wallet owner):
+  Note: config is written only by the commands above.
+        Use kite init, kite onboard, or kite session create to update credentials.
+
+  EOA commands (require credential from kite init — run by the wallet owner):
     kite init, kite onboard, kite session start|revoke, kite agent register
 
   Agent commands (use session keys — can run autonomously):
@@ -278,20 +281,21 @@ function showHelp() {
 
   Options:
     --agent-index <n>         Agent derivation index (default: 0)
+    --agent <id>              On-chain agentId (for whoami/session/channel)
     --decide <mode>           Decision mode: auto, rules, ai, cli
     --url <url>               Target a live API URL
 
   Examples:
-    npx kite vars set AGENT_1_SEED
     npx kite init
     npx kite onboard --name "My Agent" --category defi
     npx kite call --agent-index 0
     npx kite call --agent-index 0 --decide rules
     npx kite balance --token "" --show-native
-    npx kite whoami --agent-index 1
+    npx kite whoami --agent 1
 
   Config files:
-    ~/.kite-agent-pay/vars.json  Secrets & credentials (local only, mode 0600)
+    ~/.kite-agent-pay/config.json  EOA credential from kite init (mode 0600)
+    ~/.kite-agent-pay/vars.json    Agent/session keys from onboarding (mode 0600)
 `);
 }
 
@@ -306,10 +310,6 @@ async function main() {
 
   try {
     switch (command) {
-      case "vars":
-        await cmdVars(args.slice(1));
-        break;
-
       case "init":
         await cmdInit();
         break;

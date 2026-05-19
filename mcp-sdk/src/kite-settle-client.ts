@@ -21,9 +21,11 @@
  * ```
  */
 
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { BatchEndReason, BatchLimits } from "./batch.js";
+import type { ChannelCallReceipt } from "./channel-store.js";
+import { loadChannel } from "./channel-store.js";
 import type { KiteClientOptions } from "./client.js";
 import { KitePaymentClient } from "./client.js";
 import { KITE_TESTNET, TOKENS } from "./config.js";
@@ -38,14 +40,18 @@ import type {
 import { checkRules, decide } from "./decide.js";
 import type {
   IndexedAgent,
+  IndexedChannel,
   IndexedPayment,
   IndexedSession,
 } from "./indexer.js";
 import {
   getAgentById,
   getAgentsByOwner,
+  getChannelById,
+  getChannelsByAgent,
   getPaymentsByAgent,
   getRecentPayments,
+  getSessionByKey,
   getSessionKeyAdded,
   getSessionsByAgent,
   getUserAgentsWithActiveSessions,
@@ -62,8 +68,16 @@ import type {
   Receipt,
   UsageLog,
 } from "./types.js";
+import { ChannelStatus } from "./types.js";
+import {
+  buildChannelHeaders,
+  extractChannelReceipt,
+  probeApi402Offer,
+  waitForChannelActive,
+} from "./utils/channel-helpers.js";
 import {
   deleteVar,
+  getCredential,
   getKiteDir,
   getVar,
   getVarsPath,
@@ -84,6 +98,7 @@ export type {
   DecisionMode,
   DecisionResult,
   IndexedAgent,
+  IndexedChannel,
   IndexedPayment,
   IndexedSession,
   InterceptorOptions,
@@ -98,6 +113,336 @@ export type {
 };
 
 export { KITE_TESTNET, TOKENS };
+
+// ── Module-level helpers ───────────────────────────────────────────
+
+/** Parse `text` as JSON; return the raw string if it is not valid JSON. */
+function _tryParseJSON(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+// ── Balance types ──────────────────────────────────────────────────
+
+/** Balance of one token for a given address. */
+export interface TokenBalance {
+  /** Token contract address. `zeroAddress` (0x000…) means native gas token. */
+  token: string;
+  symbol: string;
+  decimals: number;
+  /** Raw ERC-20 / native balance sitting in the EOA wallet. */
+  walletBalance: bigint;
+  walletBalanceFormatted: string;
+  /** Balance deposited into the ClientAgentVault (spendable by agents). */
+  depositedBalance: bigint;
+  depositedBalanceFormatted: string;
+}
+
+/** Full balance snapshot returned by `client.balance()`. */
+export interface BalanceResult {
+  eoaAddress: string;
+  aaWalletAddress: string;
+  tokens: TokenBalance[];
+}
+
+// ── Session types ──────────────────────────────────────────────────
+
+/**
+ * Enriched session snapshot: raw indexer data + computed spent/remaining.
+ * Returned by `client.listSessions()` and `client.getSessionInfo()`.
+ */
+export interface SessionInfo {
+  sessionKey: string;
+  sessionId: string;
+  agentId: string;
+  /** Effective human-readable status (accounts for expiry). */
+  status: string;
+  /** Unix seconds (as string). */
+  validUntil: string;
+  /** ISO-8601 formatted expiry datetime. */
+  validUntilFormatted: string;
+  /** Lifetime spend cap in wei (as string) — from the session's spending rule budget. */
+  maxAmount: string;
+  /** Lifetime spend cap formatted (e.g. "10.0"). */
+  maxAmountFormatted: string;
+  /** Per-transaction value limit in wei (as string). */
+  valueLimit: string;
+  /** Per-transaction value limit formatted. */
+  valueLimitFormatted: string;
+  /** Amount spent in the current spending window in wei (from ClientAgentVault on-chain). */
+  spent: string;
+  spentFormatted: string;
+  /** Remaining capacity in the current window in wei (budget − spent). */
+  remaining: string;
+  remainingFormatted: string;
+  blockedAgents: string[];
+  createdAt: string;
+  /** Raw spending rules from the ClientAgentVault contract. Empty if none configured. */
+  spendingRules: Array<{
+    timeWindow: string;
+    budget: string;
+    budgetFormatted: string;
+    amountUsed: string;
+    amountUsedFormatted: string;
+    remainingInWindow: string;
+    remainingInWindowFormatted: string;
+    windowStartTime: string;
+  }>;
+}
+
+// ── Channel types ──────────────────────────────────────────────────
+
+/**
+ * Enriched channel snapshot with formatted amounts and human-readable status.
+ * Returned by `client.listChannels()` and `client.getChannelInfo()`.
+ */
+export interface ChannelInfo {
+  channelId: string;
+  /** Human-readable status (e.g. "Active", "Expired", "Settlement Pending"). */
+  status: string;
+  provider: string;
+  agentId: string;
+  sessionKey: string;
+  eoaAddress: string;
+  walletContract: string;
+  token: string;
+  deposit: string;
+  depositFormatted: string;
+  maxSpend: string;
+  maxSpendFormatted: string;
+  maxPerCall: string;
+  maxPerCallFormatted: string;
+  settledAmount: string;
+  settledAmountFormatted: string;
+  refundAmount: string;
+  refundAmountFormatted: string;
+  openedAt: string;
+  expiresAt: string;
+  closedAt: string | null;
+  settlementDeadline: string | null;
+  highestClaimedCost: string | null;
+  highestSequenceNumber: string | null;
+  usageMerkleRoot: string | null;
+}
+
+// ── callPaidApi types ─────────────────────────────────────────────
+
+/**
+ * Options for the high-level `callPaidApi` helper.
+ * Pass these to `client.callPaidApi(url, options)` to make a single
+ * paid API call without manually handling 402 challenges.
+ */
+export interface CallPaidApiOptions {
+  /** HTTP method (default: "GET"). */
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  /** Serialised request body for POST/PUT. */
+  body?: string;
+  /** Additional request headers. */
+  headers?: Record<string, string>;
+  /**
+   * Payment routing mode.
+   * - "perCall"  — always sign a fresh x402 EIP-712 payment per request.
+   * - "batch"   — open a channel (or reuse existing) and route through it.
+   * - "stream"  — same as batch; intended for streaming/long-lived channels.
+   * - "channel" — alias for batch/stream; explicit channel mode.
+   * - "auto"    — prefer batch session → channel → perCall automatically (default).
+   */
+  mode?: "perCall" | "batch" | "stream" | "channel" | "auto";
+  /**
+   * Session Key Address
+   * - 0x${string} — explicitly specify a session key to use for signing payments.
+   */
+  sessionKeyAddress?: `0x${string}`;
+  /**
+   * AgentID
+   */
+  agentId?: string;
+  /** Cap on the maximum payment amount (wei). Throws if the offer exceeds this. */
+  maxAmount?: bigint;
+  /**
+   * Whether to automatically pay when a 402 challenge is received.
+   * When `false` the method returns immediately with `status: 402` instead
+   * of making a payment. Default: `true`.
+   */
+  autopay?: boolean;
+  /**
+   * Optional hook invoked when a 402 challenge is received, before any
+   * payment is attempted. Return `false` to abort the payment (the method
+   * returns with `status: 402`). Useful for the CLI decision engine or any
+   * UI that needs user confirmation.
+   *
+   * When omitted (or when `autopay` is `true`) all payments are approved
+   * automatically up to `maxAmount`.
+   */
+  onPaymentRequired?: (request: PaymentRequest) => Promise<boolean>;
+  /**
+   * Optional hook invoked after a successful payment. Receives the raw
+   * `PaymentResult` from the interceptor. Useful for logging and receipt
+   * formatting in the CLI.
+   */
+  onPayment?: (result: PaymentResult) => void;
+
+  // ── Channel-mode options (batch / stream / channel) ───────────────────
+
+  /**
+   * Reuse an existing open channel instead of opening a new one.
+   * When provided, the channel must already be open and associated with the
+   * same provider as the API endpoint's 402 offer.
+   */
+  channelId?: `0x${string}`;
+  /**
+   * Initial channel deposit in wei.
+   * Default: the provider's `recommendedDeposit` from the 402 offer, or 10× `maxPerCall`.
+   */
+  deposit?: bigint;
+  /**
+   * Maximum cost cap per individual API call in wei.
+   * Default: the provider's `maxRatePerCall` from the 402 offer.
+   */
+  maxPerCall?: bigint;
+  /**
+   * Channel lifetime in seconds.
+   * Default: the provider's `maxDuration` from the 402 offer, or 3600.
+   */
+  maxDuration?: number;
+  /**
+   * ERC-20 token address to use for channel payments.
+   * Default: the network default (DmUSDT).
+   */
+  token?: string;
+  /**
+   * Wait for the provider to activate the channel before making the first call.
+   * Activation is required before calls are accepted. Default: `true`.
+   */
+  waitForActivation?: boolean;
+}
+
+/** Structured result from `callPaidApi`. */
+export interface CallPaidApiResult {
+  /** HTTP status code of the final response. */
+  status: number;
+  /** Parsed JSON body (or raw string if not valid JSON). */
+  data: unknown;
+  /**
+   * Payment details. `null` when no payment was required (non-402 response)
+   * or when `autopay` was disabled.
+   */
+  payment: {
+    method: "perCall" | "channel" | "batch";
+    /** Amount paid in wei as a decimal string. */
+    amount: string;
+    /** Session key address used to sign the payment. */
+    sessionKey?: string;
+    /** Recipient address (provider). */
+    recipient?: string;
+    /** Payment nonce as decimal string. */
+    nonce?: string;
+    /** On-chain tx hash (present for legacy direct-settlement paths). */
+    txHash?: string;
+  } | null;
+  /** Channel ID used when mode is batch / stream / channel. */
+  channelId?: `0x${string}`;
+  /** `true` when this call opened a new channel (vs reusing an existing one). */
+  channelOpened?: boolean;
+  /** On-chain tx hash of the channel open transaction (present when `channelOpened` is `true`). */
+  channelOpenTxHash?: string;
+  /** Provider address the channel was opened with. */
+  channelProvider?: string;
+  /** ERC-20 token asset address used for the channel. */
+  channelAsset?: string;
+}
+
+// ── Channel settlement types ──────────────────────────────────────
+
+/**
+ * Selector for which channel(s) to settle.
+ * Precedence: channelId > sessionKey > agentId.
+ * At least one field must be provided.
+ */
+export interface ChannelSettlementSelector {
+  /** Settle this specific channel (highest precedence). */
+  channelId?: `0x${string}`;
+  /** Settle all expired channels for this session key. */
+  sessionKey?: string;
+  /** Settle all expired channels for this agent ID (lowest precedence). */
+  agentId?: string | bigint;
+}
+
+/** Options for `initiateSettlements`. */
+export interface InitiateSettlementOptions {
+  /**
+   * When `true`, settle channels regardless of whether they have expired.
+   * By default only expired channels are settled when using sessionKey/agentId selectors.
+   */
+  forceActiveClose?: boolean;
+}
+
+/** Result for a single channel settlement attempt. */
+export interface ChannelSettlementResult {
+  channelId: string;
+  /** Outcome of the settlement attempt. */
+  status: "success" | "already_pending" | "already_closed" | "error";
+  /** On-chain tx hash (present on success). */
+  txHash?: string;
+  /** ISO-8601 settlement deadline (present when known). */
+  settlementDeadline?: string;
+  /** Provider address (present when the channel state was fetched). */
+  provider?: string;
+  /** Whether the AA (gasless) path was used. */
+  usedAaPath?: boolean;
+  /** Whether a provider-signed receipt claim was included. */
+  usedReceiptClaim?: boolean;
+  /** Human-readable description (present for non-success statuses). */
+  message?: string;
+}
+
+// ── Status helpers (shared by CLI + SDK methods) ──────────────────
+
+/**
+ * Compute the effective human-readable status for a session,
+ * accounting for expiry even when the indexer still shows "ACTIVE".
+ */
+export function effectiveSessionStatus(session: IndexedSession): string {
+  const now = Math.floor(Date.now() / 1000);
+  const upper = session.status.trim().toUpperCase();
+  if (upper === "ACTIVE" && Number(session.validUntil) <= now) return "Expired";
+  const s = session.status.trim().toLowerCase();
+  return s ? s[0].toUpperCase() + s.slice(1) : "Unknown";
+}
+
+/**
+ * Compute the human-readable label for a channel's status,
+ * accounting for expiry even when the indexer still shows "ACTIVE".
+ */
+export function effectiveChannelStatus(
+  status: string,
+  expiresAt?: string | number | null,
+): string {
+  const expiresAtNum = Number(expiresAt);
+  if (
+    Number.isFinite(expiresAtNum) &&
+    expiresAtNum > 0 &&
+    expiresAtNum < Math.floor(Date.now() / 1000) &&
+    status.trim().toUpperCase() === "ACTIVE"
+  ) {
+    return "Expired";
+  }
+  switch (status.toUpperCase()) {
+    case "OPEN":
+      return "Pending Activation";
+    case "ACTIVE":
+      return "Active";
+    case "SETTLEMENT_PENDING":
+      return "Settlement Pending";
+    case "CLOSED":
+      return "Closed";
+    default:
+      return status || "Unknown";
+  }
+}
 
 // ── CreateOptions ──────────────────────────────────────────────────
 
@@ -148,6 +493,47 @@ export interface KiteSettleClientOptions {
    * channel-bound session key must be used regardless of current spend/expiry.
    */
   allowUnavailableSession?: boolean;
+}
+
+export interface AgentMetadataSummary {
+  name?: string;
+  shortDescription?: string;
+  raw?: Record<string, unknown>;
+}
+
+// ── Internal helpers ───────────────────────────────────────────────
+
+/** Map an `IndexedChannel` to a fully enriched `ChannelInfo`. */
+function enrichChannel(ch: IndexedChannel): ChannelInfo {
+  const fmt18 = (raw: string | null | undefined) =>
+    formatUnits(BigInt(raw ?? "0"), 18);
+  return {
+    channelId: ch.channelId,
+    status: effectiveChannelStatus(ch.status, ch.expiresAt),
+    provider: ch.provider,
+    agentId: ch.agent?.agentId ?? "",
+    sessionKey: ch.session?.sessionKey ?? "",
+    eoaAddress: ch.user?.address ?? ch.user?.id ?? "",
+    walletContract: ch.walletContract ?? "",
+    token: ch.token,
+    deposit: ch.deposit,
+    depositFormatted: fmt18(ch.deposit),
+    maxSpend: ch.maxSpend,
+    maxSpendFormatted: fmt18(ch.maxSpend),
+    maxPerCall: ch.maxPerCall,
+    maxPerCallFormatted: fmt18(ch.maxPerCall),
+    settledAmount: ch.settledAmount,
+    settledAmountFormatted: fmt18(ch.settledAmount),
+    refundAmount: ch.refundAmount,
+    refundAmountFormatted: fmt18(ch.refundAmount),
+    openedAt: ch.openedAt,
+    expiresAt: ch.expiresAt,
+    closedAt: ch.closedAt ?? null,
+    settlementDeadline: ch.settlementDeadline ?? null,
+    highestClaimedCost: ch.highestClaimedCost ?? null,
+    highestSequenceNumber: ch.highestSequenceNumber ?? null,
+    usageMerkleRoot: ch.usageMerkleRoot ?? null,
+  };
 }
 
 // ── KiteSettleClient ───────────────────────────────────────────────
@@ -391,7 +777,7 @@ export class KiteSettleClient {
     }
 
     const indexedSessions = await getSessionsByAgent(
-      `0x${agentId}`,
+      `0x${agentId.toString(16)}`,
       onchainSessions.length,
       0,
     ).catch(() => [] as IndexedSession[]);
@@ -535,10 +921,9 @@ export class KiteSettleClient {
       // Fallback: re-derive deterministically from a stored EOA private key.
       // Useful for agents onboarded before the plain-key migration, or when
       // the session private key var was manually deleted.
-      const eoaKeyCandidates = [
-        getVar("PRIVATE_KEY"),
-        getVar("DEPLOYER_KEY"),
-      ].filter(Boolean) as string[];
+      const eoaKeyCandidates = [getCredential(), getVar("DEPLOYER_KEY")].filter(
+        Boolean,
+      ) as string[];
 
       outer: for (const eoaKeyHex of eoaKeyCandidates) {
         const eoaKeyBytes = new Uint8Array(
@@ -632,15 +1017,15 @@ export class KiteSettleClient {
   }
 
   /**
-   * Create a client from the EOA credential stored in the local vars store
-   * (set by `kite init` / `kite vars set PRIVATE_KEY`).
+   * Create a client from the EOA credential stored by `kite init`
+   * (~/.kite-agent-pay/config.json).
    */
   static async fromStoredCredential(
     options: Omit<KiteSettleClientOptions, "credential" | "agentId"> = {},
   ): Promise<KiteSettleClient> {
-    const credential = getVar("PRIVATE_KEY");
+    const credential = getCredential();
     if (!credential) {
-      throw new Error("No credential found in vars store. Run: npx kite init");
+      throw new Error("No credential found. Run: npx kite init");
     }
     return KiteSettleClient.create({ ...options, credential });
   }
@@ -695,6 +1080,796 @@ export class KiteSettleClient {
     return this.requirePaymentClient().fetch(url, init, options);
   }
 
+  /**
+   * Make a single paid API call and return a structured result.
+   *
+   * This is the high-level entry point shared by the CLI (perCall/auto
+   * modes) and the MCP tool. It:
+   *  1. Probes the URL — returns early if the endpoint does not require payment.
+   *  2. On a 402 challenge, delegates to `fetchWithPayment` which routes
+   *     via batch / channel / perCall according to `options.mode` and any
+   *     active sessions / channels that were pre-registered.
+   *  3. Returns a structured `CallPaidApiResult` with the response body and
+   *     a payment receipt.
+   *
+   * For channel modes (`"batch"`, `"stream"`, `"channel"`), the method opens
+   * a new channel (or reuses `options.channelId`) and makes the call via
+   * channel headers. See `CallPaidApiOptions` for the full channel config.
+   *
+   * The caller must have been created with a credential (agent mode or EOA
+   * mode). A read-only client throws when `fetchWithPayment` is called.
+   *
+   * @example
+   * const client = await KiteSettleClient.create({ agentId: 1n });
+   * const result = await client.callPaidApi("https://api.example.com/data");
+   */
+  async callPaidApi(
+    url: string,
+    options: CallPaidApiOptions = {},
+  ): Promise<CallPaidApiResult> {
+    const { mode = "auto" } = options;
+
+    // ── Channel-based modes: open/reuse channel, call via channel headers ──
+    if (mode === "batch" || mode === "stream" || mode === "channel") {
+      return this._callPaidApiViaChannel(url, options);
+    }
+
+    // ── perCall / auto: probe then route via the x402 interceptor ──────────
+    const {
+      method = "GET",
+      body,
+      headers = {},
+      maxAmount,
+      autopay = true,
+      onPaymentRequired,
+      onPayment,
+    } = options;
+
+    const initHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...headers,
+    };
+    const init: RequestInit = { method, headers: initHeaders };
+    if (body && (method === "POST" || method === "PUT")) {
+      init.body = body;
+    }
+
+    // ── 1. Probe: no payment headers yet ──────────────────────────────
+    const probe = await globalThis.fetch(url, init);
+
+    if (probe.status !== 402) {
+      const text = await probe.text();
+      return { status: probe.status, data: _tryParseJSON(text), payment: null };
+    }
+
+    // ── 2. Not paying? Return 402 early ───────────────────────────────
+    if (!autopay) {
+      const text = await probe.text().catch(() => "");
+      return {
+        status: 402,
+        data: _tryParseJSON(text) ?? {
+          error: "Payment required but autopay is disabled",
+        },
+        payment: null,
+      };
+    }
+
+    // ── 3. Enforce maxAmount cap before paying ─────────────────────────
+    if (maxAmount !== undefined) {
+      const challengeText = await probe.text();
+      const challenge = JSON.parse(challengeText) as {
+        accepts?: Array<{ maxAmountRequired?: string }>;
+      };
+      const offered = BigInt(challenge.accepts?.[0]?.maxAmountRequired ?? "0");
+      if (offered > maxAmount) {
+        throw new Error(
+          `Provider price ${offered} wei exceeds your maxAmount cap ${maxAmount} wei.`,
+        );
+      }
+    }
+
+    // ── 4. Pay via the unified interceptor ───────────────────────────
+    let capturedPayment: CallPaidApiResult["payment"] = null;
+
+    const response = await this.fetchWithPayment(url, init, {
+      paymentMode: mode,
+      maxPaymentPerCall: maxAmount,
+      onPaymentRequired,
+      onPayment: (result) => {
+        capturedPayment = {
+          method: result.method,
+          amount: result.amount.toString(),
+          txHash: result.txHash,
+        };
+        onPayment?.(result);
+      },
+    });
+
+    const responseText = await response.text();
+    return {
+      status: response.status,
+      data: _tryParseJSON(responseText),
+      payment: capturedPayment,
+    };
+  }
+
+  /**
+   * Open a channel (or reuse an existing one) and make a single API call
+   * via channel headers. Used internally by `callPaidApi` for batch/stream/channel modes.
+   *
+   * Handles the full flow:
+   *  1. Probes the 402 offer to discover provider address, asset, and rate limits.
+   *  2. Opens a new channel via `this.openChannel()`, or reuses `options.channelId`.
+   *  3. Optionally waits for the provider to activate the channel.
+   *  4. Makes one HTTP call with channel payment headers.
+   *  5. Extracts the provider-signed receipt and fires `onPayment`.
+   */
+  private async _callPaidApiViaChannel(
+    url: string,
+    options: CallPaidApiOptions,
+  ): Promise<CallPaidApiResult> {
+    const {
+      method = "GET",
+      body,
+      headers = {},
+      channelId: existingChannelId,
+      deposit: depositOverride,
+      maxPerCall: maxPerCallOverride,
+      maxDuration,
+      token: tokenOverride,
+      waitForActivation = true,
+      onPayment,
+      sessionKeyAddress,
+      agentId,
+    } = options;
+
+    const initHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...headers,
+    };
+
+    // ── 1. Probe for 402 offer ────────────────────────────────────────────
+    const probeResult = await probeApi402Offer(url, tokenOverride);
+
+    if (!probeResult) {
+      // No payment required — direct call
+      const init: RequestInit = {
+        method,
+        headers: initHeaders,
+        ...(body && (method === "POST" || method === "PUT") ? { body } : {}),
+      };
+      const response = await globalThis.fetch(url, init);
+      const text = await response.text();
+      return {
+        status: response.status,
+        data: _tryParseJSON(text),
+        payment: null,
+      };
+    }
+
+    const { offer, raw } = probeResult;
+    const channelOptions = (raw as any)?.channelOptions as
+      | { recommendedDeposit?: string; maxDuration?: number }
+      | undefined;
+
+    // ── 2. Open or reuse channel ──────────────────────────────────────────
+    let channelId: `0x${string}`;
+    let channelOpened = false;
+    let channelOpenTxHash: string | undefined;
+
+    if (existingChannelId) {
+      channelId = existingChannelId;
+    } else {
+      const ratePerCall =
+        maxPerCallOverride ??
+        (offer.maxRatePerCall
+          ? BigInt(offer.maxRatePerCall)
+          : BigInt(offer.maxAmountRequired));
+
+      const deposit =
+        depositOverride ??
+        (channelOptions?.recommendedDeposit
+          ? BigInt(channelOptions.recommendedDeposit)
+          : ratePerCall * 10n);
+
+      const duration = maxDuration ?? channelOptions?.maxDuration ?? 3600;
+
+      const walletContractForSpending = (await this.getPaymentClient()
+        .getContractService()
+        .resolveWalletContractForSession(
+          sessionKeyAddress as `0x${string}`,
+        )) as `0x${string}`;
+
+      const channelResult =
+        await this.getContractService().openChannelViaVaultBatch(
+          sessionKeyAddress as `0x${string}`,
+          walletContractForSpending,
+          offer.payTo,
+          offer.asset,
+          0,
+          deposit,
+          deposit,
+          duration,
+          ratePerCall,
+        );
+
+      channelId = channelResult.channelId as `0x${string}`;
+      channelOpenTxHash = channelResult.txHash;
+      channelOpened = true;
+
+      if (waitForActivation) {
+        await waitForChannelActive(this, channelId);
+      }
+    }
+
+    // Register the channel so the interceptor routes through it
+    this.setChannelForProvider(offer.payTo, channelId);
+
+    // ── 3. Make the API call with channel headers ─────────────────────────
+    const channelHeaders = buildChannelHeaders(channelId, null);
+    const allHeaders: Record<string, string> = {
+      ...initHeaders,
+      ...channelHeaders,
+    };
+    const callInit: RequestInit = {
+      method,
+      headers: allHeaders,
+      ...(body && (method === "POST" || method === "PUT") ? { body } : {}),
+    };
+
+    const response = await this.requirePaymentClient().fetch(url, callInit);
+    const responseText = await response.text();
+    const data = _tryParseJSON(responseText);
+
+    // ── 4. Extract provider receipt and fire callback ─────────────────────
+    const receipt = extractChannelReceipt(data, response.headers);
+
+    if (receipt && onPayment) {
+      onPayment({
+        method: "channel",
+        amount: BigInt(receipt.cumulativeCost),
+        success: true,
+      });
+    }
+
+    return {
+      status: response.status,
+      data,
+      payment: receipt
+        ? { method: "channel", amount: receipt.cumulativeCost }
+        : null,
+      channelId,
+      channelOpened,
+      channelOpenTxHash,
+      channelProvider: offer.payTo,
+      channelAsset: offer.asset,
+    };
+  }
+
+  // ── Channel Settlement ────────────────────────────────────────
+
+  /**
+   * Core per-channel settlement logic extracted from the CLI `channel close` command.
+   * Tries the AA (gasless) path first, falls back to direct contract calls.
+   * @private
+   */
+  private async _settleSingleChannel(
+    channelId: `0x${string}`,
+  ): Promise<ChannelSettlementResult> {
+    const contract = this.requirePaymentClient().getContractService();
+    const sessionKeyAddress = this.sessionKeyAddress as
+      | `0x${string}`
+      | undefined;
+
+    // ── Resolve local store data ───────────────────────────────
+    const stored = loadChannel(channelId);
+    const merkleRoot: `0x${string}` =
+      stored?.merkleRoot ??
+      "0x0000000000000000000000000000000000000000000000000000000000000000";
+    const latestReceipt: ChannelCallReceipt | null =
+      stored?.calls.at(-1)?.channelReceipt ?? null;
+
+    // ── Check on-chain state ───────────────────────────────────
+    const ch = await this.getChannel(channelId);
+
+    if (ch.status === ChannelStatus.Closed) {
+      return {
+        channelId,
+        status: "already_closed",
+        provider: ch.provider,
+        message: "Channel is already closed.",
+      };
+    }
+
+    if (ch.status === ChannelStatus.SettlementPending) {
+      const state = await this.getSettlementState(channelId).catch(() => ({
+        deadline: 0,
+      }));
+      return {
+        channelId,
+        status: "already_pending",
+        provider: ch.provider,
+        settlementDeadline:
+          state.deadline > 0
+            ? new Date(state.deadline * 1000).toISOString()
+            : undefined,
+        message: "Settlement already pending.",
+      };
+    }
+
+    // ── Prepare settlement parameters ──────────────────────────
+    const sequenceNumber = latestReceipt?.sequenceNumber ?? 0;
+    const cumulativeCost = latestReceipt
+      ? BigInt(latestReceipt.cumulativeCost)
+      : 0n;
+    const timestamp = latestReceipt?.timestamp ?? 0;
+    const providerSignature =
+      latestReceipt?.providerSignature ?? ("0x" as `0x${string}`);
+
+    let settleTxHash: string | undefined;
+    let usedAaPath = false;
+    let usedReceiptClaim = !!latestReceipt;
+    let aaError: Error | null = null;
+
+    // ── AA (gasless) path — agents must not fall back to direct tx ─
+    if (!sessionKeyAddress) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: "No session key available for AA settlement.",
+      };
+    }
+
+    const walletContract = await contract
+      .resolveWalletContractForSession(sessionKeyAddress)
+      .catch(() => null);
+
+    if (!walletContract) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: `Could not resolve ClientAgentVault wallet for session key ${sessionKeyAddress}. Ensure the session is registered on-chain.`,
+      };
+    }
+
+    // Try with the local receipt claim first (if available).
+    try {
+      settleTxHash = await contract.initiateSettlementViaVaultAA(
+        sessionKeyAddress,
+        walletContract,
+        channelId,
+        sequenceNumber,
+        cumulativeCost,
+        timestamp,
+        providerSignature,
+        merkleRoot,
+      );
+      usedAaPath = true;
+    } catch (err) {
+      aaError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    // If the receipt-based attempt failed and we had a receipt, retry with a zero claim.
+    if (!settleTxHash && latestReceipt) {
+      try {
+        settleTxHash = await contract.initiateSettlementViaVaultAA(
+          sessionKeyAddress,
+          walletContract,
+          channelId,
+          0,
+          0n,
+          0,
+          "0x" as `0x${string}`,
+          merkleRoot,
+        );
+        usedAaPath = true;
+        usedReceiptClaim = false;
+      } catch (err) {
+        aaError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+
+    if (!settleTxHash) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: aaError
+          ? `AA settlement failed: ${aaError.message}`
+          : "AA settlement failed: unknown error.",
+      };
+    }
+
+    const state = await this.getSettlementState(channelId).catch(() => ({
+      deadline: 0,
+    }));
+
+    return {
+      channelId,
+      status: "success",
+      txHash: settleTxHash,
+      provider: ch.provider,
+      usedAaPath,
+      usedReceiptClaim,
+      settlementDeadline:
+        state.deadline > 0
+          ? new Date(state.deadline * 1000).toISOString()
+          : undefined,
+    };
+  }
+
+  /**
+   * Finalize or force-close a single channel via the AA wallet (gasless).
+   *
+   * - If the channel is expired (Open/Active past expiry) → `forceCloseExpired` via AA.
+   * - If the channel has a pending settlement and the challenge window has closed → `finalize` via AA.
+   */
+  private async _finalizeOrForceCloseSingleChannel(
+    channelId: `0x${string}`,
+  ): Promise<ChannelSettlementResult> {
+    const contract = this.requirePaymentClient().getContractService();
+    const sessionKeyAddress = this.sessionKeyAddress as
+      | `0x${string}`
+      | undefined;
+
+    if (!sessionKeyAddress) {
+      return {
+        channelId,
+        status: "error",
+        message: "No session key available for AA finalization.",
+      };
+    }
+
+    const walletContract = await contract
+      .resolveWalletContractForSession(sessionKeyAddress)
+      .catch(() => null);
+
+    if (!walletContract) {
+      return {
+        channelId,
+        status: "error",
+        message: `Could not resolve ClientAgentVault wallet for session key ${sessionKeyAddress}.`,
+      };
+    }
+
+    const ch = await this.getChannel(channelId);
+
+    if (ch.status === ChannelStatus.Closed) {
+      return {
+        channelId,
+        status: "already_closed",
+        provider: ch.provider,
+        message: "Channel is already closed.",
+      };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+
+    // Pending settlement: finalize if challenge window has passed.
+    if (ch.status === ChannelStatus.SettlementPending) {
+      const state = await this.getSettlementState(channelId).catch(() => ({
+        deadline: 0,
+      }));
+
+      if (state.deadline > 0 && now <= state.deadline) {
+        return {
+          channelId,
+          status: "error",
+          provider: ch.provider,
+          message: `Challenge window still open until ${new Date(state.deadline * 1000).toISOString()}. Run again after the deadline.`,
+        };
+      }
+
+      const stored = loadChannel(channelId);
+      const merkleRoot: `0x${string}` =
+        stored?.merkleRoot ??
+        "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+      try {
+        const txHash = await contract.finalizeViaVaultAA(
+          sessionKeyAddress,
+          walletContract,
+          channelId,
+          merkleRoot,
+        );
+        return {
+          channelId,
+          status: "success",
+          txHash,
+          provider: ch.provider,
+          usedAaPath: true,
+          message: "Channel finalized via AA wallet.",
+        };
+      } catch (err) {
+        return {
+          channelId,
+          status: "error",
+          provider: ch.provider,
+          message: `AA finalize failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+
+    // Open / Active: force-close if the channel has expired past its grace period.
+    const isExpired = ch.expiresAt > 0 && now >= ch.expiresAt + 300;
+
+    if (!isExpired) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message:
+          ch.expiresAt > 0
+            ? `Channel not yet eligible for force-close (expires ${new Date(ch.expiresAt * 1000).toISOString()}).`
+            : "Channel has no expiry set — use `kite channel settle` to initiate settlement instead.",
+      };
+    }
+
+    try {
+      const txHash = await contract.forceCloseExpiredViaVaultAA(
+        sessionKeyAddress,
+        walletContract,
+        channelId,
+      );
+      return {
+        channelId,
+        status: "success",
+        txHash,
+        provider: ch.provider,
+        usedAaPath: true,
+        message:
+          "Force-close submitted via AA wallet. Settlement window is now open.",
+      };
+    } catch (err) {
+      return {
+        channelId,
+        status: "error",
+        provider: ch.provider,
+        message: `AA force-close failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Finalize or force-close one or more channels after the challenge window has closed.
+   *
+   * - Channels with `SettlementPending` status whose deadline has passed are **finalized**.
+   * - Channels that are `Open` / `Active` and have expired are **force-closed** to open the settlement window.
+   *
+   * All operations use the AA (gasless) path via the ClientAgentVault so no native gas
+   * is required from the session key.
+   *
+   * @example
+   * const results = await KiteSettleClient.finalizeChannels({ channelId: "0x…" });
+   * const results = await KiteSettleClient.finalizeChannels({ agentId: 1n });
+   */
+  static async finalizeChannels(
+    selector: ChannelSettlementSelector,
+  ): Promise<ChannelSettlementResult[]> {
+    const finalizeIndexedChannel = async (
+      ch: IndexedChannel,
+    ): Promise<ChannelSettlementResult> => {
+      try {
+        const channelClient = await KiteSettleClient.create({
+          agentId: BigInt(ch.agent.agentId),
+          sessionKey: ch.session.sessionKey,
+          allowUnavailableSession: true,
+        });
+        return await channelClient._finalizeOrForceCloseSingleChannel(
+          ch.channelId as `0x${string}`,
+        );
+      } catch (err: unknown) {
+        return {
+          channelId: ch.channelId,
+          status: "error",
+          message: String(err),
+        };
+      }
+    };
+
+    if (selector.channelId) {
+      const indexed = await getChannelById(selector.channelId).catch(
+        () => null,
+      );
+      if (!indexed) {
+        return [
+          {
+            channelId: selector.channelId,
+            status: "error",
+            message: `Channel ${selector.channelId} not found in indexer.`,
+          },
+        ];
+      }
+      return [await finalizeIndexedChannel(indexed)];
+    }
+
+    if (selector.sessionKey) {
+      const normalizedKey = (
+        selector.sessionKey.startsWith("0x")
+          ? selector.sessionKey.toLowerCase()
+          : `0x${selector.sessionKey.toLowerCase()}`
+      ) as `0x${string}`;
+
+      const indexedSession = await getSessionByKey(normalizedKey).catch(
+        () => null,
+      );
+      if (!indexedSession) {
+        throw new Error(`Session ${normalizedKey} not found in indexer.`);
+      }
+
+      const rawAgentId =
+        (indexedSession as any).agent?.agentId ?? indexedSession.agentId;
+      const agentEntityId = `0x${BigInt(rawAgentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels.filter(
+        (ch) =>
+          ch.session.sessionKey.toLowerCase() === normalizedKey.toLowerCase() &&
+          ch.status.toUpperCase() !== "CLOSED",
+      );
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(finalizeIndexedChannel));
+    }
+
+    if (selector.agentId !== undefined) {
+      const agentEntityId = `0x${BigInt(selector.agentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels.filter(
+        (ch) => ch.status.toUpperCase() !== "CLOSED",
+      );
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(finalizeIndexedChannel));
+    }
+
+    throw new Error(
+      "finalizeChannels requires at least one of: channelId, sessionKey, agentId.",
+    );
+  }
+
+  /**
+   * Initiate settlement for one or more payment channels.
+   *
+   * Resolves channels from the selector (precedence: channelId > sessionKey > agentId).
+   * For sessionKey / agentId selectors, only expired channels are settled unless
+   * `forceActiveClose` is `true`.
+   *
+   * Each channel is settled using a dedicated client created with the session key
+   * recorded for that channel in the indexer — so this method works correctly even
+   * when different channels belong to different sessions.
+   *
+   * This mirrors the `kite channel close` CLI logic — the provider API must still
+   * agree to the submitted receipts for settlement to finalize. Call
+   * `finalizeChannel()` after the challenge window closes.
+   *
+   * **Implemented path**: channelId (direct) → sessionKey (all session channels) →
+   * agentId (all agent channels), with the stated precedence order. Only one path
+   * is executed per call.
+   *
+   * @example
+   * // Settle one specific channel
+   * const results = await KiteSettleClient.initiateSettlements({ channelId: "0x…" });
+   *
+   * // Settle all expired channels for an agent
+   * const results = await KiteSettleClient.initiateSettlements({ agentId: 1n });
+   *
+   * // Force-settle all channels (including active ones) for a session
+   * const results = await KiteSettleClient.initiateSettlements(
+   *   { sessionKey: "0x…" },
+   *   { forceActiveClose: true },
+   * );
+   */
+  static async initiateSettlements(
+    selector: ChannelSettlementSelector,
+    options: InitiateSettlementOptions = {},
+  ): Promise<ChannelSettlementResult[]> {
+    const { forceActiveClose = false } = options;
+    const now = Math.floor(Date.now() / 1000);
+
+    const isSettleable = (ch: IndexedChannel): boolean => {
+      const status = ch.status.toUpperCase();
+      if (status === "CLOSED" || status === "SETTLEMENT_PENDING") return false;
+      return forceActiveClose || Number(ch.expiresAt) < now;
+    };
+
+    /**
+     * Create a client with the indexed channel's own session key and settle it.
+     * Each channel gets its own credentialed client so the AA path uses the
+     * correct session key regardless of which identifier was passed by the caller.
+     */
+    const settleIndexedChannel = async (
+      ch: IndexedChannel,
+    ): Promise<ChannelSettlementResult> => {
+      try {
+        const channelClient = await KiteSettleClient.create({
+          agentId: BigInt(ch.agent.agentId),
+          sessionKey: ch.session.sessionKey,
+          allowUnavailableSession: true,
+        });
+        return await channelClient._settleSingleChannel(
+          ch.channelId as `0x${string}`,
+        );
+      } catch (err: unknown) {
+        return {
+          channelId: ch.channelId,
+          status: "error",
+          message: String(err),
+        };
+      }
+    };
+
+    // ── channelId takes highest precedence ─────────────────────
+    if (selector.channelId) {
+      const indexed = await getChannelById(selector.channelId).catch(
+        () => null,
+      );
+      if (!indexed) {
+        return [
+          {
+            channelId: selector.channelId,
+            status: "error",
+            message: `Channel ${selector.channelId} not found in indexer.`,
+          },
+        ];
+      }
+      return [await settleIndexedChannel(indexed)];
+    }
+
+    // ── sessionKey ─────────────────────────────────────────────
+    if (selector.sessionKey) {
+      const normalizedKey = (
+        selector.sessionKey.startsWith("0x")
+          ? selector.sessionKey.toLowerCase()
+          : `0x${selector.sessionKey.toLowerCase()}`
+      ) as `0x${string}`;
+
+      const indexedSession = await getSessionByKey(normalizedKey).catch(
+        () => null,
+      );
+      if (!indexedSession) {
+        throw new Error(`Session ${normalizedKey} not found in indexer.`);
+      }
+
+      const rawAgentId =
+        (indexedSession as any).agent?.agentId ?? indexedSession.agentId;
+      const agentEntityId = `0x${BigInt(rawAgentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels
+        .filter(
+          (ch) =>
+            ch.session.sessionKey.toLowerCase() === normalizedKey.toLowerCase(),
+        )
+        .filter(isSettleable);
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(settleIndexedChannel));
+    }
+
+    // ── agentId (lowest precedence) ────────────────────────────
+    if (selector.agentId !== undefined) {
+      const agentEntityId = `0x${BigInt(selector.agentId).toString(16)}`;
+      const allChannels = await getChannelsByAgent(agentEntityId, 100, 0).catch(
+        () => [],
+      );
+      const eligible = allChannels.filter(isSettleable);
+
+      if (eligible.length === 0) return [];
+      return Promise.all(eligible.map(settleIndexedChannel));
+    }
+
+    throw new Error(
+      "initiateSettlements requires at least one of: channelId, sessionKey, agentId.",
+    );
+  }
+
   // ── Wallet ────────────────────────────────────────────────────
 
   /**
@@ -740,7 +1915,119 @@ export class KiteSettleClient {
       .catch(() => 0n);
   }
 
-  /** Deposit tokens into KiteAAWallet. Requires EOA credential (wallet owner). */
+  /**
+   * Full balance snapshot for an address: wallet balances + vault deposited balances.
+   *
+   * Works for any EOA — no credential required (read-only RPC calls only).
+   * Use `options.address` to query a different address than this client's own EOA.
+   * Use `options.tokens` to add extra token addresses on top of the default TOKENS list.
+   *
+   * @example
+   * // Self balance
+   * const result = await client.balance();
+   * // External address
+   * const result = await client.balance({ address: "0xabc…" });
+   * // With extra token
+   * const result = await client.balance({ tokens: ["0xTokenAddr"] });
+   */
+  async balance(options?: {
+    /** EOA address to query. Defaults to this client's own EOA. */
+    address?: string;
+    /** Additional token addresses to include alongside the default TOKENS list. */
+    tokens?: string[];
+  }): Promise<BalanceResult> {
+    const targetEoa = options?.address ?? this.eoaAddress;
+
+    // Prefer the existing payment client's contract service; fall back to a
+    // minimal read-only one so this works on createReadOnly() clients too.
+    const cs: ContractService =
+      this.paymentClient?.getContractService() ??
+      new ContractService(this.config, { getAddress: () => targetEoa });
+
+    const aaWalletAddress = await cs.resolveVaultWalletAddressFor(targetEoa);
+
+    // Native (KITE) token is always shown.
+    const nativeMeta = TOKENS.find(
+      (t) => t.address.toLowerCase() === zeroAddress.toLowerCase(),
+    ) ?? { address: zeroAddress, symbol: "KITE", decimals: 18 };
+
+    // If the caller specifies tokens, show only those + native.
+    // If no filter is given (empty or omitted), show all configured tokens.
+    type TokenMeta = { address: string; symbol: string; decimals: number };
+    let tokenList: TokenMeta[];
+    if (options?.tokens && options.tokens.length > 0) {
+      const requestedMeta = options.tokens.map((addr): TokenMeta => {
+        const known = TOKENS.find(
+          (t) => t.address.toLowerCase() === addr.toLowerCase(),
+        );
+        return (
+          known ?? {
+            address: addr,
+            symbol: addr.slice(0, 8) + "…",
+            decimals: 18,
+          }
+        );
+      });
+      // Prepend native, skipping duplicates.
+      tokenList = [
+        nativeMeta,
+        ...requestedMeta.filter(
+          (e) => e.address.toLowerCase() !== zeroAddress.toLowerCase(),
+        ),
+      ];
+    } else {
+      tokenList = [...TOKENS];
+    }
+
+    const results = await Promise.all(
+      tokenList.map(async (meta) => {
+        const isNative =
+          meta.address.toLowerCase() === zeroAddress.toLowerCase();
+        const [walletBalance, depositedBalance] = await Promise.all([
+          isNative
+            ? cs.getNativeBalance(targetEoa).catch(() => 0n)
+            : cs
+                .getTokenBalance(
+                  meta.address as `0x${string}`,
+                  targetEoa as `0x${string}`,
+                )
+                .catch(() => 0n),
+          isNative
+            ? cs.getDeposit(aaWalletAddress).catch(() => 0n)
+            : cs
+                .getAvailableBalance(
+                  aaWalletAddress,
+                  meta.address as `0x${string}`,
+                )
+                .catch(() => 0n),
+        ]);
+        return {
+          token: meta.address,
+          symbol: meta.symbol ?? "?",
+          decimals: meta.decimals ?? 18,
+          walletBalance,
+          walletBalanceFormatted: formatUnits(
+            walletBalance,
+            meta.decimals ?? 18,
+          ),
+          depositedBalance,
+          depositedBalanceFormatted: formatUnits(
+            depositedBalance,
+            meta.decimals ?? 18,
+          ),
+        } satisfies TokenBalance;
+      }),
+    );
+
+    return { eoaAddress: targetEoa, aaWalletAddress, tokens: results };
+  }
+
+  /** Access low-level contract helpers for advanced CLI and SDK flows. */
+  getContractService(): ContractService {
+    return this.requirePaymentClient().getContractService();
+  }
+
+  /** Deposit tokens into the configured wallet contract. Requires EOA credential. */
   async deposit(amount: bigint, token?: string): Promise<string> {
     return this.requireEoaClient().depositToWallet(
       amount,
@@ -748,7 +2035,7 @@ export class KiteSettleClient {
     );
   }
 
-  /** Withdraw tokens from KiteAAWallet back to the EOA. Requires EOA credential. */
+  /** Withdraw tokens from the configured wallet contract back to the EOA. Requires EOA credential. */
   async withdraw(amount: bigint, token?: string): Promise<string> {
     return this.requireEoaClient().withdrawFromWallet(
       amount,
@@ -759,8 +2046,8 @@ export class KiteSettleClient {
   // ── Identity / Registration Status ──────────────────────────
 
   /**
-   * Check whether an address (default: EOA) is registered on-chain.
-   * Read-only — works in agent mode and EOA mode; not available in read-only mode.
+   * Check legacy KiteAAWallet registration status for an address.
+   * Note: onboarding no longer depends on this flag.
    */
   async isRegistered(address?: string): Promise<boolean> {
     return this.requirePaymentClient()
@@ -771,8 +2058,8 @@ export class KiteSettleClient {
   // ── Agent & Session Registration ─────────────────────────────
 
   /**
-   * Full one-step onboarding: register EOA → create agent → register
-   * session key → optionally fund wallet. Requires EOA credential.
+   * Full onboarding: ensure AA wallet → register agentId → create session key + session rule.
+   * Requires EOA credential.
    */
   async onboard(
     options: OnboardOptions,
@@ -792,23 +2079,43 @@ export class KiteSettleClient {
       .registerAgentOnRegistry(metadata);
   }
 
-  /** Register a session key for an agent on KiteAAWallet. Requires EOA credential. */
+  /**
+   * Register a session key rule on IdentityRegistry for an existing agent.
+   * The session key must already exist on the vault.
+   */
   async registerSessionKey(
     agentId: bigint,
     sessionKey: string,
     sessionIndex: number,
     validUntil: number,
   ): Promise<string> {
-    return this.requireEoaClient()
-      .getContractService()
-      .addSessionKeyRule(
-        agentId,
-        sessionKey,
-        BigInt(0),
-        BigInt(0),
-        BigInt(validUntil),
-        [],
+    const cs = this.requireEoaClient().getContractService();
+    let walletContract = this.config.contracts.kiteAAWallet;
+
+    if (this.config.contracts.walletFactory) {
+      const resolved = await cs.getWalletFromFactory(this.eoaAddress);
+      if (
+        resolved &&
+        resolved !== "0x0000000000000000000000000000000000000000"
+      ) {
+        walletContract = resolved;
+      }
+    }
+
+    if (!walletContract) {
+      throw new Error(
+        "Unable to resolve wallet contract for session registration. Configure contracts.walletFactory or contracts.kiteAAWallet.",
       );
+    }
+
+    return cs.registerSessionOnRegistry({
+      agentId,
+      sessionKey,
+      user: this.eoaAddress,
+      walletContract,
+      validUntil: BigInt(validUntil),
+      blockedAgents: [],
+    });
   }
 
   /** Resolve an agent by its on-chain ID → owner address. */
@@ -820,11 +2127,101 @@ export class KiteSettleClient {
       .catch(() => null);
   }
 
+  /** Derive owner AA wallet (ClientVault) from the active EOA address. */
+  async getOwnerAAWalletAddress(): Promise<string> {
+    return this.requirePaymentClient()
+      .getContractService()
+      .resolveOwnerVaultWalletAddress();
+  }
+
   /** Look up an agent by its on-chain ID (agentId = bigint tokenId). */
   async getAgent(agentId: bigint) {
     return this.requirePaymentClient()
       .getContractService()
       .getAgentURI(agentId);
+  }
+
+  /**
+   * Fetch owner, agentURI, and AA wallet for an agent in a single parallel read.
+   * Works on `createReadOnly()` clients — no credential required.
+   *
+   * @returns `{ agentId, owner, agentURI, walletContract, registeredOwner }`
+   *   Each field is `null` when the on-chain read fails (agent may not exist).
+   */
+  async getAgentInfo(agentId: bigint | string): Promise<{
+    agentId: string;
+    owner: string | null;
+    agentURI: string | null;
+    walletContract: string | null;
+    registeredOwner: string | null;
+  }> {
+    const id = typeof agentId === "string" ? BigInt(agentId) : agentId;
+    return this.readOnlyCs().getAgentInfo(id);
+  }
+
+  /**
+   * Decode agentURI metadata when it is JSON, base64 JSON, or data URI with base64 JSON.
+   * Returns null when metadata cannot be decoded into a JSON object.
+   */
+  decodeAgentMetadataURI(agentURI: string): AgentMetadataSummary | null {
+    const trimmed = agentURI.trim();
+    const parseObject = (text: string): Record<string, unknown> | null => {
+      try {
+        const parsed = JSON.parse(text);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed)
+        ) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        // ignore parsing errors and try other decode paths
+      }
+      return null;
+    };
+
+    const extractSummary = (
+      obj: Record<string, unknown>,
+    ): AgentMetadataSummary => {
+      const name = typeof obj.name === "string" ? obj.name.trim() : undefined;
+      const descValue =
+        typeof obj.description === "string"
+          ? obj.description
+          : typeof obj.shortDescription === "string"
+            ? obj.shortDescription
+            : undefined;
+
+      const shortDescription = descValue?.replace(/\s+/g, " ").trim();
+      return {
+        name: name || undefined,
+        shortDescription: shortDescription || undefined,
+        raw: obj,
+      };
+    };
+
+    if (trimmed.startsWith("{")) {
+      const obj = parseObject(trimmed);
+      return obj ? extractSummary(obj) : null;
+    }
+
+    const dataUriPrefix = "data:application/json;base64,";
+    if (trimmed.toLowerCase().startsWith(dataUriPrefix)) {
+      const b64 = trimmed.slice(dataUriPrefix.length);
+      try {
+        const obj = parseObject(Buffer.from(b64, "base64").toString("utf8"));
+        return obj ? extractSummary(obj) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    try {
+      const obj = parseObject(Buffer.from(trimmed, "base64").toString("utf8"));
+      return obj ? extractSummary(obj) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Update the agentURI stored on IdentityRegistry. Requires EOA credential. */
@@ -840,7 +2237,19 @@ export class KiteSettleClient {
   async openChannel(
     channelConfig: ChannelConfig,
   ): Promise<{ txHash: string; channelId: `0x${string}` }> {
-    return this.requirePaymentClient().openChannel(channelConfig);
+    const resolvedConfig = { ...channelConfig };
+
+    if (!resolvedConfig.walletContract && this.sessionKeyAddress) {
+      const walletContract = await this.requirePaymentClient()
+        .getContractService()
+        .resolveWalletContractForSession(this.sessionKeyAddress)
+        .catch(() => null);
+      if (walletContract) {
+        resolvedConfig.walletContract = walletContract;
+      }
+    }
+
+    return this.requirePaymentClient().openChannel(resolvedConfig);
   }
 
   /** Activate a payment channel (provider-side confirmation). */
@@ -1050,6 +2459,256 @@ export class KiteSettleClient {
   /** Get all session keys registered for an agent. */
   async getSessionsByAgent(agentId: string): Promise<IndexedSession[]> {
     return getSessionsByAgent(agentId);
+  }
+
+  /**
+   * Build a lightweight read-only ContractService from this instance's config.
+   * Works even when the client was created with `createReadOnly()` (no credential).
+   */
+  private readOnlyCs(): ContractService {
+    return (
+      this.paymentClient?.getContractService() ??
+      new ContractService(this.config, { getAddress: () => "" })
+    );
+  }
+
+  /**
+   * Fetch on-chain spending data for a session from the ClientAgentVault.
+   * Returns the first spending rule's budget/usage (the common case) plus the
+   * full rules array.  Falls back to `fallbackMaxAmount` / `0n` when no rules
+   * are configured or when the contract call fails.
+   */
+  private async resolveSessionSpend(
+    cs: ContractService,
+    walletContract: `0x${string}`,
+    sessionId: string,
+    fallbackMaxAmount: bigint,
+  ): Promise<{
+    maxAmount: bigint;
+    spent: bigint;
+    spendingRules: SessionInfo["spendingRules"];
+  }> {
+    const rules = await cs
+      .getVaultSpendingRules(walletContract, sessionId as `0x${string}`)
+      .catch(
+        () =>
+          [] as Awaited<ReturnType<ContractService["getVaultSpendingRules"]>>,
+      );
+
+    const enrichedRules: SessionInfo["spendingRules"] = rules.map((r) => {
+      const budget = r.rule.budget;
+      const used = r.usage.amountUsed;
+      const rem = budget > used ? budget - used : 0n;
+      return {
+        timeWindow: r.rule.timeWindow.toString(),
+        budget: budget.toString(),
+        budgetFormatted: formatUnits(budget, 18),
+        amountUsed: used.toString(),
+        amountUsedFormatted: formatUnits(used, 18),
+        remainingInWindow: rem.toString(),
+        remainingInWindowFormatted: formatUnits(rem, 18),
+        windowStartTime: r.usage.currentTimeWindowStartTime.toString(),
+      };
+    });
+
+    if (enrichedRules.length === 0) {
+      return { maxAmount: fallbackMaxAmount, spent: 0n, spendingRules: [] };
+    }
+
+    // Use the first rule as the primary budget/spent (most deployments have one).
+    const primary = rules[0];
+    return {
+      maxAmount: primary.rule.budget,
+      spent: primary.usage.amountUsed,
+      spendingRules: enrichedRules,
+    };
+  }
+
+  /**
+   * List enriched session snapshots for an agent, including spent/remaining amounts.
+   *
+   * @param agentId  On-chain agentId (numeric or hex string).
+   * @param options  Pagination and optional agentId normalization.
+   */
+  async listSessions(
+    agentId: string | bigint | number,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<SessionInfo[]> {
+    const entityId = `0x${BigInt(agentId).toString(16)}`;
+    const { limit = 10, offset = 0 } = options;
+    const sessions = await getSessionsByAgent(entityId, limit, offset);
+
+    const cs = this.readOnlyCs();
+    // Resolve wallet contract once per agent — all sessions share the same vault.
+    const agent = await getAgentById(`0x${BigInt(agentId).toString(16)}`).catch(
+      () => null,
+    );
+    const agentWallet = (agent?.owner.aaWallet.address ||
+      zeroAddress) as `0x${string}`;
+
+    return Promise.all(
+      sessions.map(async (session) => {
+        const fallbackMax = BigInt(session.maxLimit ?? "0");
+        const { maxAmount, spent, spendingRules } = agentWallet
+          ? await this.resolveSessionSpend(
+              cs,
+              agentWallet,
+              session.sessionId,
+              fallbackMax,
+            )
+          : {
+              maxAmount: fallbackMax,
+              spent: 0n,
+              spendingRules: [] as SessionInfo["spendingRules"],
+            };
+
+        const remaining = maxAmount > spent ? maxAmount - spent : 0n;
+        return {
+          sessionKey: session.sessionKey,
+          sessionId: session.sessionId,
+          agentId: session.agent?.agentId ?? session.agentId ?? String(agentId),
+          status: effectiveSessionStatus(session),
+          validUntil: session.validUntil,
+          validUntilFormatted: new Date(Number(session.validUntil) * 1000)
+            .toISOString()
+            .replace("T", " ")
+            .replace(".000Z", " UTC"),
+          maxAmount: maxAmount.toString(),
+          maxAmountFormatted: formatUnits(maxAmount, 18),
+          valueLimit: session.valueLimit ?? "0",
+          valueLimitFormatted: formatUnits(
+            BigInt(session.valueLimit ?? "0"),
+            18,
+          ),
+          spent: spent.toString(),
+          spentFormatted: formatUnits(spent, 18),
+          remaining: remaining.toString(),
+          remainingFormatted: formatUnits(remaining, 18),
+          blockedAgents: session.blockedAgents ?? [],
+          createdAt: session.createdAt,
+          spendingRules,
+        } satisfies SessionInfo;
+      }),
+    );
+  }
+
+  /**
+   * Get an enriched snapshot for a single session key.
+   * Returns `null` if not found in the indexer.
+   */
+  async getSessionInfo(sessionKey: string): Promise<SessionInfo | null> {
+    const session = await getSessionByKey(sessionKey).catch(() => null);
+    if (!session) return null;
+
+    const cs = this.readOnlyCs();
+    const rawAgentId = session.agent?.agentId ?? session.agentId;
+    const agent = await getAgentById(
+      `0x${BigInt(rawAgentId).toString(16)}`,
+    ).catch(() => null);
+    const agentWallet = (agent?.owner.aaWallet.address ||
+      zeroAddress) as `0x${string}`;
+
+    const fallbackMax = BigInt(session.maxLimit ?? "0");
+    const { maxAmount, spent, spendingRules } = agentWallet
+      ? await this.resolveSessionSpend(
+          cs,
+          agentWallet,
+          session.sessionId,
+          fallbackMax,
+        )
+      : {
+          maxAmount: fallbackMax,
+          spent: 0n,
+          spendingRules: [] as SessionInfo["spendingRules"],
+        };
+
+    const remaining = maxAmount > spent ? maxAmount - spent : 0n;
+
+    return {
+      sessionKey: session.sessionKey,
+      sessionId: session.sessionId,
+      agentId: rawAgentId ?? "",
+      status: effectiveSessionStatus(session),
+      validUntil: session.validUntil,
+      validUntilFormatted: new Date(Number(session.validUntil) * 1000)
+        .toISOString()
+        .replace("T", " ")
+        .replace(".000Z", " UTC"),
+      maxAmount: maxAmount.toString(),
+      maxAmountFormatted: formatUnits(maxAmount, 18),
+      valueLimit: session.valueLimit ?? "0",
+      valueLimitFormatted: formatUnits(BigInt(session.valueLimit ?? "0"), 18),
+      spent: spent.toString(),
+      spentFormatted: formatUnits(spent, 18),
+      remaining: remaining.toString(),
+      remainingFormatted: formatUnits(remaining, 18),
+      blockedAgents: session.blockedAgents ?? [],
+      createdAt: session.createdAt,
+      spendingRules,
+    };
+  }
+
+  /**
+   * List enriched channel snapshots for an agent.
+   *
+   * @param agentId  On-chain agentId (numeric or hex string).
+   * @param options  Pagination options.
+   */
+  async listChannels(
+    agentId: string | bigint | number,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<ChannelInfo[]> {
+    const entityId = `0x${BigInt(agentId).toString(16)}`;
+    const { limit = 10, offset = 0 } = options;
+    const channels = await getChannelsByAgent(entityId, limit, offset);
+    return channels.map((ch) => enrichChannel(ch));
+  }
+
+  /**
+   * List enriched channel snapshots for a specific session key.
+   * Resolves the agent from the indexer and filters to channels belonging
+   * to the given session.
+   *
+   * @param sessionKey  Session key address (with or without 0x prefix).
+   * @param options     Pagination options applied when fetching agent channels.
+   */
+  async listChannelsBySession(
+    sessionKey: string,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<ChannelInfo[]> {
+    const normalizedKey = (
+      sessionKey.startsWith("0x")
+        ? sessionKey.toLowerCase()
+        : `0x${sessionKey.toLowerCase()}`
+    ) as `0x${string}`;
+
+    const indexedSession = await getSessionByKey(normalizedKey).catch(
+      () => null,
+    );
+    if (!indexedSession) return [];
+
+    const rawAgentId =
+      (indexedSession as any).agent?.agentId ?? indexedSession.agentId;
+    const entityId = `0x${BigInt(rawAgentId).toString(16)}`;
+    const { limit = 10, offset = 0 } = options;
+    const allChannels = await getChannelsByAgent(entityId, limit, offset);
+
+    return allChannels
+      .filter(
+        (ch) =>
+          ch.session.sessionKey.toLowerCase() === normalizedKey.toLowerCase(),
+      )
+      .map((ch) => enrichChannel(ch));
+  }
+
+  /**
+   * Get an enriched snapshot for a single channel by its channelId.
+   * Returns `null` if not found in the indexer.
+   */
+  async getChannelInfo(channelId: string): Promise<ChannelInfo | null> {
+    const ch = await getChannelById(channelId).catch(() => null);
+    if (!ch) return null;
+    return enrichChannel(ch);
   }
 
   /** Get payment history for an agent. */

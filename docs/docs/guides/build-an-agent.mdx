@@ -1,0 +1,143 @@
+---
+sidebar_position: 1
+title: Build an Agent
+description: End-to-end guide to building a Kite-integrated AI agent
+---
+
+# Guide: Build an AI Agent with Kite
+
+This guide walks through building a complete agent that fetches paid data from a Kite provider and returns an analysis.
+
+## What You'll Build
+
+An AI agent that:
+1. Has an on-chain identity (agent NFT + AA wallet)
+2. Uses a session key to autonomously pay for data
+3. Fetches from three paid endpoints in parallel
+4. Returns an aggregated analysis
+
+## Step 1: Setup
+
+```bash
+npm init -y
+npm install @kite-agentic-pay/sdk openai
+```
+
+Store your credential:
+
+```bash
+npx kite init
+```
+
+## Step 2: Register Your Agent
+
+```bash
+npx kite onboard --name "Research Agent" --category analytics
+```
+
+Note the output:
+```
+  Agent ID:      1
+  AA Wallet:     0xdef...
+  Session Key:   0x875...
+```
+
+## Step 3: Fund the Wallet
+
+```bash
+npx kite fund 20
+```
+
+This deposits 20 DmUSDT into your AA wallet.
+
+## Step 4: Write the Agent
+
+```typescript
+import { KiteSettleClient } from "@kite-agentic-pay/sdk";
+import OpenAI from "openai";
+
+const API_BASE = "http://localhost:4000/api/data";
+
+async function researchAgent(topic: string): Promise<string> {
+  const client = await KiteSettleClient.create({
+    credential: process.env.CREDENTIAL,
+    agentId: "1",
+  });
+
+  // Fetch paid data in parallel
+  const [report, market, intel] = await Promise.all([
+    client.fetchWithPayment(`${API_BASE}/protocol-report`).then(r => r.json()),
+    client.fetchWithPayment(`${API_BASE}/market/BTCUSDT`).then(r => r.json()),
+    client.fetchWithPayment(`${API_BASE}/intelligence`).then(r => r.json()),
+  ]);
+
+  // Feed to OpenAI for analysis
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      {
+        role: "system",
+        content: "You are a financial analyst. Use the provided data to answer the user's question.",
+      },
+      {
+        role: "user",
+        content: `
+          Topic: ${topic}
+          
+          Protocol Report: ${JSON.stringify(report)}
+          Market Data: ${JSON.stringify(market)}
+          Intelligence: ${JSON.stringify(intel)}
+          
+          Provide a 3-paragraph analysis.
+        `,
+      },
+    ],
+  });
+
+  return response.choices[0].message.content!;
+}
+
+// Run it
+const analysis = await researchAgent("What is the current state of the DeFi market?");
+console.log(analysis);
+```
+
+## Step 5: Verify Payment
+
+```bash
+npx kite usage --agent 1 --limit 10
+```
+
+You should see 3 x402 payments for the 3 API calls.
+
+## Step 6: Optimize with Channels
+
+If you're making many calls to the same provider, switch to channels:
+
+```typescript
+const channel = await client.openChannel({
+  provider: PROVIDER_ADDRESS,
+  token: DM_USDT,
+  deposit: parseUnits("5.0", 18),
+  maxSpend: parseUnits("4.5", 18),
+  maxPerCall: parseUnits("0.5", 18),
+  maxDuration: 3600,
+});
+
+// Now use channel for all calls (much cheaper in gas)
+const [report, market, intel] = await Promise.all([
+  client.callOnChannel(channel.channelId, `${API_BASE}/protocol-report`).then(r => r.json()),
+  client.callOnChannel(channel.channelId, `${API_BASE}/market/BTCUSDT`).then(r => r.json()),
+  client.callOnChannel(channel.channelId, `${API_BASE}/intelligence`).then(r => r.json()),
+]);
+
+// Settle when done
+await client.initiateSettlement(channel.channelId);
+```
+
+## Related Pages
+
+- [SDK: Payments →](../sdk/payments)
+- [SDK: Channels →](../sdk/channels)
+- [Connect Claude Desktop →](./connect-claude)

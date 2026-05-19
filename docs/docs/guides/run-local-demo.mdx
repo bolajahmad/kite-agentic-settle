@@ -1,0 +1,143 @@
+---
+sidebar_position: 4
+title: Run the Local Demo
+description: How to run all Kite demos locally
+---
+
+# Guide: Run the Local Demo
+
+All six simulation examples are in `mcp-sdk/examples/`. This guide walks through running them end-to-end.
+
+## Prerequisites
+
+- Node.js 18+
+- The Kite monorepo cloned
+- `npx kite init` completed (you have a credential)
+
+## Step 1: Start the Backend Provider
+
+```bash
+cd backend
+npm install
+npm run dev
+```
+
+This starts the reference provider on port 4000.
+
+Verify:
+```bash
+curl http://localhost:4000/health
+# {"status":"ok","block":123456}
+```
+
+## Step 2: Onboard Your Agent
+
+If you haven't already:
+
+```bash
+npx kite onboard --name "Demo Agent" --category demo
+```
+
+Note your agent ID.
+
+## Step 3: Fund the Wallet
+
+```bash
+npx kite fund 20
+```
+
+Wait for the transaction to confirm (~3 seconds on Kite AI testnet).
+
+## Step 4: Run the Examples
+
+Navigate to the examples directory:
+
+```bash
+cd mcp-sdk/examples
+```
+
+### Example 0: Onboarding Flow
+
+```bash
+npx ts-node run.ts 00-onboarding
+```
+
+Shows the full identity → session → first payment flow interactively.
+
+### Example 1: Per-Call Payment
+
+```bash
+npx ts-node run.ts 01-percall-payment
+```
+
+Makes 5 consecutive x402 payments. Each one is an independent transaction. Shows cost per call.
+
+### Example 2: Session-Bound Channel
+
+```bash
+npx ts-node run.ts 02-session-bound-channel
+```
+
+Opens a channel tied to a session expiry. After the session expires, the channel is force-finalized.
+
+### Example 3: Batch Channel
+
+```bash
+npx ts-node run.ts 03-batch-channel-flow
+```
+
+Opens a channel, makes 10 calls, settles cooperatively. Shows gas comparison vs per-call.
+
+### Example 4: Stream Channel
+
+```bash
+npx ts-node run.ts 04-stream-channel-flow
+```
+
+High-frequency streaming simulation — 30 calls over the channel. Computes effective gas cost per call.
+
+### Example 5: Settlement
+
+```bash
+npx ts-node run.ts 05-channel-settlement
+```
+
+Shows both cooperative and force settlement paths. Runs cooperative first, then simulates provider going offline.
+
+### Example 6: Multi-Provider
+
+```bash
+npx ts-node run.ts 06-multi-provider-agent
+```
+
+Opens channels to 3 providers simultaneously and makes parallel calls.
+
+## Troubleshooting
+
+| Error | Cause | Fix |
+|---|---|---|
+| `insufficient balance` | AA wallet not funded | `npx kite fund 20` |
+| `session expired` | Session key past `validUntil` | `npx kite session start --agent 1` |
+| `channel not found` | Backend not running | `cd backend && npm run dev` |
+| `ECONNREFUSED 4000` | Backend not running | `cd backend && npm run dev` |
+| `Cannot find module` | `ts-node` not installed | `npm install -g ts-node typescript` |
+
+## Checking Results
+
+After running examples:
+
+```bash
+npx kite usage --agent 1 --limit 20
+```
+
+View channel state:
+
+```bash
+npx kite channel list --agent 1
+```
+
+## Related Pages
+
+- [Simulations: Per-Call Payment →](../simulations/per-call-payment)
+- [Simulations: Batch Flow →](../simulations/batch-flow)
+- [Simulations: Multi-Provider →](../simulations/multi-provider)

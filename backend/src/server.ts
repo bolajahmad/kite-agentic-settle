@@ -3,24 +3,14 @@ import cors from "cors";
 import "dotenv/config";
 import express from "express";
 import { errorHandler } from "./middlewares/error-handler";
-import agentRoutes from "./routes/agent";
-import channelRoutes from "./routes/channel";
 import streamRoutes from "./routes/channel-data.js";
 import dataRoutes from "./routes/data";
-import paymentRoutes from "./routes/payment";
-import registryRoutes from "./routes/registry";
-import serviceRoutes from "./routes/service";
-import toolsRoutes from "./routes/tools.js";
-import walletRoutes from "./routes/wallet";
+import flexRoutes from "./routes/flex-data.js";
 import {
   isContractsConfigured,
   startChannelWatcher,
+  startSettlementWatcher,
 } from "./services/contract-service";
-import {
-  handleMcp,
-  handleMcpMessage,
-  handleMcpSse,
-} from "./services/mcp-server.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -44,13 +34,6 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-app.use("/api/agent", agentRoutes);
-app.use("/api/service", serviceRoutes);
-app.use("/api/payment", paymentRoutes);
-app.use("/api/wallet", walletRoutes);
-app.use("/api/registry", registryRoutes);
-app.use("/api/channel", channelRoutes);
-
 // ─── x402 pay-per-use data API ────────────────────────────────────────
 // Routes under /api/data require a valid X-PAYMENT header (kite-programmable
 // scheme). The facilitator settles on-chain before the data is returned.
@@ -62,19 +45,15 @@ app.use("/api/data", dataRoutes);
 // via provider-signed receipts that anchor to the PaymentChannel contract.
 app.use("/api/stream", streamRoutes);
 
-// ─── MCP + Function-calling + HTTP proxy tool API ─────────────────────
-// Three-fold AI agent integration surface:
-//   1. MCP SSE          →  GET  /mcp/sse   +  POST /mcp/messages
-//   2. Schema endpoints →  GET  /api/tools/schema/{openai,anthropic,langchain}
-//   3. HTTP proxies     →  POST /api/tools/invoke  +  per-tool REST routes
-app.use("/api/tools", toolsRoutes);
-app.get("/mcp/sse", handleMcpSse);
-app.post("/mcp/messages", handleMcpMessage);
-app.post("/mcp", handleMcp);
+// ─── Flex (dual-mode) data API ─────────────────────────────────────────
+// Routes under /api/flex accept EITHER x402 (per-call) OR channel payment.
+// The consumer picks the mode; the combined 402 challenge advertises both.
+app.use("/api/flex", flexRoutes);
 
 app.use(errorHandler);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   startChannelWatcher();
+  startSettlementWatcher();
 });

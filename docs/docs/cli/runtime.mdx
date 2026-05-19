@@ -1,0 +1,101 @@
+---
+sidebar_position: 5
+title: Runtime Commands
+description: kite run, kite simulate, kite signer
+---
+
+# Runtime Commands
+
+## kite run
+
+Start the Kite MCP server locally.
+
+```bash
+npx kite run [--port 3100] [--transport sse|stdio|streamable]
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--port <n>` | `3100` | HTTP port |
+| `--transport <t>` | `sse` | Transport type: `sse`, `stdio`, or `streamable` |
+| `--agent <id>` | from `vars.json` | Override agent ID |
+
+**Example:**
+
+```bash
+npx kite run --port 3100 --transport sse
+```
+
+```
+  Kite MCP Server
+  ─────────────────────────────────────────────────
+  Agent ID:      1
+  Session Key:   0x875aaa...
+  Session:       Active (expires 2025-07-01)
+  Transport:     SSE
+  Listening on:  http://localhost:3100
+
+  Tools available:
+    • call_paid_api
+    • open_channel
+    • call_on_channel
+    • initiate_settlement
+    • get_agent_info
+    • get_session_info
+    • get_balance
+```
+
+Claude Desktop can now connect to this server. See [Connect Claude Desktop →](../mcp/claude-desktop).
+
+---
+
+## kite simulate
+
+Run end-to-end simulation demos without real payments.
+
+```bash
+npx kite simulate [--demo <n>]
+```
+
+Runs the numbered demo from `mcp-sdk/examples/`:
+
+```
+  Demo 0: Onboarding
+  Demo 1: Per-call x402 payment
+  Demo 2: Session-bound channel
+  Demo 3: Batch channel flow
+  Demo 4: Stream channel flow
+  Demo 5: Channel settlement
+  Demo 6: Multi-provider agent
+```
+
+**Example:**
+
+```bash
+npx kite simulate --demo 1
+```
+
+See [Simulations →](../simulations/per-call-payment) for walkthrough of each demo.
+
+---
+
+## kite signer
+
+Manage the local signing process.
+
+```bash
+npx kite signer status     # Show current signing key status
+npx kite signer rotate     # Generate and register a new session key
+```
+
+`rotate` is equivalent to `kite session start` but also gracefully retires the old key.
+
+---
+
+## Related Pages
+
+- [MCP: Claude Desktop →](../mcp/claude-desktop) — Using kite run with Claude
+- [MCP: Tool Reference →](../mcp/tool-reference) — All 7 MCP tools
+- [Simulations →](../simulations/per-call-payment) — Demo walkthroughs

@@ -1,0 +1,61 @@
+---
+sidebar_position: 1
+title: Indexer Overview
+description: The Graph subgraph indexing all Kite contract events
+---
+
+# Indexer Overview
+
+The `subgraph/` package is a [The Graph](https://thegraph.com) subgraph that indexes all events emitted by the Kite protocol contracts. It is deployed via [Goldsky](https://goldsky.com) on Kite AI Testnet.
+
+## What It Indexes
+
+Every contract event becomes a queryable entity:
+
+| Contract | Events Indexed |
+|---|---|
+| `IdentityRegistry` | `AgentRegistered`, `AgentUpdated`, `AgentDeactivated` |
+| `KiteAAWallet` | `Deposited`, `Withdrawn`, `SessionRegistered`, `SessionRevoked` |
+| `PaymentChannel` | `ChannelOpened`, `ChannelActivated`, `SettlementInitiated`, `SettlementApproved`, `ChannelFinalized` |
+| `AttestationRegistry` | `MerkleRootAnchored` |
+
+## GraphQL Endpoint
+
+```
+https://api.goldsky.com/api/public/<project-id>/subgraphs/kite-agentic-pay/<version>/gn
+```
+
+## Entities
+
+| Entity | Description |
+|---|---|
+| `User` | EOA addresses that have interacted with the protocol |
+| `Agent` | Agent NFTs from `IdentityRegistry` |
+| `AAWallet` | `KiteAAWallet` contract instances |
+| `Session` | Session keys registered in AA wallets |
+| `Channel` | Payment channels from `PaymentChannel` |
+| `Receipt` | Anchored receipt Merkle roots from `AttestationRegistry` |
+| `Payment` | x402 payments (aggregated from x402 events) |
+| `Attestation` | Individual attestations |
+
+## Why Use the Subgraph?
+
+The subgraph is not required for core operations. It adds:
+
+- **Historical queries** — all payments by agent, across time ranges
+- **Aggregations** — total spend, call counts, provider rankings
+- **Cross-device sync** — re-initialize from on-chain state without replaying events
+- **Dashboard data** — the frontend uses it for all list views and charts
+
+## When Not to Use It
+
+- **Validating session status** — use on-chain RPC (subgraph lags by minutes)
+- **Channel status during settlement** — use on-chain RPC
+- **Before making a payment** — always use on-chain for real-time state
+
+## Related Pages
+
+- [Indexer Entities →](./entities)
+- [Indexer Querying →](./querying)
+- [Indexer Deployment →](./deployment)
+- [Architecture: Indexer Sync →](../architecture/indexer-sync)

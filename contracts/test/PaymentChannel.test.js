@@ -3,8 +3,8 @@ const { ethers }  = require("hardhat");
 const { time }    = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("PaymentChannel", function () {
-  let channel, wallet, registry, token;
-  let deployer, alice, bob, carol, sessionKey, providerSigner;
+  let channel, vault, registry, token;
+  let alice, sessionKey, providerSigner;
 
   const DEPOSIT  = ethers.parseEther("100");
   const MAX_SPEND = ethers.parseEther("100");
@@ -20,10 +20,22 @@ describe("PaymentChannel", function () {
 
   async function setupSession(opts = {}) {
     const validUntil = await futureTs(opts.sessionDur ?? DAY * 2);
-    const valueLimit = opts.valueLimit ?? PER_CALL;
-    const maxValue   = opts.maxValue   ?? MAX_SPEND;
     const blocked    = opts.blocked    ?? [];
-    await wallet.connect(alice).addSessionKeyRule(1n, sessionKey.address, valueLimit, maxValue, validUntil, blocked);
+    const maxAllowedSpend = opts.maxValue ?? MAX_SPEND;
+    const sessionId = ethers.solidityPackedKeccak256(
+      ["address", "uint256", "uint256"],
+      [sessionKey.address, 1n, validUntil]
+    );
+    await vault.setSessionExists(sessionId, true);
+    await vault.setMaxAllowedSpend(maxAllowedSpend);
+    await registry.connect(alice).registerSession(
+      1n,
+      sessionKey.address,
+      alice.address,
+      await vault.getAddress(),
+      validUntil,
+      blocked,
+    );
   }
 
   async function openChannel(opts = {}) {
@@ -33,6 +45,7 @@ describe("PaymentChannel", function () {
     const maxDur   = opts.maxDur  ?? HOUR;
     const perCall  = opts.perCall ?? PER_CALL;
     return channel.connect(sessionKey).openChannel(
+      sessionKey.address,
       providerSigner.address,
       await token.getAddress(),
       mode,
@@ -40,7 +53,7 @@ describe("PaymentChannel", function () {
       maxSpend,
       maxDur,
       perCall,
-      await wallet.getAddress()
+      await vault.getAddress()
     );
   }
 
@@ -53,27 +66,28 @@ describe("PaymentChannel", function () {
   }
 
   beforeEach(async function () {
-    [deployer, alice, bob, carol, sessionKey, providerSigner] = await ethers.getSigners();
+    const signers = await ethers.getSigners();
+    alice = signers[1];
+    sessionKey = signers[4];
+    providerSigner = signers[5];
 
     const MockERC20F = await ethers.getContractFactory("MockERC20");
     const RegistryF  = await ethers.getContractFactory("IdentityRegistry");
-    const WalletF    = await ethers.getContractFactory("KiteAAWallet");
+    const VaultF     = await ethers.getContractFactory("MockClientAgentVault");
     const ChannelF   = await ethers.getContractFactory("PaymentChannel");
 
     token    = await MockERC20F.deploy("USDC", "USDC", ethers.parseEther("10000000"));
     registry = await RegistryF.deploy();
-    wallet   = await WalletF.deploy();
-    channel  = await ChannelF.deploy();
+    vault    = await VaultF.deploy();
+    channel  = await ChannelF.deploy(await registry.getAddress());
 
-    // Wire up
-    await wallet.setIdentityRegistry(await registry.getAddress());
-    await wallet.setPaymentChannel(await channel.getAddress());
-
-    // Fund alice
-    await token.transfer(alice.address, ethers.parseEther("1000"));
-    await wallet.connect(alice).register();
-    await token.connect(alice).approve(await wallet.getAddress(), ethers.parseEther("1000"));
-    await wallet.connect(alice).deposit(await token.getAddress(), ethers.parseEther("1000"));
+    // Fund vault
+    await token.transfer(await vault.getAddress(), ethers.parseEther("1000"));
+    await vault.approveSpender(
+      await token.getAddress(),
+      await channel.getAddress(),
+      ethers.parseEther("1000"),
+    );
 
     // Register agent
     await registry.connect(alice)["register(string)"]("ipfs://alice-agent");
@@ -95,10 +109,8 @@ describe("PaymentChannel", function () {
 
     it("locks deposit in channel contract", async function () {
       const tx = await openChannel();
-      const receipt = await tx.wait();
-      const ev = receipt.logs.find(l => l.fragment?.name === "ChannelOpened");
-      const channelId = ev.args.channelId;
-      expect(await channel.getLockedFunds(await wallet.getAddress(), await token.getAddress()))
+      await tx.wait();
+      expect(await channel.getLockedFunds(await vault.getAddress(), await token.getAddress()))
         .to.equal(DEPOSIT);
     });
 
@@ -112,14 +124,9 @@ describe("PaymentChannel", function () {
       expect(user).to.equal(alice.address);
     });
 
-    it("rejects when session maxPerCall < channel maxPerCall", async function () {
-      await expect(openChannel({ perCall: PER_CALL + 1n }))
-        .to.be.revertedWith("maxPerCall exceeds session valueLimit");
-    });
-
-    it("rejects when session maxValueAllowed < maxSpend", async function () {
+    it("rejects when vault spending rules disallow the maxSpend", async function () {
       await expect(openChannel({ maxSpend: MAX_SPEND + 1n }))
-        .to.be.revertedWith("maxSpend exceeds session maxValueAllowed");
+        .to.be.revertedWith("Exceeds vault spending rules");
     });
 
     it("rejects when channel duration exceeds session validity", async function () {
@@ -128,12 +135,10 @@ describe("PaymentChannel", function () {
         .to.be.revertedWith("Channel duration exceeds session validity");
     });
 
-    it("rejects when provider is blocked", async function () {
-      // User-level provider blocklist lives on KiteAAWallet now
-      await wallet.connect(alice).setBlockedProvider(providerSigner.address, true);
-      await expect(openChannel()).to.be.revertedWith("Provider is blocked by this user");
-      // Cleanup
-      await wallet.connect(alice).setBlockedProvider(providerSigner.address, false);
+    it("rejects when provider is blocked by vault spending rules", async function () {
+      await vault.setProviderBlocked(providerSigner.address, true);
+      await expect(openChannel()).to.be.revertedWith("Exceeds vault spending rules");
+      await vault.setProviderBlocked(providerSigner.address, false);
     });
 
     it("rejects when session is inactive", async function () {
@@ -195,7 +200,7 @@ describe("PaymentChannel", function () {
 
     it("consumer can initiate settlement with zero claim", async function () {
       await expect(channel.connect(sessionKey).initiateSettlement(
-        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+        channelId, sessionKey.address, 0, 0, 0, "0x", ethers.ZeroHash
       )).to.emit(channel, "SettlementInitiated");
     });
 
@@ -206,29 +211,28 @@ describe("PaymentChannel", function () {
       const sig  = await signReceipt(channelId, seq, cost, ts, providerSigner);
 
       await channel.connect(sessionKey).initiateSettlement(
-        channelId, seq, cost, ts, sig, ethers.ZeroHash
+        channelId, sessionKey.address, seq, cost, ts, sig, ethers.ZeroHash
       );
 
-      const blk = await ethers.provider.getBlock("latest");
       await time.increase(3601); // past challenge window
 
       const providerBalBefore = await token.balanceOf(providerSigner.address);
-      const userBalBefore     = await wallet.getUserBalance(alice.address, await token.getAddress());
+      const vaultBalBefore    = await token.balanceOf(await vault.getAddress());
 
       await channel.finalize(channelId, ethers.ZeroHash);
 
       const providerBalAfter = await token.balanceOf(providerSigner.address);
-      const userBalAfter     = await wallet.getUserBalance(alice.address, await token.getAddress());
+      const vaultBalAfter    = await token.balanceOf(await vault.getAddress());
 
       expect(providerBalAfter - providerBalBefore).to.equal(cost);
       // Refund = deposit - cost
-      expect(userBalAfter - userBalBefore).to.equal(DEPOSIT - cost);
+      expect(vaultBalAfter - vaultBalBefore).to.equal(DEPOSIT - cost);
     });
 
     it("submitReceipt upgrades highest claim", async function () {
       // Start with zero claim
       await channel.connect(sessionKey).initiateSettlement(
-        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+        channelId, sessionKey.address, 0, 0, 0, "0x", ethers.ZeroHash
       );
 
       const seq  = 2n;
@@ -246,7 +250,7 @@ describe("PaymentChannel", function () {
 
     it("reverts finalize before challenge window closes", async function () {
       await channel.connect(sessionKey).initiateSettlement(
-        channelId, 0, 0, 0, "0x", ethers.ZeroHash
+        channelId, sessionKey.address, 0, 0, 0, "0x", ethers.ZeroHash
       );
       await expect(channel.finalize(channelId, ethers.ZeroHash))
         .to.be.revertedWith("Challenge window still open");

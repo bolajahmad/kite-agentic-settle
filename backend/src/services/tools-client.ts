@@ -6,21 +6,14 @@
  *   - Function-call proxies (OpenAI / Anthropic tool-use format)
  *   - REST HTTP proxies     (any HTTP client or Langchain tool)
  *
- * Credentials (private key or raw seed → first derived key) are accepted
- * per-call via X-Credential header or the `credential` body field.
- * This keeps every request stateless — no server-side key storage.
+ * Payment operations delegate to the KiteSettleClient SDK, which loads
+ * session private keys from the server's vars store (set during `kite onboard`).
+ * No private key is ever required in tool call arguments.
  *
- * On-chain operations use the backend's existing ContractService which
- * already handles the Kite testnet RPC.
+ * On-chain read operations use the backend's existing ContractService.
  */
 
-import { ethers } from "ethers";
-import {
-  getIdentityRegistry,
-  getKiteAAWallet,
-  getPaymentChannel,
-  getProvider,
-} from "./contract-service.js";
+import { getIdentityRegistry, getProvider } from "./contract-service.js";
 import { getUsageLogs } from "./usage-aggregator.js";
 
 // ── Tool definitions (mirrored from mcp-sdk/src/tools.ts) ───────────
@@ -34,9 +27,28 @@ export interface ToolDefinition {
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
+    name: "check_balance",
+    description:
+      "Check deposited (KiteAAWallet) balance and raw ERC-20 balance for an address.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "EOA address to check (0x…)" },
+        token: {
+          type: "string",
+          description: "ERC-20 token address (defaults to DmUSDT)",
+        },
+      },
+      required: ["address"],
+    },
+  },
+  {
     name: "call_paid_api",
     description:
-      "Call a paid API endpoint. The SDK handles x402 payment negotiation automatically (EIP-712 programmable settlement). Returns the API response and a payment receipt.",
+      "Call a paid API endpoint on behalf of an agent. The SDK resolves the active session key " +
+      "automatically from the server's credential store — no private key is required in the request. " +
+      "Handles x402 payment negotiation (EIP-712 programmable settlement) for perCall, batch, and " +
+      "channel modes. Returns the API response and a payment receipt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -61,34 +73,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         agentId: {
           type: "string",
-          description: "On-chain agentId (tokenId from IdentityRegistry)",
+          description:
+            "On-chain agentId (tokenId from IdentityRegistry). Required — the server loads the " +
+            "active session key automatically from its credential store.",
         },
         sessionKey: {
           type: "string",
-          description: "Session key address registered on KiteAAWallet",
+          description:
+            "Optional: session key address (0x…) to use. When omitted, the server auto-selects " +
+            "an active session for the given agentId.",
         },
-        credential: {
+        mode: {
           type: "string",
-          description: "Session key private key (hex) used for signing",
+          enum: ["perCall", "batch", "channel", "auto"],
+          default: "auto",
+          description:
+            "Payment routing mode. 'auto' prefers batch → channel → perCall based on active sessions.",
         },
       },
-      required: ["url"],
-    },
-  },
-  {
-    name: "check_balance",
-    description:
-      "Check deposited (KiteAAWallet) balance and raw ERC-20 balance for an address.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        address: { type: "string", description: "EOA address to check (0x…)" },
-        token: {
-          type: "string",
-          description: "ERC-20 token address (defaults to DmUSDT)",
-        },
-      },
-      required: ["address"],
+      required: ["url", "agentId"],
     },
   },
   {
@@ -103,25 +106,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           description: "Max number of log entries to return (default: 50)",
         },
       },
-    },
-  },
-  {
-    name: "register_agent",
-    description:
-      "Mint an agent NFT on IdentityRegistry (EIP-8004). Returns the on-chain agentId.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agentURI: {
-          type: "string",
-          description: "Base64-encoded or IPFS agent metadata URI",
-        },
-        credential: {
-          type: "string",
-          description: "EOA private key (hex) that will own the agent NFT",
-        },
-      },
-      required: ["agentURI", "credential"],
     },
   },
   {
@@ -140,47 +124,97 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
   {
-    name: "deposit_to_wallet",
-    description:
-      "Approve + deposit ERC-20 tokens into KiteAAWallet so agents can pay for services.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        amount: { type: "string", description: "Amount in wei to deposit" },
-        token: {
-          type: "string",
-          description: "Token address (defaults to DmUSDT)",
-        },
-        credential: { type: "string", description: "EOA private key (hex)" },
-      },
-      required: ["amount", "credential"],
-    },
-  },
-  {
     name: "get_session_info",
     description:
-      "Read session key rules from KiteAAWallet (limits, validity, spent amount).",
+      "List session keys for an agent (paginated) or look up a single session key. " +
+      "Returns status, spend limits, amounts used/remaining and expiry for each session. " +
+      "Pass agentId (without sessionKey) for a paginated list. Pass sessionKey to get one session.",
     inputSchema: {
       type: "object",
       properties: {
+        agentId: {
+          type: "string",
+          description:
+            "Agent tokenId — required when sessionKey is omitted (list mode).",
+        },
         sessionKey: {
           type: "string",
-          description: "Session key address (0x…)",
+          description:
+            "Session key address (0x…). When provided, returns only this session.",
+        },
+        limit: {
+          type: "number",
+          description: "Max sessions to return in list mode (default: 10).",
+        },
+        offset: {
+          type: "number",
+          description: "Pagination offset for list mode (default: 0).",
         },
       },
-      required: ["sessionKey"],
     },
   },
   {
     name: "get_channel_info",
     description:
-      "Read a payment channel's on-chain state (status, deposit, provider, consumer).",
+      "List payment channels for an agent (paginated) or look up a single channel. " +
+      "Returns status, deposit, spend limits, provider and settlement info. " +
+      "Pass agentId (without channelId) for a paginated list. Pass channelId to get one channel.",
     inputSchema: {
       type: "object",
       properties: {
-        channelId: { type: "string", description: "Channel ID (bytes32 hex)" },
+        agentId: {
+          type: "string",
+          description:
+            "Agent tokenId — required when channelId is omitted (list mode).",
+        },
+        channelId: {
+          type: "string",
+          description:
+            "Channel ID (bytes32 hex). When provided, returns only this channel.",
+        },
+        limit: {
+          type: "number",
+          description: "Max channels to return in list mode (default: 10).",
+        },
+        offset: {
+          type: "number",
+          description: "Pagination offset for list mode (default: 0).",
+        },
       },
-      required: ["channelId"],
+    },
+  },
+  {
+    name: "settle_channel_settlement",
+    description:
+      "Initiate settlement for one or more payment channels. " +
+      "The provider (API) must agree to the submitted receipts for settlement to finalize — " +
+      "this does not guarantee immediate payment. After the challenge window, call the finalize step. " +
+      "Accepts channelId, sessionKey, or agentId (precedence: channelId > sessionKey > agentId). " +
+      "Without channelId, only expired channels are settled unless forceActiveClose is true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channelId: {
+          type: "string",
+          description:
+            "Specific channel ID (0x…). Highest precedence — settles exactly this channel.",
+        },
+        sessionKey: {
+          type: "string",
+          description:
+            "Session key address — settle all expired channels for this session.",
+        },
+        agentId: {
+          type: "string",
+          description:
+            "Agent tokenId — settle all expired channels for this agent. Lowest precedence.",
+        },
+        forceActiveClose: {
+          type: "boolean",
+          description:
+            "When true, also settle non-expired (active) channels. Default: false.",
+        },
+      },
     },
   },
 ];
@@ -215,205 +249,82 @@ export function toLangChainTools() {
   return toOpenAIFunctions();
 }
 
-// ── Credential helper ─────────────────────────────────────────────────────
-
-/**
- * Build an ethers Signer from a raw private-key hex string.
- * Accepts keys with or without the 0x prefix.
- */
-function signerFromCredential(credential: string): ethers.Wallet {
-  const key = credential.startsWith("0x") ? credential : `0x${credential}`;
-  return new ethers.Wallet(key, getProvider());
-}
-
-// ── ERC-20 ABI (minimal, for approve + balanceOf) ─────────────────────────
-
-const ERC20_ABI = [
-  "function balanceOf(address owner) view returns (uint256)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-];
-
 // ── Tool execution ────────────────────────────────────────────────────────
 
 export type ToolArgs = Record<string, unknown>;
 
 /**
  * Execute a named tool with the given arguments.
- * `credential` (hex private key) is pulled from args or falls back to
- * the AGENT_CREDENTIAL env var so callers don't have to pass it every time.
  */
 export async function executeTool(
   toolName: string,
   args: ToolArgs,
 ): Promise<unknown> {
-  // Resolve credential: args field → header placeholder → env var
-  const credential =
-    (args.credential as string | undefined) ??
-    process.env.AGENT_CREDENTIAL ??
-    process.env.DEPLOYER_PRIVATE_KEY;
-
   switch (toolName) {
     // ─── call_paid_api ───────────────────────────────────────────────────
     case "call_paid_api": {
       const url = args.url as string;
-      const method = (args.method as string) || "GET";
+      const method = (args.method as string | undefined) ?? "GET";
       const body = args.body as string | undefined;
       const autopay = args.autopay !== false;
       const maxAmount = args.maxAmount
         ? BigInt(args.maxAmount as string)
         : undefined;
-      const agentId = (args.agentId as string) ?? "0";
+      const agentId = args.agentId as string | undefined;
       const sessionKeyAddr = args.sessionKey as string | undefined;
+      const mode = (args.mode as string | undefined) ?? "auto";
 
-      // 1. Probe the endpoint
-      const initHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      const initOpts: RequestInit = { method, headers: initHeaders };
-      if (body && (method === "POST" || method === "PUT")) {
-        initOpts.body = body;
-      }
-
-      const probe = await globalThis.fetch(url, initOpts);
-
-      if (probe.status !== 402) {
-        const data = await probe.text();
-        return {
-          status: probe.status,
-          data: tryParseJSON(data),
-          payment: null,
-        };
-      }
-
-      if (!autopay) {
-        return { status: 402, error: "Payment required but autopay disabled" };
-      }
-
-      // 2. Parse the 402 challenge
-      const challengeText = await probe.text();
-      const challenge = JSON.parse(challengeText);
-      const offer = challenge.accepts?.[0];
-      if (!offer) throw new Error("402 response missing accepts[] array");
-
-      const amount = BigInt(offer.maxAmountRequired);
-      if (maxAmount !== undefined && amount > maxAmount) {
-        throw new Error(`Price ${amount} exceeds maxAmount cap ${maxAmount}`);
-      }
-
-      // 3. Sign the EIP-712 payment (requires a session key credential)
-      if (!credential) {
+      if (!agentId) {
         throw new Error(
-          "call_paid_api requires a session key credential. " +
-            "Pass `credential` in args or set AGENT_CREDENTIAL env var.",
+          "call_paid_api requires 'agentId'. " +
+            "The server resolves the active session automatically — no private key is needed.",
         );
       }
 
-      const signer = signerFromCredential(credential);
-      const sessionKey = sessionKeyAddr ?? signer.address;
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
 
-      const nonce =
-        BigInt(Date.now()) * 1_000_000n +
-        BigInt(Math.floor(Math.random() * 1_000_000));
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 min
-
-      const chainId = Number(process.env.CHAIN_ID ?? 2368);
-      const kiteAAWalletAddr = process.env.KITE_AA_WALLET_ADDRESS ?? "";
-
-      const domain = {
-        name: "KiteAAWallet",
-        version: "1",
-        chainId,
-        verifyingContract: kiteAAWalletAddr,
-      };
-      const types = {
-        Payment: [
-          { name: "agentId", type: "uint256" },
-          { name: "sessionKey", type: "address" },
-          { name: "recipient", type: "address" },
-          { name: "token", type: "address" },
-          { name: "amount", type: "uint256" },
-          { name: "nonce", type: "uint256" },
-          { name: "deadline", type: "uint256" },
-        ],
-      };
-      const message = {
+      // Build an agent-mode client: loads the session private key from the
+      // vars store (set during `kite onboard`). No credential in the request.
+      const client = await KiteSettleClient.create({
         agentId: BigInt(agentId),
-        sessionKey,
-        recipient: offer.payTo,
-        token: offer.asset,
-        amount,
-        nonce,
-        deadline,
-      };
-
-      const signature = await signer.signTypedData(domain, types, message);
-
-      const payload = JSON.stringify({
-        scheme: "kite-programmable",
-        version: "1",
-        chainId,
-        settlementContract: kiteAAWalletAddr,
-        agentId,
-        sessionKey,
-        recipient: offer.payTo,
-        token: offer.asset,
-        amount: amount.toString(),
-        nonce: nonce.toString(),
-        deadline: deadline.toString(),
-        signature,
+        sessionKey: sessionKeyAddr,
+        defaultPaymentMode: mode as "perCall" | "batch" | "channel" | "auto",
       });
-      const x402Header = Buffer.from(payload).toString("base64");
 
-      // 4. Retry with payment proof
-      const retryHeaders: Record<string, string> = {
-        ...initHeaders,
-        "X-PAYMENT": x402Header,
-      };
-      const retryOpts: RequestInit = { method, headers: retryHeaders };
-      if (body && (method === "POST" || method === "PUT"))
-        retryOpts.body = body;
-
-      const retryResp = await globalThis.fetch(url, retryOpts);
-      const retryData = await retryResp.text();
-
-      return {
-        status: retryResp.status,
-        data: tryParseJSON(retryData),
-        payment: {
-          method: "perCall",
-          amount: amount.toString(),
-          sessionKey,
-          recipient: offer.payTo,
-          nonce: nonce.toString(),
-        },
-      };
+      return client.callPaidApi(url, {
+        method: method as "GET" | "POST" | "PUT" | "DELETE",
+        body,
+        autopay,
+        maxAmount,
+        mode: mode as "perCall" | "batch" | "channel" | "auto",
+      });
     }
 
     // ─── check_balance ────────────────────────────────────────────────────
     case "check_balance": {
       const address = args.address as string;
-      const token =
-        (args.token as string) ??
-        process.env.USDT_TOKEN_ADDRESS ??
-        process.env.TOKEN_ADDRESS ??
-        "";
+      if (!address)
+        throw new Error("check_balance requires an 'address' argument");
+      const token = args.token as string | undefined;
 
-      const provider = getProvider();
-      const erc20 = new ethers.Contract(token, ERC20_ABI, provider);
-      const wallet = getKiteAAWallet(provider);
-
-      const [rawBalance, depositedBalance] = await Promise.all([
-        token ? erc20.balanceOf(address) : Promise.resolve(0n),
-        wallet.getUserBalance(address, token),
-      ]);
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+      const client = KiteSettleClient.createReadOnly();
+      const result = await client.balance({
+        address,
+        tokens: token ? [token] : undefined,
+      });
 
       return {
-        address,
-        token,
-        walletBalance: rawBalance.toString(),
-        walletBalanceFormatted: ethers.formatUnits(rawBalance, 18),
-        depositedBalance: depositedBalance.toString(),
-        depositedBalanceFormatted: ethers.formatUnits(depositedBalance, 18),
+        eoaAddress: result.eoaAddress,
+        aaWallet: result.aaWalletAddress,
+        tokens: result.tokens.map((t) => ({
+          token: t.token,
+          symbol: t.symbol,
+          walletBalance: t.walletBalance.toString(),
+          walletBalanceFormatted: t.walletBalanceFormatted,
+          depositedBalance: t.depositedBalance.toString(),
+          depositedBalanceFormatted: t.depositedBalanceFormatted,
+        })),
       };
     }
 
@@ -423,39 +334,6 @@ export async function executeTool(
       const logs = getUsageLogs();
       const sliced = logs.slice(-limit);
       return { count: sliced.length, logs: sliced };
-    }
-
-    // ─── register_agent ───────────────────────────────────────────────────
-    case "register_agent": {
-      if (!credential) throw new Error("register_agent requires a credential");
-      const agentURI = args.agentURI as string;
-      const signer = signerFromCredential(credential);
-      const registry = getIdentityRegistry(signer);
-
-      const tx = await registry.register(agentURI ?? "");
-      const receipt = await tx.wait();
-
-      // Decode the Registered event to get the agentId
-      const iface = registry.interface;
-      let agentId: bigint | undefined;
-      for (const log of receipt.logs ?? []) {
-        try {
-          const parsed = iface.parseLog(log);
-          if (parsed?.name === "Registered") {
-            agentId = parsed.args.agentId as bigint;
-            break;
-          }
-        } catch {
-          // not this event
-        }
-      }
-
-      return {
-        txHash: receipt.hash,
-        agentId: agentId?.toString(),
-        owner: signer.address,
-        agentURI,
-      };
     }
 
     // ─── resolve_agent ────────────────────────────────────────────────────
@@ -472,95 +350,78 @@ export async function executeTool(
       return { agentId: agentId.toString(), agentURI: uri, owner };
     }
 
-    // ─── deposit_to_wallet ────────────────────────────────────────────────
-    case "deposit_to_wallet": {
-      if (!credential)
-        throw new Error("deposit_to_wallet requires a credential");
-      const amount = BigInt(args.amount as string);
-      const token =
-        (args.token as string) ??
-        process.env.USDT_TOKEN_ADDRESS ??
-        process.env.TOKEN_ADDRESS ??
-        "";
-
-      const signer = signerFromCredential(credential);
-      const walletAddr = process.env.KITE_AA_WALLET_ADDRESS ?? "";
-      const erc20 = new ethers.Contract(token, ERC20_ABI, signer);
-      const wallet = getKiteAAWallet(signer);
-
-      // Approve
-      const approveTx = await erc20.approve(walletAddr, amount);
-      await approveTx.wait();
-
-      // Deposit
-      const depositTx = await wallet.deposit(token, amount);
-      const receipt = await depositTx.wait();
-
-      return {
-        txHash: receipt.hash,
-        amount: amount.toString(),
-        token,
-        depositor: signer.address,
-      };
-    }
-
     // ─── get_session_info ─────────────────────────────────────────────────
     case "get_session_info": {
-      const sessionKey = args.sessionKey as string;
-      const provider = getProvider();
-      const wallet = getKiteAAWallet(provider);
+      const sessionKey = args.sessionKey as string | undefined;
+      const agentId = args.agentId as string | undefined;
+      const limit = (args.limit as number | undefined) ?? 10;
+      const offset = (args.offset as number | undefined) ?? 0;
 
-      const [rule, spent] = await Promise.all([
-        wallet.getSessionRule(sessionKey),
-        wallet.getSessionSpent(sessionKey),
-      ]);
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+      const client = KiteSettleClient.createReadOnly();
 
-      return {
-        sessionKey,
-        agentId: rule[0]?.toString(),
-        valueLimit: rule[1]?.toString(),
-        maxValueAllowed: rule[2]?.toString(),
-        validUntil: rule[3]?.toString(),
-        active: rule[4],
-        spent: spent.toString(),
-        spentFormatted: ethers.formatUnits(spent, 18),
-      };
+      if (sessionKey) {
+        const session = await client.getSessionInfo(sessionKey);
+        if (!session) return { found: false, sessionKey };
+        return { found: true, sessions: [session] };
+      }
+
+      if (!agentId)
+        throw new Error("get_session_info requires 'agentId' or 'sessionKey'");
+      const sessions = await client.listSessions(agentId, { limit, offset });
+      return { agentId, limit, offset, count: sessions.length, sessions };
     }
 
     // ─── get_channel_info ─────────────────────────────────────────────────
     case "get_channel_info": {
-      const channelId = args.channelId as string;
-      const provider = getProvider();
-      const channel = getPaymentChannel(provider);
+      const channelId = args.channelId as string | undefined;
+      const agentId = args.agentId as string | undefined;
+      const limit = (args.limit as number | undefined) ?? 10;
+      const offset = (args.offset as number | undefined) ?? 0;
 
-      const ch = await channel.getChannel(channelId);
-      return {
-        channelId,
-        provider: ch.provider,
-        consumer: ch.consumer,
-        token: ch.token,
-        deposit: ch.deposit?.toString(),
-        maxSpend: ch.maxSpend?.toString(),
-        maxPerCall: ch.maxPerCall?.toString(),
-        status: Number(ch.status),
-        statusName:
-          ["Open", "Active", "SettlementPending", "Closed"][
-            Number(ch.status)
-          ] ?? "Unknown",
-      };
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+      const client = KiteSettleClient.createReadOnly();
+
+      if (channelId) {
+        const channel = await client.getChannelInfo(channelId);
+        if (!channel) return { found: false, channelId };
+        return { found: true, channels: [channel] };
+      }
+
+      if (!agentId)
+        throw new Error("get_channel_info requires 'agentId' or 'channelId'");
+      const channels = await client.listChannels(agentId, { limit, offset });
+      return { agentId, limit, offset, count: channels.length, channels };
+    }
+
+    // ─── settle_channel_settlement ────────────────────────────────────────
+    case "settle_channel_settlement": {
+      const channelId = args.channelId as `0x${string}` | undefined;
+      const sessionKey = args.sessionKey as string | undefined;
+      const agentId = args.agentId as string | undefined;
+      const forceActiveClose = (args.forceActiveClose as boolean | undefined) ?? false;
+
+      if (!channelId && !sessionKey && !agentId) {
+        throw new Error(
+          "settle_channel_settlement requires at least one of: channelId, sessionKey, agentId.",
+        );
+      }
+
+      const { KiteSettleClient } = await import("@kite-agentic-pay/sdk");
+
+      const results = await KiteSettleClient.initiateSettlements(
+        {
+          channelId,
+          sessionKey,
+          agentId: agentId !== undefined ? BigInt(agentId) : undefined,
+        },
+        { forceActiveClose },
+      );
+
+      return { settled: results.length, results };
     }
 
     default:
       throw new Error(`Unknown tool: "${toolName}"`);
-  }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-function tryParseJSON(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
   }
 }

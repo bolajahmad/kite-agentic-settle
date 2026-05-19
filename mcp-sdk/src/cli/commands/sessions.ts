@@ -1,4 +1,6 @@
-import { formatUnits, parseUnits } from "viem";
+import { createPublicClient, formatUnits, http, parseUnits } from "viem";
+import { GokiteAASDK } from "gokite-aa-sdk";
+import { clientAgentVaultAbi } from "../../abis.js";
 import {
   getSessionByKey,
   getSessionSpentFromIndexer,
@@ -7,7 +9,8 @@ import {
 } from "../../indexer.js";
 import { KiteSettleClient } from "../../kite-settle-client.js";
 import { prompt } from "../../utils/index.js";
-import { getVar, setVar } from "../../vars.js";
+import { deriveSessionId } from "../../utils/session-id.js";
+import { getCredential, setVar } from "../../vars.js";
 import { findFlag } from "../index.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -132,12 +135,17 @@ async function resolveIndexedSession(
 
 // ── session start ─────────────────────────────────────────────────────────────
 //
-// Creates a new deterministic session key for an agent and registers it
-// on KiteAAWallet with the provided rules (valueLimit, dailyLimit, validUntil,
-// optionally blocked providers + metadata).
+// Creates a new deterministic session key for an agent.
+// Flow:
+//   1. Derive session key & sessionId (keccak256(abi.encodePacked(sessionKey, agentId, validUntil)))
+//   2. Create session on vault (ClientAgentVault.createSession)
+//   3. Wait for vault confirmation
+//   4. Register session on IdentityRegistry (registerSession)
+//
+// This ensures atomicity and prevents frontrunning.
 
 async function cmdSessionCreate(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   let agentIndexStr = findFlag(args, "--agent") ?? findFlag(args, "-aid");
@@ -179,12 +187,20 @@ async function cmdSessionCreate(args: string[]): Promise<void> {
     ? blockedAgentsStr.split(",").map((a) => BigInt(a.trim()))
     : [];
 
+  // ── Step 1: Derive sessionId (must match vault encoding) ──────────────
+  const sessionId = deriveSessionId(
+    session.address as `0x${string}`,
+    agentId,
+    validUntil,
+  );
+
   console.log("");
-  console.log("── Creating Session Key ───────────────────────────────────");
+  console.log("── Creating Session ───────────────────────────────────────");
   console.log(`  EOA:             ${client.eoaAddress}`);
   console.log(`  Agent ID:        ${agentId}`);
   console.log(`  Session index:   ${sessionIndex}`);
   console.log(`  Session key:     ${session.address}`);
+  console.log(`  Session ID:      ${sessionId}`);
   console.log(`  Value limit:     ${valueLimitStr} per tx`);
   console.log(`  Max spend:       ${dailyLimitStr} lifetime cap`);
   console.log(`  Valid for:       ${validDays} days`);
@@ -193,14 +209,105 @@ async function cmdSessionCreate(args: string[]): Promise<void> {
   }
   console.log("");
 
-  const txHash = await cs.addSessionKeyRule(
+  // Get AA wallet address from agent mapping first (new sessions are not on registry yet).
+  const agentWallet = await cs.getAgentWalletFromRegistry(agentId);
+  const aaWalletAddress = agentWallet?.walletContract ?? null;
+  let walletContractToUse: string;
+
+  if (!aaWalletAddress) {
+    // Fall back to AA SDK derivation, then static config.
+    const config = client.getEoaClient().config;
+    if (config.networkName && config.bundlerUrl) {
+      const aaSdk = new GokiteAASDK(
+        config.networkName,
+        config.rpcUrl,
+        config.bundlerUrl,
+      );
+      walletContractToUse = aaSdk.getAccountAddress(
+        client.eoaAddress,
+      ) as `0x${string}`;
+    } else if (config.contracts.kiteAAWallet) {
+      walletContractToUse = config.contracts.kiteAAWallet;
+    } else {
+      throw new Error(
+        "AA wallet not found for agent. Configure networkName+bundlerUrl or contracts.kiteAAWallet.",
+      );
+    }
+    console.log(`  AA wallet (derived): ${walletContractToUse}`);
+  } else {
+    walletContractToUse = aaWalletAddress;
+    console.log(`  AA wallet:          ${aaWalletAddress}`);
+  }
+
+  // ── Step 2: Create session on vault ────────────────────────────────────
+  console.log("");
+  console.log("  Creating session on vault...");
+
+  const createSessionHash = await cs.createVaultSession({
+    walletContract: walletContractToUse as `0x${string}`,
+    sessionId: sessionId as `0x${string}`,
+    sessionKey: session.address,
+    rules: [], // Empty rules for now; can be added later
+  });
+
+  console.log(`  Vault tx:        ${createSessionHash}`);
+  console.log("");
+
+  // ── Step 3: Wait for vault confirmation ────────────────────────────────
+  console.log("  Waiting for vault confirmation...");
+  const publicClient = createPublicClient({
+    transport: http(client.getEoaClient().config.rpcUrl),
+  });
+
+  const sessionExistsOnVault = await new Promise<boolean>((resolve) => {
+    const checkInterval = setInterval(async () => {
+      try {
+        const exists = await publicClient.readContract({
+          address: walletContractToUse as `0x${string}`,
+          abi: clientAgentVaultAbi,
+          functionName: "sessionExists",
+          args: [sessionId],
+        });
+
+        if (exists) {
+          clearInterval(checkInterval);
+          resolve(true);
+        }
+      } catch {
+        // Ignore read errors and keep polling
+      }
+    }, 1000);
+
+    // Timeout after 30 seconds
+    setTimeout(() => {
+      clearInterval(checkInterval);
+      resolve(false);
+    }, 30000);
+  });
+
+  if (!sessionExistsOnVault) {
+    console.log(
+      "   WARNING: Session not confirmed on vault after 30s. Proceeding anyway...",
+    );
+  } else {
+    console.log("   Session confirmed on vault.");
+  }
+
+  // ── Step 4: Register session on IdentityRegistry ──────────────────────
+  console.log("");
+  console.log("  Registering session on IdentityRegistry...");
+
+  const registerHash = await cs.registerSessionOnRegistry({
     agentId,
-    session.address,
-    valueLimit,
-    maxValueAllowed,
+    sessionKey: session.address,
+    user: client.eoaAddress,
+    walletContract: walletContractToUse,
     validUntil,
     blockedAgents,
-  );
+  });
+
+  console.log(`  Registry tx:     ${registerHash}`);
+  console.log("");
 
   // Persist session credentials
   try {
@@ -209,14 +316,12 @@ async function cmdSessionCreate(args: string[]): Promise<void> {
       `SESSION_${agentId}_${sessionIndex}_PRIVATE_KEY`,
       session.privateKey,
     );
+    setVar(`SESSION_${agentId}_${sessionIndex}_ID`, sessionId);
   } catch {
     console.log("  Warning: Could not persist session credentials to vars.");
   }
 
-  console.log(`  Tx:              ${txHash}`);
-  console.log(`  Explorer:        https://testnet.kitescan.ai/tx/${txHash}`);
-  console.log("");
-  console.log("── Session Key Created ────────────────────────────────────");
+  console.log("── Session Created ────────────────────────────────────────");
   console.log(`  Session key:     ${session.address}`);
   console.log(
     `  Valid until:     ${new Date(Number(validUntil) * 1000).toISOString()}`,
@@ -239,7 +344,9 @@ async function cmdSessionList(args: string[]): Promise<void> {
 
   const agentId = BigInt(agentIndexStr);
   const { limit, offset } = parsePagination(args);
-  const sessions = await getSessionsByAgent(`0x${agentId}`, limit, offset);
+
+  const client = KiteSettleClient.createReadOnly();
+  const sessions = await client.listSessions(agentId, { limit, offset });
 
   if (sessions.length === 0) {
     console.log("");
@@ -248,9 +355,13 @@ async function cmdSessionList(args: string[]): Promise<void> {
     return;
   }
 
-  const rows = await Promise.all(
-    sessions.map((session) => buildSessionListRow(session)),
-  );
+  const rows: SessionListRow[] = sessions.map((s) => ({
+    sessionKey: s.sessionKey,
+    status: s.status,
+    expiresAt: s.validUntilFormatted,
+    maxAmount: s.maxAmountFormatted,
+    remainingAmount: s.remainingFormatted,
+  }));
   const pageInfo =
     sessions.length < limit
       ? `${offset + 1}-${offset + sessions.length} (all results in this page)`
@@ -282,8 +393,9 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
     return;
   }
 
-  const session = await resolveIndexedSession(sessionKeyRaw);
   const normalizedKey = normalizeSessionKey(sessionKeyRaw);
+  const client = KiteSettleClient.createReadOnly();
+  const session = await client.getSessionInfo(normalizedKey);
 
   console.log("");
   console.log("── Session Key Status ─────────────────────────────────────");
@@ -296,17 +408,21 @@ async function cmdSessionStatus(args: string[]): Promise<void> {
     return;
   }
 
-  console.log(`  Status:  ${getEffectiveSessionStatus(session)}`);
+  console.log(`  Status:  ${session.status}`);
   console.log(`  Address: ${session.sessionKey}`);
   console.log("──────────────────────────────────────────────────────────");
 }
 
 // ── session revoke ────────────────────────────────────────────────────────────
 //
-// Revokes a session key on KiteAAWallet so it can no longer sign payments.
-// Only the owning EOA can revoke.
+// Revokes a session key atomically:
+//   1. Remove from vault (ClientAgentVault.removeSession)
+//   2. Revoke on IdentityRegistry (revokeSession)
+//
+// This prevents frontrunning by removing from vault first.
+
 async function cmdSessionRevoke(args: string[]): Promise<void> {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const sessionKeyRaw =
@@ -351,8 +467,10 @@ async function cmdSessionRevoke(args: string[]): Promise<void> {
   }
 
   // Verify the session belongs to this EOA before revoking
+  let sessionOnRegistry: any;
   try {
-    const [, , user] = (await cs.validateSession(sessionKey)) as any;
+    sessionOnRegistry = (await cs.validateSession(sessionKey)) as any;
+    const [, , user] = sessionOnRegistry;
     const owner = user as string;
     if (owner.toLowerCase() !== client.eoaAddress.toLowerCase()) {
       throw new Error(
@@ -371,10 +489,82 @@ async function cmdSessionRevoke(args: string[]): Promise<void> {
   console.log(`  EOA:          ${client.eoaAddress}`);
   console.log("");
 
-  const txHash = await cs.revokeSessionKey(sessionKey);
+  // ── Step 1: Resolve session metadata needed for vault removal ───────────
+  let vaultAddress: string | undefined;
+  let sessionId: `0x${string}` | undefined;
 
-  console.log(`  Tx:           ${txHash}`);
-  console.log(`  Explorer:     https://testnet.kitescan.ai/tx/${txHash}`);
+  if (sessionOnRegistry && Array.isArray(sessionOnRegistry)) {
+    // validateSession returns tuple: (active, agentId, user, walletContract, validUntil)
+    const agentId = (sessionOnRegistry as any)[1] as bigint;
+    const walletContract = (sessionOnRegistry as any)[3] as string;
+    const validUntil = (sessionOnRegistry as any)[4] as bigint;
+
+    if (
+      walletContract &&
+      walletContract !== "0x0000000000000000000000000000000000000000"
+    ) {
+      vaultAddress = walletContract;
+    }
+
+    sessionId = deriveSessionId(
+      sessionKey as `0x${string}`,
+      agentId,
+      validUntil,
+    );
+  }
+
+  if (!vaultAddress && agentIdRaw) {
+    const agentWallet = await cs.getAgentWalletFromRegistry(BigInt(agentIdRaw));
+    if (agentWallet?.walletContract) {
+      vaultAddress = agentWallet.walletContract;
+    }
+  }
+
+  if (!vaultAddress) {
+    const config = client.getEoaClient().config;
+    if (config.networkName && config.bundlerUrl) {
+      const aaSdk = new GokiteAASDK(
+        config.networkName,
+        config.rpcUrl,
+        config.bundlerUrl,
+      );
+      vaultAddress = aaSdk.getAccountAddress(client.eoaAddress) as string;
+    } else if (config.contracts.kiteAAWallet) {
+      vaultAddress = config.contracts.kiteAAWallet;
+    }
+  }
+
+  // ── Step 2: Remove from vault first ────────────────────────────────────
+  console.log("  Removing session from vault...");
+
+  // We need sessionId to remove from vault.
+  if (!sessionId) {
+    console.log(
+      "  ⚠ Could not derive sessionId from registry; proceeding with registry revoke only",
+    );
+  }
+
+  if (sessionId && vaultAddress) {
+    try {
+      const vaultRemoveHash = await cs.removeVaultSession(
+        vaultAddress,
+        sessionId,
+      );
+      console.log(`  Vault tx:     ${vaultRemoveHash}`);
+
+      // Wait briefly for vault to process
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    } catch (err: any) {
+      console.log(`  ⚠ Warning: Could not remove from vault: ${err.message}`);
+    }
+  }
+
+  // ── Step 3: Revoke on IdentityRegistry ─────────────────────────────────
+  console.log("  Revoking session on IdentityRegistry...");
+
+  const registryRevokeHash = await cs.revokeSessionOnRegistry(sessionKey);
+
+  console.log(`  Registry tx:  ${registryRevokeHash}`);
   console.log("");
   console.log("── Session Key Revoked ────────────────────────────────────");
   console.log(`  Key ${sessionKey} is now inactive.`);

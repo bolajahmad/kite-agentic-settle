@@ -1,0 +1,115 @@
+---
+sidebar_position: 3
+title: Payments
+description: Making paid API calls with x402 and automatic payment handling
+---
+
+# SDK Payments
+
+## Basic Payment Call
+
+```typescript
+import { KiteSettleClient } from "@kite-agentic-pay/sdk";
+
+const client = await KiteSettleClient.create({ credential });
+
+const response = await client.fetchWithPayment(
+  "http://localhost:4000/api/data/protocol-report",
+  { method: "GET" },
+  { paymentMode: "perCall" }
+);
+
+if (response.ok) {
+  const data = await response.json();
+  console.log(data);
+}
+```
+
+## Payment Modes
+
+| Mode | Description |
+|---|---|
+| `perCall` | Sign and pay on every call |
+| `batch` | Open a channel, batch calls, settle once |
+| `stream` | Time-bounded channel for streaming data |
+| `channel` | Use an existing open channel |
+| `auto` | Let the SDK decide based on call frequency |
+
+## Checking Balance Before Paying
+
+```typescript
+const vaultAddress = await client.getOwnerAAWalletAddress();
+const balance = await client.getDepositedBalance(undefined, vaultAddress);
+
+if (balance === 0n) {
+  console.warn("Vault is empty. Fund with: npx kite fund --amount 10");
+}
+```
+
+## Handling Payment Failures
+
+```typescript
+try {
+  const response = await client.fetchWithPayment(url, {}, { paymentMode: "perCall" });
+  if (!response.ok) {
+    const err = await response.json();
+    console.error("Payment failed:", err);
+  }
+} catch (err: any) {
+  if (err.message.includes("Session expired")) {
+    // Renew session: npx kite session start
+  } else if (err.message.includes("Insufficient balance")) {
+    // Fund wallet: npx kite fund
+  }
+}
+```
+
+## Payment with Token Override
+
+```typescript
+const USDT = "0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63";
+
+const response = await client.callPaidApi({
+  url: "http://localhost:4000/api/data/market/BTCUSDT",
+  method: "GET",
+  paymentMode: "perCall",
+  token: USDT,
+  maxAmount: parseUnits("1.0", 18),
+});
+```
+
+## Multi-Call with Same Session
+
+```typescript
+const client = await KiteSettleClient.create({
+  credential,
+  agentId: "1",
+});
+
+// Multiple calls share the same session key and accumulate against the session budget
+const [report, market, intel] = await Promise.all([
+  client.fetchWithPayment("http://localhost:4000/api/data/protocol-report", {}),
+  client.fetchWithPayment("http://localhost:4000/api/data/market/BTCUSDT", {}),
+  client.fetchWithPayment("http://localhost:4000/api/data/intelligence", {}),
+]);
+```
+
+## Receipt Utilities (Provider-Side)
+
+For providers validating receipts before on-chain settlement:
+
+```typescript
+import { verifyReceipt, validateReceipt } from "@kite-agentic-pay/sdk";
+
+// Verify EIP-712 signature matches session key
+const isValid = await verifyReceipt(receiptHeader, contractAddresses);
+
+// Full validation (session active, nonce fresh, amount within limits)
+const result = await validateReceipt(receiptHeader, { rpcUrl: KITE_TESTNET.rpcUrl });
+```
+
+## Related Pages
+
+- [x402 Payments Concept →](../concepts/x402-payments)
+- [SDK Channels →](./channels) — Channel-based payments
+- [Demo 1: Per-Call Payment →](../simulations/per-call-payment)

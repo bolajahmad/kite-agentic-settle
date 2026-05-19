@@ -1,0 +1,96 @@
+---
+sidebar_position: 1
+title: Per-Call Payment
+description: Demo 1 — x402 per-call payment walkthrough
+---
+
+# Demo 1: Per-Call Payment
+
+This demo shows the simplest Kite payment model: each API call is paid individually using x402.
+
+**Source:** `mcp-sdk/examples/01-percall-payment.ts`
+
+## What It Does
+
+1. Creates a `KiteSettleClient` with an existing agent and session key
+2. Calls a price-gated API endpoint
+3. Receives a 402 challenge with price and provider address
+4. Signs and submits a payment
+5. Gets the API response
+
+No channel is opened. Each call is fully self-contained.
+
+## Running It
+
+```bash
+cd mcp-sdk
+npm run demo 1
+```
+
+Or with the CLI:
+
+```bash
+npx kite simulate --demo 1
+```
+
+## Expected Output
+
+```
+  Demo 1: Per-Call Payment
+  ─────────────────────────────────────────────────
+  Agent ID:      1
+  Session Key:   0x875...
+  
+  → Calling http://localhost:4000/api/data/protocol-report
+  → 402 Challenge received
+    Price: 0.40 USDT
+    Provider: 0xProviderEOA...
+  → Signing payment receipt...
+  → Submitting payment...
+  ✓ 200 OK
+  
+  Response: {
+    "report": "Kite Protocol Metrics",
+    "tvl": "1,234,567 USDT",
+    ...
+  }
+  
+  Payment Receipt:
+    Channel: none (per-call)
+    Amount: 0.40 USDT
+    Seq: 1
+    TxHash: 0x...
+```
+
+## Code Walkthrough
+
+```typescript
+import { KiteSettleClient, KITE_TESTNET } from "@kite-agentic-pay/sdk";
+
+const client = await KiteSettleClient.create({
+  credential: process.env.CREDENTIAL,
+  agentId: "1",
+});
+
+// fetchWithPayment is a drop-in replacement for fetch
+const response = await client.fetchWithPayment(
+  "http://localhost:4000/api/data/protocol-report",
+  { method: "GET" },
+  { paymentMode: "perCall" }
+);
+
+const data = await response.json();
+console.log(data);
+```
+
+## Key Points
+
+- **Per-call payments** are on-chain for every call. Gas costs apply each time.
+- Suitable for **low-frequency, high-value** API calls
+- For frequent calls, use [Batch Channel →](./batch-flow) to amortize gas costs
+
+## Related Pages
+
+- [x402 Payments Concept →](../concepts/x402-payments)
+- [SDK: Payments →](../sdk/payments)
+- [Demo 3: Batch Channel →](./batch-flow)

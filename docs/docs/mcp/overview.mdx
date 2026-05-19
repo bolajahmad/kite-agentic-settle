@@ -1,0 +1,97 @@
+---
+sidebar_position: 1
+title: MCP Overview
+description: The Kite MCP server — how AI agents connect to on-chain payments
+---
+
+# MCP Server Overview
+
+The Kite MCP server (`kite-mcp`) is a bridge between AI agent frameworks and the Kite payment infrastructure. It exposes the SDK as a set of standardized tools consumable by any MCP-compatible runtime.
+
+```
+Claude / OpenAI / LangChain
+         ↓
+  MCP Server (port 3100)
+         ↓
+    @kite-agentic-pay/sdk
+         ↓
+  Kite AI Testnet (chain 2368)
+```
+
+## What It Does
+
+An AI agent using this server can:
+
+- Make paid API calls with automatic x402 payment handling
+- Open and manage payment channels
+- Check wallet balances and session status
+- Resolve agent identity on-chain
+- Audit payment logs
+
+No private key is ever passed as a tool argument. The server loads credentials from the local store (`~/.kite-agent-pay/`) set up via `kite onboard`.
+
+## Starting the Server
+
+```bash
+# Prerequisites: run kite onboard first
+npx kite run --port 3100
+```
+
+Or from the `kite-mcp` package directly:
+
+```bash
+cd kite-mcp
+npm run dev
+```
+
+Output:
+
+```
+  Kite MCP Server
+  ─────────────────────────────────────────────────
+  Agent ID:    1
+  Transport:   SSE
+  Listening:   http://localhost:3100
+```
+
+## Transports
+
+The server runs three transports simultaneously:
+
+| Transport | Endpoint | Used By |
+|---|---|---|
+| **SSE** | `GET /mcp/sse` | Claude Desktop, Cursor, Continue.dev |
+| **Streamable HTTP** | `POST /mcp` | Modern MCP clients |
+| **POST messages** | `POST /mcp/messages` | SSE control channel |
+
+## Tool Schema Endpoints
+
+For direct AI framework integration without MCP:
+
+| Endpoint | Format |
+|---|---|
+| `GET /api/tools/schema` | Raw tool definitions |
+| `GET /api/tools/schema/openai` | OpenAI function-calling format |
+| `GET /api/tools/schema/anthropic` | Anthropic tool-use format |
+| `GET /api/tools/schema/langchain` | LangChain-compatible format |
+
+## Available Tools
+
+Seven tools are exposed:
+
+| Tool | Purpose |
+|---|---|
+| `call_paid_api` | Make a paid HTTP call (x402 or channel) |
+| `open_channel` | Open a new payment channel |
+| `get_session_info` | List or inspect session keys |
+| `get_channel_info` | List or inspect channels |
+| `check_balance` | Check AA wallet deposited balance |
+| `resolve_agent` | Look up agent NFT from IdentityRegistry |
+| `get_usage_logs` | Get payment audit logs |
+
+## Next Steps
+
+- [Connect Claude Desktop →](./claude-desktop)
+- [OpenAI Agents →](./openai-agents)
+- [LangChain →](./langchain)
+- [Tool Reference →](./tool-reference)

@@ -1,7 +1,14 @@
 // ── Primary entry point ────────────────────────────────────────────
 // Import KiteSettleClient for all new consumer and provider code.
 export { KiteSettleClient } from "./kite-settle-client.js";
-export type { KiteSettleClientOptions } from "./kite-settle-client.js";
+export type {
+  KiteSettleClientOptions,
+  CallPaidApiOptions,
+  CallPaidApiResult,
+  ChannelSettlementSelector,
+  InitiateSettlementOptions,
+  ChannelSettlementResult,
+} from "./kite-settle-client.js";
 
 export type { BatchEndReason, BatchLimits } from "./batch.js";
 
@@ -46,20 +53,27 @@ export {
 } from "./indexer.js";
 
 export {
-  agentRegistryAbi,
+  clientAgentVaultAbi,
   erc20Abi,
+  identityRegistryAbi,
   kiteAAWalletAbi,
   paymentChannelAbi,
   walletFactoryAbi,
 } from "./abis.js";
+export { deriveSessionId, hashProvider } from "./utils/session-id.js";
 export {
+  clearCredential,
   deleteVar,
+  getConfigPath,
+  getCredential,
   getKiteDir,
   getVar,
   getVarsPath,
+  hasCredential,
   hasVar,
   listVars,
   resolveVar,
+  setCredential,
   setVar,
 } from "./vars.js";
 

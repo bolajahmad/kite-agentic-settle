@@ -3,17 +3,20 @@ const { ethers }       = require("hardhat");
 
 /**
  * IdentityRegistry.test.js
- * Covers: register, setAgentURI, setMetadata, setAgentWallet, sessions,
+ * Covers: register, setAgentURI, setAgentWallet, sessions,
  *         isAgentBlocked, validateSession, token transfer clears agentWallet.
  */
 describe("IdentityRegistry", function () {
   let registry;
-  let owner, alice, bob, carol, operator;
+  let vault;
+  let alice, bob, carol, operator;
 
   beforeEach(async function () {
-    [owner, alice, bob, carol, operator] = await ethers.getSigners();
+    [, alice, bob, carol, operator] = await ethers.getSigners();
     const Factory = await ethers.getContractFactory("IdentityRegistry");
+    const VaultFactory = await ethers.getContractFactory("MockClientAgentVault");
     registry = await Factory.deploy();
+    vault = await VaultFactory.deploy();
   });
 
   // ─── Registration ─────────────────────────────────────────────────
@@ -65,34 +68,6 @@ describe("IdentityRegistry", function () {
     });
   });
 
-  // ─── Metadata ──────────────────────────────────────────────────────
-
-  describe("setMetadata / getMetadata", function () {
-    beforeEach(async function () {
-      await registry.connect(alice)["register(string)"]("ipfs://a");
-    });
-
-    it("owner can set and read metadata", async function () {
-      const val = ethers.toUtf8Bytes("hello world");
-      await expect(registry.connect(alice).setMetadata(1, "description", val))
-        .to.emit(registry, "MetadataSet");
-      const stored = await registry.getMetadata(1, "description");
-      expect(stored).to.equal(ethers.hexlify(val));
-    });
-
-    it("non-owner cannot set metadata", async function () {
-      await expect(
-        registry.connect(bob).setMetadata(1, "foo", ethers.toUtf8Bytes("bar"))
-      ).to.be.revertedWith("Not authorized");
-    });
-
-    it("cannot use reserved key 'agentWallet'", async function () {
-      await expect(
-        registry.connect(alice).setMetadata(1, "agentWallet", ethers.toUtf8Bytes("x"))
-      ).to.be.revertedWith("Use setAgentWallet for agentWallet key");
-    });
-  });
-
   // ─── Agent Wallet ──────────────────────────────────────────────────
 
   describe("setAgentWallet", function () {
@@ -132,6 +107,26 @@ describe("IdentityRegistry", function () {
       const [wc, u] = await registry.getAgentWallet(agentId);
       expect(wc).to.equal(walletAddr);
       expect(u).to.equal(carol.address);
+      expect(await registry.ownerOf(agentId)).to.equal(carol.address);
+    });
+
+    it("does not transfer NFT when user is already the owner", async function () {
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const walletAddr = bob.address;
+
+      const types = {
+        SetAgentWallet: [
+          { name: "agentId",        type: "uint256" },
+          { name: "walletContract", type: "address" },
+          { name: "user",           type: "address" },
+          { name: "deadline",       type: "uint256" },
+        ],
+      };
+      const value = { agentId, walletContract: walletAddr, user: alice.address, deadline };
+      const sig = await alice.signTypedData(domainWithContract, types, value);
+
+      await registry.connect(alice).setAgentWallet(agentId, walletAddr, alice.address, deadline, sig);
+      expect(await registry.ownerOf(agentId)).to.equal(alice.address);
     });
 
     it("rejects expired signature", async function () {
@@ -168,7 +163,7 @@ describe("IdentityRegistry", function () {
       await registry.connect(alice).setAgentWallet(agentId, bob.address, carol.address, deadline, sig);
 
       // Transfer the NFT
-      await registry.connect(alice).transferFrom(alice.address, operator.address, agentId);
+      await registry.connect(carol).transferFrom(carol.address, operator.address, agentId);
       const [wc,] = await registry.getAgentWallet(agentId);
       expect(wc).to.equal(ethers.ZeroAddress);
     });
@@ -186,14 +181,30 @@ describe("IdentityRegistry", function () {
       sessionKey = carol; // use carol's address as session key
     });
 
+    /** Compute the deterministic sessionId used by the vault and IdentityRegistry. */
+    function computeSessionId(sessionKeyAddr, aid, validUntil) {
+      return ethers.solidityPackedKeccak256(
+        ["address", "uint256", "uint256"],
+        [sessionKeyAddr, aid, validUntil]
+      );
+    }
+
     async function doRegisterSession(opts = {}) {
-      const validUntil       = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const valueLimit       = opts.valueLimit       ?? ethers.parseEther("10");
-      const maxValueAllowed  = opts.maxValueAllowed  ?? ethers.parseEther("100");
+      const validUntil       = opts.validUntil ?? BigInt(Math.floor(Date.now() / 1000) + 3600);
       const blockedProviders = opts.blockedProviders ?? [];
+
+      if (opts.skipVaultSetup !== true) {
+        const sessionId = computeSessionId(sessionKey.address, agentId, validUntil);
+        await vault.setSessionExists(sessionId, true);
+      }
+
       return registry.connect(alice).registerSession(
-        agentId, sessionKey.address, alice.address, bob.address,
-        valueLimit, maxValueAllowed, validUntil, blockedProviders
+        agentId,
+        sessionKey.address,
+        alice.address,
+        await vault.getAddress(),
+        validUntil,
+        blockedProviders
       );
     }
 
@@ -208,7 +219,7 @@ describe("IdentityRegistry", function () {
       expect(active).to.be.true;
       expect(id).to.equal(agentId);
       expect(user).to.equal(alice.address);
-      expect(wc).to.equal(bob.address); // wallet contract
+      expect(wc).to.equal(await vault.getAddress());
     });
 
     it("validateSession returns active=false for revoked session", async function () {
@@ -219,11 +230,16 @@ describe("IdentityRegistry", function () {
     });
 
     it("isAgentBlocked returns true for blocked agent", async function () {
+      const validUntil = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const sessionId = computeSessionId(sessionKey.address, agentId, validUntil);
+      await vault.setSessionExists(sessionId, true);
       // Register session with agentId in the blocked list
       await registry.connect(alice).registerSession(
-        agentId, sessionKey.address, alice.address, bob.address,
-        ethers.parseEther("10"), ethers.parseEther("100"),
-        BigInt(Math.floor(Date.now() / 1000) + 3600),
+        agentId,
+        sessionKey.address,
+        alice.address,
+        await vault.getAddress(),
+        validUntil,
         [agentId]
       );
       expect(await registry.isAgentBlocked(sessionKey.address, agentId)).to.be.true;
@@ -239,8 +255,10 @@ describe("IdentityRegistry", function () {
     it("non-owner cannot register session", async function () {
       await expect(
         registry.connect(bob).registerSession(
-          agentId, sessionKey.address, alice.address, bob.address,
-          ethers.parseEther("10"), ethers.parseEther("100"),
+          agentId,
+          sessionKey.address,
+          alice.address,
+          await vault.getAddress(),
           BigInt(Math.floor(Date.now() / 1000) + 3600),
           []
         )
@@ -250,12 +268,18 @@ describe("IdentityRegistry", function () {
     it("cannot register session with past expiry", async function () {
       await expect(
         registry.connect(alice).registerSession(
-          agentId, sessionKey.address, alice.address, bob.address,
-          ethers.parseEther("10"), ethers.parseEther("100"),
+          agentId,
+          sessionKey.address,
+          alice.address,
+          await vault.getAddress(),
           1n, // in the past
           []
         )
       ).to.be.revertedWith("Expiry must be in future");
+    });
+
+    it("requires the session to exist on the vault", async function () {
+      await expect(doRegisterSession({ skipVaultSetup: true })).to.be.revertedWith("Vault session not set");
     });
   });
 });

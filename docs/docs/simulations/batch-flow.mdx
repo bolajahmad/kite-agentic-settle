@@ -1,0 +1,97 @@
+---
+sidebar_position: 3
+title: Batch Channel Flow
+description: Demo 3 — Opening a channel and batching multiple calls
+---
+
+# Demo 3: Batch Channel Flow
+
+This demo shows how to open a payment channel, make multiple calls with off-chain receipts, and settle at the end — paying only 2 on-chain transactions instead of N.
+
+**Source:** `mcp-sdk/examples/03-batch-channel-flow.ts`
+
+## What It Does
+
+1. Opens a batch channel with a 5 USDT deposit
+2. Makes 5 API calls — all off-chain, no gas per call
+3. Settles the channel with a single transaction
+4. Reports the gas savings vs per-call mode
+
+## Running It
+
+```bash
+cd mcp-sdk
+npm run demo 3
+```
+
+## Expected Output
+
+```
+  Demo 3: Batch Channel Flow
+  ─────────────────────────────────────────────────
+  Agent ID:   1
+
+  → Opening batch channel...
+    Deposit: 5.00 USDT, max/call: 0.50 USDT
+  ✓ Channel ID: 0xabc123...
+  ✓ Provider activated
+
+  → Making 5 calls on channel (all off-chain)...
+    Call 1: ✓ seq=1  cumCost=0.40 USDT
+    Call 2: ✓ seq=2  cumCost=0.80 USDT
+    Call 3: ✓ seq=3  cumCost=1.20 USDT
+    Call 4: ✓ seq=4  cumCost=1.60 USDT
+    Call 5: ✓ seq=5  cumCost=2.00 USDT
+
+  → Initiating settlement...
+  ✓ Settlement approved by provider (cooperative)
+  ✓ Channel closed
+
+  Summary:
+    Calls: 5
+    Total cost: 2.00 USDT
+    Deposit refunded: 3.00 USDT
+    On-chain transactions: 2 (open + settle)
+    Gas saved vs per-call: ~3 transactions worth
+```
+
+## Code Walkthrough
+
+```typescript
+const client = await KiteSettleClient.create({ credential, agentId: "1" });
+
+// Open channel — 1 on-chain tx
+const channel = await client.openChannel({
+  provider: PROVIDER_ADDRESS,
+  token: DM_USDT,
+  deposit: parseUnits("5.0", 18),
+  maxSpend: parseUnits("4.5", 18),
+  maxPerCall: parseUnits("0.5", 18),
+  maxDuration: 3600,
+});
+
+// 5 calls — all off-chain (no gas)
+for (let i = 0; i < 5; i++) {
+  const response = await client.callOnChannel(
+    channel.channelId,
+    "http://localhost:4000/api/data/protocol-report"
+  );
+  console.log(await response.json());
+}
+
+// Settle — 1 on-chain tx
+await client.initiateSettlement(channel.channelId);
+```
+
+## Gas Comparison
+
+| Mode | 5 Calls | 50 Calls | 100 Calls |
+|---|---|---|---|
+| Per-call (x402) | 5 txs | 50 txs | 100 txs |
+| Batch channel | 2 txs | 2 txs | 2 txs |
+
+## Related Pages
+
+- [Payment Channels Concept →](../concepts/payment-channels)
+- [SDK: Channels →](../sdk/channels)
+- [Demo 4: Stream Flow →](./stream-flow)

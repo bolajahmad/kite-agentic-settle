@@ -1,0 +1,115 @@
+---
+sidebar_position: 1
+title: FAQ
+description: Frequently asked questions about Kite Agentic Pay
+---
+
+# Frequently Asked Questions
+
+## Is this mainnet ready?
+
+No. Kite is currently running on Kite AI Testnet (chain ID 2368). The contracts have not been formally audited. DmUSDT has no real-world value. Do not use real money.
+
+---
+
+## What tokens are supported?
+
+On testnet: DmUSDT (`0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489`) and USDT (`0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63`).
+
+Any ERC-20 token can technically be used — the contracts are token-agnostic. The reference backend and SDK default to DmUSDT.
+
+---
+
+## How do I recover a lost channel?
+
+1. Query the subgraph for your agent's channel history
+2. The `PaymentChannel` contract state is always on-chain
+3. Your signed receipts are the only thing that may be lost
+
+See [Channels: Recovery →](./channels/recovery) for the full recovery flow.
+
+---
+
+## What is the difference between x402 and a channel?
+
+**x402 (per-call):** Every API call is an independent payment. Two on-chain transactions per call (high gas, no lockup).
+
+**Channel (batch):** Open once (1 tx), make unlimited calls (0 on-chain tx each), settle once (1 tx). Much cheaper for high-frequency calls, but requires upfront capital deposit.
+
+See [Concepts: x402 Payments →](./concepts/x402-payments) and [Concepts: Payment Channels →](./concepts/payment-channels).
+
+---
+
+## What is a session key?
+
+A session key is a delegated signing key. Instead of using your main EOA to sign every payment, you create a time-limited, budget-capped session key that the agent uses autonomously. This enables agents to pay without user confirmation on every call.
+
+See [Concepts: Session Keys →](./concepts/session-keys).
+
+---
+
+## What is an AA wallet?
+
+An Account Abstraction wallet. Each agent gets a smart contract wallet that enforces spending rules (session key budget, per-call cap, expiry). The wallet is funded with tokens; the EOA never needs to hold tokens directly.
+
+See [Smart Contracts: KiteAAWallet →](./smart-contracts/kite-aa-wallet).
+
+---
+
+## Can I use this with Claude? ChatGPT? LangChain?
+
+Yes. The Kite MCP server integrates with any MCP-compatible client:
+- **Claude Desktop** — direct MCP config
+- **OpenAI** — via function calling with tool schemas from the MCP endpoint
+- **LangChain** — via `DynamicTool` wrapping the MCP endpoint
+
+See the [MCP section →](./mcp/overview).
+
+---
+
+## How do I run the demos?
+
+```bash
+cd mcp-sdk/examples
+npx ts-node run.ts 01-percall-payment
+```
+
+See [Guide: Run the Local Demo →](./guides/run-local-demo).
+
+---
+
+## My agent ran out of budget. What happens?
+
+Payments fail at the SDK level (the session key checks the on-chain budget before signing). Start a new session:
+
+```bash
+npx kite session start --agent 1 --budget 10
+```
+
+---
+
+## How do I revoke a session if a key is compromised?
+
+```bash
+npx kite session revoke --key 0xCompromisedSessionKeyAddress
+```
+
+This is an on-chain transaction that takes effect within the next block. See [Security: Session Security →](./security/session-security).
+
+---
+
+## What chain does this run on?
+
+Kite AI Testnet, chain ID 2368. RPC: `https://rpc-testnet.gokite.ai`.
+
+---
+
+## Can I deploy my own contracts?
+
+Yes. All contracts are in `contracts/` with Hardhat config. See [Deployment: Testnet →](./deployment/testnet).
+
+---
+
+## Where is the subgraph endpoint?
+
+Check `subgraph/networks.json` or `subgraph/subgraph.yaml`. The hosted endpoint is on Goldsky. See [Indexer: Deployment →](./indexer/deployment).

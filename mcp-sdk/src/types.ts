@@ -1,10 +1,14 @@
 export interface KiteConfig {
   rpcUrl: string;
   chainId: number;
+  /** Network name used by GokiteAASDK (e.g. "kite_testnet"). */
+  networkName?: string;
+  /** Bundler service URL used by GokiteAASDK. */
+  bundlerUrl?: string;
   contracts: {
     identityRegistry: string;
     attestationRegistry: string;
-    kiteAAWallet: string;
+    kiteAAWallet?: string;
     paymentChannel: string;
     walletFactory?: string;
   };
@@ -14,6 +18,8 @@ export interface KiteConfig {
 export interface ChannelConfig {
   provider: string;
   token?: string;
+  /** Optional wallet contract override; if omitted, SDK resolves from session. */
+  walletContract?: string;
   mode: "prepaid" | "postpaid";
   deposit: bigint;
   maxSpend: bigint;
@@ -97,9 +103,9 @@ export interface PaymentResult {
   txHash?: string;
   /**
    * Base64-encoded x402 programmable-settlement payload.
-   * Present for perCall payments made via KiteAAWallet session key.
-   * The facilitator (provider backend) decodes this and calls
-   * KiteAAWallet.executePaymentBySig(...) to settle on-chain.
+    * Present for perCall payments made via ClientVault session key.
+    * The facilitator (provider backend) decodes this and submits the
+    * authorization to the vault-backed settlement path on-chain.
    */
   x402Payload?: string;
   receipt?: Receipt;

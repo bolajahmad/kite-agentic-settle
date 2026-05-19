@@ -8,7 +8,7 @@ dataSources:
     name: IdentityRegistry
     network: kite-ai-testnet
     source:
-      address: "0x46A6cbc0Fd15936F4F67aABBc554f4CAf80281F9"
+      address: "0xE4C30627C02791bF12241021f2fC320b43991cb1"
       abi: IdentityRegistry
       startBlock: 21096127
     mapping:
@@ -16,12 +16,10 @@ dataSources:
       apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
-        - Registered
-        - URIUpdated
-        - AgentWalletSet
-        - AgentWakketCleared
-        - SessionRegistered
-        - SessionRevoked
+        - Agent
+        - Session
+        - User
+        - AAWallet
       abis:
         - name: IdentityRegistry
           file: ./abis/IdentityRegistryABI.json
@@ -32,56 +30,17 @@ dataSources:
           handler: handleURIUpdated
         - event: AgentWalletSet(indexed uint256,indexed address,indexed address)
           handler: handleAgentWalletSet
-        - event: SessionRegistered(indexed uint256,indexed address,indexed address,address,uint256,uint256,uint256)
+        - event: SessionRegistered(indexed uint256,indexed address,indexed address,address,uint256)
           handler: handleSessionRegistered
         - event: SessionRevoked(indexed uint256,indexed address)
           handler: handleSessionRevoked
       file: ./src/identity-registry.ts
 
   - kind: ethereum
-    name: KiteAAWallet
-    network: kite-ai-testnet
-    source:
-      address: "0xBfdbA4E11De8B3b82F910Dd3AE8e517Ce60b0bB2"
-      abi: KiteAAWallet
-      startBlock: 21096127
-    mapping:
-      kind: ethereum/events
-      apiVersion: 0.0.9
-      language: wasm/assemblyscript
-      entities:
-        - UserRegistered
-        - FundsDeposited
-        - FundsWithdrawn
-        - ChannelFundsWithdrawn
-        - ChannelFundsRefunded
-        - PaymentExecuted
-        # - BlockedProvidersUpdated
-      abis:
-        - name: KiteAAWallet
-          file: ./abis/KiteAAWalletABI.json
-      eventHandlers:
-        - event: FundsDeposited(indexed address,indexed address,uint256)
-          handler: handleFundsDeposited
-        - event: FundsWithdrawn(indexed address,indexed address,uint256)
-          handler: handleFundsWithdrawn
-        - event: ChannelFundsWithdrawn(indexed address,indexed address,uint256)
-          handler: handleChannelsFundsWithdrawn
-        - event: ChannelFundsRefunded(indexed address,indexed address,uint256)
-          handler: handleChannelsFundsRefunded
-        - event: PaymentExecuted(indexed address,indexed uint256,indexed address,address,uint256,uint256)
-          handler: handlePaymentExecuted
-        # - event: BlockedProvidersUpdated(indexed address)
-        #   handler: handleBlockedProvidersUpdated
-        - event: UserRegistered(indexed address)
-          handler: handleUserRegistered
-      file: ./src/kite-aa-wallet.ts
-
-  - kind: ethereum
     name: PaymentChannel
     network: kite-ai-testnet
     source:
-      address: "0x4791Ea0134eA66b40371A6Daf22d43e02bbB39f8"
+      address: "0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb"
       abi: PaymentChannel
       startBlock: 21096127
     mapping:
@@ -89,11 +48,11 @@ dataSources:
       apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
-        - ChannelOpened
-        - ChannelActivated
-        - SettlementInitiated
-        - ReceiptSubmitted
-        - ChannelFinalized
+        - Channel
+        - Receipt
+        - Payment
+        - User
+        - AAWallet
       abis:
         - name: PaymentChannel
           file: ./abis/PaymentChannelABI.json
@@ -104,6 +63,65 @@ dataSources:
           handler: handleChannelActivated
         - event: SettlementInitiated(indexed bytes32,indexed address,uint256,uint256)
           handler: handleSettlementInitiated
+        - event: ReceiptSubmitted(indexed bytes32,indexed address,uint256,uint256)
+          handler: handleReceiptSubmitted
         - event: ChannelFinalized(indexed bytes32,uint256,uint256,bytes32)
           handler: handleChannelFinalized
       file: ./src/payment-channel.ts
+
+  - kind: ethereum
+    name: AttestationRegistry
+    network: kite-ai-testnet
+    source:
+      address: "0x2F72b719679FD0b92712D03a1E16909F18d55660"
+      abi: AttestationRegistry
+      startBlock: 21096127
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Attestation
+        - Validation
+        - MerkleRoot
+        - Agent
+      abis:
+        - name: AttestationRegistry
+          file: ./abis/AttestationRegistry.json
+      eventHandlers:
+        - event: FeedbackGiven(indexed uint256,indexed address,indexed uint64,int128,uint8,string,string)
+          handler: handleFeedbackGiven
+        - event: FeedbackRevoked(indexed uint256,indexed address,indexed uint64)
+          handler: handleFeedbackRevoked
+        - event: ResponseAppended(indexed uint256,indexed address,indexed uint64)
+          handler: handleResponseAppended
+        - event: ValidationRequested(indexed bytes32,indexed uint256,indexed address,bytes32)
+          handler: handleValidationRequested
+        - event: ValidationResponded(indexed bytes32,indexed address,uint8,string)
+          handler: handleValidationResponded
+        - event: MerkleRootAnchored(indexed uint256,indexed bytes32,uint256,string,address)
+          handler: handleMerkleRootAnchored
+      file: ./src/attestation-registry.ts
+
+templates:
+  - kind: ethereum
+    name: ClientVault
+    network: kite-ai-testnet
+    source:
+      abi: ClientAgentVault
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      entities:
+        - Payment
+        - Session
+        - SessionIndex
+        - User
+      abis:
+        - name: ClientAgentVault
+          file: ./abis/ClientAgentVaultABI.json
+      eventHandlers:
+        - event: TransferExecuted(indexed bytes32,indexed address,indexed address,uint256,bytes32,bytes)
+          handler: handleTransferExecuted
+      file: ./src/client-vault.ts

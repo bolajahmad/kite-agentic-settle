@@ -1,0 +1,88 @@
+---
+sidebar_position: 4
+title: Contract Addresses
+description: All deployed contract addresses and ABI summaries
+---
+
+# Contract Addresses
+
+## Kite AI Testnet (Chain ID 2368)
+
+| Contract | Address |
+|---|---|
+| IdentityRegistry | `0xE4C30627C02791bF12241021f2fC320b43991cb1` |
+| PaymentChannel | `0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb` |
+| AttestationRegistry | `0x2F72b719679FD0b92712D03a1E16909F18d55660` |
+| DmUSDT | `0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489` |
+| USDT | `0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63` |
+
+The `KiteAAWallet` is deployed per-agent via the factory — each agent has a unique address.
+
+## Network Configuration
+
+```typescript
+const KITE_TESTNET = {
+  id: 2368,
+  name: "Kite AI Testnet",
+  rpcUrls: { default: { http: ["https://rpc-testnet.gokite.ai"] } },
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+};
+
+const BUNDLER_URL = "https://bundler-service.staging.gokite.ai/rpc/";
+```
+
+## ABI Summaries
+
+### IdentityRegistry
+
+```
+registerAgent(name, category, uri) → agentId
+getAgent(agentId) → (owner, wallet, uri, createdAt)
+resolveByWallet(wallet) → agentId
+```
+
+### KiteAAWallet
+
+```
+setSession(key, budget, maxPerCall, validUntil, allowedRecipients)
+revokeSession(key)
+execute(target, value, calldata)
+isSessionValid(key) → bool
+```
+
+### PaymentChannel
+
+```
+openChannel(provider, token, deposit, maxSpend, maxPerCall, maxDuration)
+activateChannel(channelId)
+updateState(channelId, receipt, signature)
+initiateSettlement(channelId)
+finalizeChannel(channelId)
+getChannel(channelId) → ChannelInfo
+```
+
+### AttestationRegistry
+
+```
+setMerkleRoot(root, uri, nonce) → recordId
+verifyRecord(recordId, leaf, proof) → bool
+getRecord(recordId) → (agent, root, uri, timestamp)
+```
+
+## Full ABIs
+
+Full ABI JSON files are in `contracts/artifacts/contracts/`:
+
+- `IdentityRegistry.sol/IdentityRegistry.json`
+- `KiteAAWallet.sol/KiteAAWallet.json`
+- `PaymentChannel.sol/PaymentChannel.json`
+- `AttestationRegistry.sol/AttestationRegistry.json`
+
+The SDK imports these automatically — you don't need to reference them directly unless you're calling the contracts with viem/ethers directly.
+
+## Related Pages
+
+- [Smart Contracts: IdentityRegistry →](../smart-contracts/identity-registry)
+- [Smart Contracts: PaymentChannel →](../smart-contracts/payment-channel)
+- [Smart Contracts: KiteAAWallet →](../smart-contracts/kite-aa-wallet)
+- [Smart Contracts: AttestationRegistry →](../smart-contracts/attestation-registry)

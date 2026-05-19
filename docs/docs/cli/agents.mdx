@@ -1,0 +1,132 @@
+---
+sidebar_position: 3
+title: Agent Commands
+description: kite onboard, kite whoami, kite agent, kite session
+---
+
+# Agent Commands
+
+## kite onboard
+
+Register an agent on-chain with a single command.
+
+```bash
+npx kite onboard [options]
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--name <name>` | `"Kite Agent"` | Agent display name |
+| `--category <tag>` | — | Category tag (e.g. `defi`, `analytics`) |
+| `--agent-index <n>` | `0` | Derivation index for multiple agents from same EOA |
+| `--days <n>` | `30` | Session validity in days |
+| `--budget <amount>` | `10` | Session budget in USDT |
+
+**Example:**
+
+```bash
+npx kite onboard --name "Data Analyst" --category analytics --days 60 --budget 50
+```
+
+**What happens:**
+
+1. Derives AA wallet (GokiteAccount) from your EOA
+2. Deploys the AA wallet if not yet on-chain
+3. Mints an Agent NFT on `IdentityRegistry`
+4. Generates a new session key
+5. Registers the session key on-chain with spending limits
+6. Saves all addresses to `~/.kite-agent-pay/vars.json`
+
+---
+
+## kite whoami
+
+Inspect your current on-chain identity.
+
+```bash
+npx kite whoami [--agent <id>]
+```
+
+Output:
+
+```
+  EOA Address:     0xabc123...
+  AA Wallet:       0xdef456...
+  Wallet deployed: true
+
+  Agent ID:        1
+  Agent Name:      Data Analyst
+  Session Key:     0x875aaa...
+  Session Status:  Active (expires 2026-07-01)
+  Session Budget:  50.00 USDT remaining
+```
+
+---
+
+## kite agent register
+
+Register an agent without creating a session key (advanced use case).
+
+```bash
+npx kite agent register --name "My Agent" --uri "ipfs://Qm..."
+```
+
+---
+
+## kite session start
+
+Create a new session key for an existing agent.
+
+```bash
+npx kite session start --agent <agentId> [--days 30] [--budget 10]
+```
+
+Use this when:
+- Your current session has expired
+- You want to create an additional session for a different runtime
+- You want to reset the session budget
+
+---
+
+## kite session revoke
+
+Revoke an active session key.
+
+```bash
+npx kite session revoke --key <sessionKeyAddress>
+```
+
+This immediately marks the session as revoked on-chain. Any subsequent payment attempts using that key will be rejected.
+
+---
+
+## kite resolve
+
+Look up any agent by ID.
+
+```bash
+npx kite resolve --agent <agentId>
+```
+
+Output:
+
+```
+  Agent ID:    1
+  Owner:       0xabc...
+  AA Wallet:   0xdef...
+  Agent URI:   { name: "Data Analyst", version: "1.0" }
+  Active:      true
+```
+
+This is a read-only operation — no credential needed.
+
+---
+
+## Related Pages
+
+- [kite init →](./init) — Run before onboard
+- [kite payments →](./payments) — Making paid calls after onboarding
+- [Agent Identity Concept →](../concepts/agent-identity) — Understanding agentIds
+- [Session Keys Concept →](../concepts/session-keys) — Understanding sessions

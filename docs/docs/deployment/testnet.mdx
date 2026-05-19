@@ -1,0 +1,91 @@
+---
+sidebar_position: 2
+title: Testnet
+description: Deploy and test on Kite AI Testnet
+---
+
+# Testnet Deployment
+
+## Network Details
+
+| Field | Value |
+|---|---|
+| Network Name | Kite AI Testnet |
+| Chain ID | 2368 |
+| RPC URL | `https://rpc-testnet.gokite.ai` |
+| Currency | ETH (gas) |
+| Explorer | [https://testnet.kitescan.ai](https://testnet.kitescan.ai) |
+| Bundler | `https://bundler-service.staging.gokite.ai/rpc/` |
+
+## Deployed Contract Addresses
+
+| Contract | Address |
+|---|---|
+| IdentityRegistry | `0xE4C30627C02791bF12241021f2fC320b43991cb1` |
+| KiteAAWallet (factory) | See deployments.json |
+| PaymentChannel | `0x8EC6B059178485a37FF3f3AE6351994A6597d4Fb` |
+| AttestationRegistry | `0x2F72b719679FD0b92712D03a1E16909F18d55660` |
+| DmUSDT | `0xd4a87d5531A586C247BD13F3Bb0Dd68C6253B489` |
+| USDT | `0x0fF5393387ad2f9f691FD6Fd28e07E3969e27e63` |
+
+These are already deployed — you don't need to deploy contracts to use Kite on testnet.
+
+## Getting Testnet ETH
+
+Use the Kite AI faucet or bridge ETH from another testnet. You need ETH for:
+- Bundler operations (gas for AA wallet transactions)
+- Direct EOA transactions (session management)
+
+## Getting DmUSDT
+
+DmUSDT is the demo stable token. Get it by:
+
+```bash
+npx kite fund 10
+```
+
+This calls the DmUSDT faucet function directly. You get 10 DmUSDT deposited into your AA wallet.
+
+## Deploy Your Backend to Testnet
+
+Your backend connects to testnet by default. Set:
+
+```env
+CHAIN_ID=2368
+RPC_URL=https://rpc-testnet.gokite.ai
+BUNDLER_URL=https://bundler-service.staging.gokite.ai/rpc/
+```
+
+Then deploy using any Node.js hosting platform (see [Deploy a Provider →](../guides/deploy-provider)).
+
+## Verify On-Chain
+
+After onboarding:
+
+```bash
+npx kite whoami
+```
+
+Expected output includes your agent ID, AA wallet address, and session key. You can verify the agent is registered by checking the IdentityRegistry:
+
+```bash
+npx hardhat run --network kite_testnet scripts/verify-agent.js
+```
+
+Or query the subgraph:
+
+```graphql
+query {
+  agentRegistered(id: "1") {
+    owner
+    agentWallet
+    uri
+  }
+}
+```
+
+## Related Pages
+
+- [Smart Contracts Reference →](../smart-contracts/identity-registry)
+- [Indexer: Deployment →](../indexer/deployment)
+- [Production Deployment →](./production)

@@ -1,0 +1,117 @@
+---
+sidebar_position: 3
+title: OpenAI Agents
+description: Integrate Kite payment tools with OpenAI Assistants and function-calling
+---
+
+# OpenAI Agents Integration
+
+The MCP server exposes its tools in OpenAI function-calling format. You can use this to build OpenAI Assistants or Agents that autonomously make paid API calls.
+
+## Get Tool Definitions
+
+```bash
+curl http://localhost:3100/api/tools/schema/openai
+```
+
+Returns an array of OpenAI-compatible function definitions ready to pass to the API.
+
+## Using with OpenAI Assistants
+
+```typescript
+import OpenAI from "openai";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// 1. Get Kite tool definitions
+const kiteTools = await fetch("http://localhost:3100/api/tools/schema/openai")
+  .then(r => r.json());
+
+// 2. Create a thread and run with tools
+const thread = await openai.beta.threads.create();
+
+await openai.beta.threads.messages.create(thread.id, {
+  role: "user",
+  content: "Fetch the protocol report from http://localhost:4000/api/data/protocol-report using agent 1",
+});
+
+const run = await openai.beta.threads.runs.create(thread.id, {
+  assistant_id: "asst_...",
+  tools: kiteTools,
+});
+```
+
+## Handling Tool Calls
+
+When the run requires action, dispatch tool calls to the MCP server:
+
+```typescript
+async function executeTool(name: string, args: Record<string, unknown>) {
+  const response = await fetch("http://localhost:3100/api/tools/invoke", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tool: name, params: args }),
+  });
+  return response.json();
+}
+
+// Poll the run and dispatch tool calls
+while (run.status === "requires_action") {
+  const toolCalls = run.required_action!.submit_tool_outputs.tool_calls;
+  
+  const toolOutputs = await Promise.all(
+    toolCalls.map(async (call) => ({
+      tool_call_id: call.id,
+      output: JSON.stringify(
+        await executeTool(call.function.name, JSON.parse(call.function.arguments))
+      ),
+    }))
+  );
+
+  await openai.beta.threads.runs.submitToolOutputs(thread.id, run.id, {
+    tool_outputs: toolOutputs,
+  });
+}
+```
+
+## Using with Chat Completions (Direct)
+
+For simpler non-Assistant workflows:
+
+```typescript
+import OpenAI from "openai";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const kiteTools = await fetch("http://localhost:3100/api/tools/schema/openai")
+  .then(r => r.json());
+
+const messages = [
+  {
+    role: "user" as const,
+    content: "Check the Kite balance for agent ID 1",
+  },
+];
+
+const response = await openai.chat.completions.create({
+  model: "gpt-4o",
+  messages,
+  tools: kiteTools,
+  tool_choice: "auto",
+});
+
+const toolCall = response.choices[0].message.tool_calls?.[0];
+if (toolCall) {
+  const result = await executeTool(
+    toolCall.function.name,
+    JSON.parse(toolCall.function.arguments)
+  );
+  console.log("Balance:", result);
+}
+```
+
+## Related Pages
+
+- [MCP Tool Reference →](./tool-reference) — All tools and parameters
+- [LangChain →](./langchain) — LangChain integration
+- [MCP Overview →](./overview) — Server architecture

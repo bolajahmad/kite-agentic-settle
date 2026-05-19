@@ -28,7 +28,12 @@ import { randomUUID } from "node:crypto";
 import { executeTool, TOOL_DEFINITIONS } from "./tools-client.js";
 
 // -- MCP Server factory ---------------------------------------------------
-function createMcpServer(): Server {
+interface McpServerDefaults {
+  /** agentId captured from the SSE/HTTP connection URL (?agentId=N). */
+  agentId?: string;
+}
+
+function createMcpServer(defaults: McpServerDefaults = {}): Server {
   const server = new Server(
     { name: "kite-agent-pay", version: "0.1.0" },
     { capabilities: { tools: {} } },
@@ -45,8 +50,14 @@ function createMcpServer(): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
+    // Merge session-level defaults first; explicit args take precedence.
+    const mergedArgs: Record<string, unknown> = {
+      ...(defaults.agentId !== undefined ? { agentId: defaults.agentId } : {}),
+      ...(args as Record<string, unknown>),
+    };
+
     try {
-      const result = await executeTool(name, args as Record<string, unknown>);
+      const result = await executeTool(name, mergedArgs);
       return {
         content: [
           {
@@ -72,14 +83,18 @@ function createMcpServer(): Server {
 }
 
 // ── Session store (one transport per SSE connection) ─────────────────────
-const activeSessions = new Map<string, StreamableHTTPServerTransport>();
+interface HttpSession {
+  transport: StreamableHTTPServerTransport;
+  agentId?: string;
+}
+const activeSessions = new Map<string, HttpSession>();
 
 // -- Express handler logic -------------------------------------------------
 export async function handleMcp(req: Request, res: Response): Promise<void> {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
   if (sessionId && activeSessions.has(sessionId)) {
-    await activeSessions.get(sessionId)!.handleRequest(req, res, req.body);
+    await activeSessions.get(sessionId)!.transport.handleRequest(req, res, req.body);
     return;
   }
 
@@ -95,15 +110,21 @@ export async function handleMcp(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  const agentId = req.query.agentId as string | undefined;
+
   const newSessionid = randomUUID();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => newSessionid,
   });
 
-  activeSessions.set(newSessionid, transport);
+  activeSessions.set(newSessionid, { transport, agentId });
   res.on("close", () => activeSessions.delete(newSessionid));
 
-  await createMcpServer().connect(transport);
+  if (agentId) {
+    console.error(`[mcp] session created  id=${newSessionid}  agentId=${agentId}`);
+  }
+
+  await createMcpServer({ agentId }).connect(transport);
   await transport.handleRequest(req, res, req.body);
 }
 
@@ -124,16 +145,18 @@ const sseSessions = new Map<string, SseSession>();
 //
 // The connection stays open until the client disconnects or the server closes it.
 export async function handleMcpSse(req: Request, res: Response): Promise<void> {
+  const agentId = req.query.agentId as string | undefined;
+
   const transport = new SSEServerTransport("/mcp/messages", res);
 
-  const server = createMcpServer();
+  const server = createMcpServer({ agentId });
   await server.connect(transport);
 
   const { sessionId } = transport;
   sseSessions.set(sessionId, { transport, server });
 
   console.error(
-    `[mcp/sse] session opened  id=${sessionId}  total=${sseSessions.size}`,
+    `[mcp/sse] session opened  id=${sessionId}  agentId=${agentId ?? "(none)"}  total=${sseSessions.size}`,
   );
 
   // Clean up when the client closes the connection (tab close, network drop, etc.)

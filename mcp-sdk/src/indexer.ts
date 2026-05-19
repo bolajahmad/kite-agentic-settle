@@ -34,7 +34,10 @@ async function query(
 export interface IndexedAgent {
   id: string;
   agentId: string;
-  wallet: string;
+  aaWallet: {
+    address: string;
+    id: string;
+  };
   owner: IndexedUserRegistered;
   metadata: string;
   createdAt: string;
@@ -46,6 +49,7 @@ export interface IndexedSession {
   id: string;
   agentId: string;
   sessionKey: string;
+  sessionId: string;
   validUntil: string;
   blockedAgents: string[];
   maxLimit: string;
@@ -54,6 +58,7 @@ export interface IndexedSession {
   status: string;
   createdAt: string;
   updatedAt: string;
+  agent: IndexedAgent;
 }
 
 export interface IndexedPayment {
@@ -109,7 +114,10 @@ export interface IndexedChannel {
 
 export interface IndexedUserRegistered {
   address: string;
-  wallet: string;
+  aaWallet: {
+    address: string;
+    id: string;
+  };
   id: string;
   blockTimestamp: string;
   transactionHash: string;
@@ -132,7 +140,10 @@ export async function getAgentsByOwner(owner: string): Promise<IndexedAgent[]> {
         id
         agentId
         agentAddress
-        walletContract
+        aaWallet {
+          address
+          id
+        }
         ownerAddress
         metadata
         blockNumber
@@ -154,11 +165,17 @@ export async function getAgentById(id: string): Promise<IndexedAgent | null> {
         id
         agentId
         active
-        wallet
+        aaWallet {
+          id
+          address
+        }
         owner {
           id
           address
-          blockedProviders
+          aaWallet {
+            id
+            address
+          }
         }
         sessions {
           sessionKey
@@ -173,6 +190,71 @@ export async function getAgentById(id: string): Promise<IndexedAgent | null> {
     { id },
   );
   return data.agent || null;
+}
+
+export async function getUserById(
+  id: string,
+): Promise<IndexedUserRegistered | null> {
+  const data = await query(
+    `
+    query($id: String!) {
+      user(id: $id) {
+        address
+        aaWallet {
+          address
+          id
+        }
+        id
+        agents {
+          id
+          agentId
+          aaWallet {
+            address
+            id
+          }
+          owner {
+            id
+            address
+          }
+          metadata
+          createdAt
+          updatedAt
+          active
+        }
+        sessions {
+          id
+          sessionKey
+          sessionId
+          validUntil
+          blockedAgents
+          maxLimit
+          valueLimit
+          status
+          createdAt
+          updatedAt
+          agent {
+            id
+            agentId
+            aaWallet {
+              address
+              id
+            }
+            owner {
+              id
+              address
+            }
+            metadata
+            createdAt
+            updatedAt
+            active
+          }
+        }
+      }
+    }
+  `,
+    { id: id.toLowerCase() },
+  );
+  return data.user || null;
 }
 
 export async function getSessionsByAgent(
@@ -194,12 +276,15 @@ export async function getSessionsByAgent(
         blockedAgents
         createdAt
         maxLimit
-        metadataHash
         sessionKey
+        sessionId
         updatedAt
         valueLimit
         status
         validUntil
+        agent {
+          agentId
+        }
       }
     }
   `,
@@ -219,8 +304,8 @@ export async function getSessionByKey(
         blockedAgents
         createdAt
         maxLimit
-        metadataHash
         sessionKey
+        sessionId
         updatedAt
         valueLimit
         status
@@ -335,6 +420,7 @@ export async function getActiveSessionsForAgent(
         blockedAgents
         maxLimit
         metadataHash
+        sessionId
         sessionKey
         valueLimit
         status
@@ -365,10 +451,14 @@ export async function getUserAgentsWithActiveSessions(
           metadata
           sessions {
             sessionKey
+            sessionId
             status
           }
         }
-        wallet
+        aaWallet {
+          address
+          id
+        }
       }
     }
   `,
@@ -398,7 +488,6 @@ export async function getChannelsByAgent(
         provider
         agent { id agentId }
         session { id sessionKey }
-        walletContract
         mode
         token
         deposit
@@ -408,7 +497,6 @@ export async function getChannelsByAgent(
         openedAt
         expiresAt
         closedAt
-        settlementInitiator
         settlementDeadline
         highestClaimedCost
         highestSequenceNumber
@@ -438,7 +526,6 @@ export async function getChannelById(
         provider
         agent { id agentId }
         session { id sessionKey }
-        walletContract
         mode
         token
         deposit
@@ -448,7 +535,6 @@ export async function getChannelById(
         openedAt
         expiresAt
         closedAt
-        settlementInitiator
         settlementDeadline
         highestClaimedCost
         highestSequenceNumber

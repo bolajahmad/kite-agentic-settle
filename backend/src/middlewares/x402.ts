@@ -1,13 +1,25 @@
-import type { Request, Response, NextFunction } from "express";
-import { processX402Payment } from "../services/facilitator.js";
+import type { NextFunction, Request, Response } from "express";
+import {
+  decodeX402Header,
+  processX402Payment,
+} from "../services/facilitator.js";
 
 // ─── Types ────────────────────────────────────────────────────────────
 
 export interface X402RouteConfig {
+  /**
+   * Preferred multi-offer model. If provided, provider will expose all offers
+   * in accepts[] and settlement will validate against the selected asset.
+   */
+  offers?: Array<{
+    amount: bigint;
+    token: string;
+    description?: string;
+  }>;
   /** Amount in token base units (e.g. 1_000_000n = 1 USDT with 6 decimals) */
-  amount: bigint;
+  amount?: bigint;
   /** ERC20 token address that must be used for payment */
-  token: string;
+  token?: string;
   /** This backend's address that should receive the payment */
   recipient: string;
   /** Human-readable description shown in the 402 challenge */
@@ -18,21 +30,41 @@ export interface X402RouteConfig {
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
-function build402Challenge(config: X402RouteConfig, resourceUrl: string): object {
+function build402Challenge(
+  config: X402RouteConfig,
+  resourceUrl: string,
+): object {
+  const offers =
+    config.offers && config.offers.length > 0
+      ? config.offers
+      : config.amount !== undefined && config.token
+        ? [
+            {
+              amount: config.amount,
+              token: config.token,
+              description: config.description,
+            },
+          ]
+        : [];
+
+  if (offers.length === 0) {
+    throw new Error("x402 route has no payment offers configured");
+  }
+
   return {
     x402Version: 1,
-    accepts: [
-      {
-        scheme: "kite-programmable",
-        network: config.network ?? process.env.KITE_NETWORK ?? "kite-testnet",
-        maxAmountRequired: config.amount.toString(),
-        payTo: config.recipient,
-        asset: config.token,
-        resource: resourceUrl,
-        description: config.description ?? "Payment required to access this resource",
-        settlementContract: process.env.KITE_AA_WALLET_ADDRESS ?? "",
-      },
-    ],
+    accepts: offers.map((offer) => ({
+      scheme: "kite-programmable",
+      network: config.network ?? process.env.KITE_NETWORK ?? "kite-testnet",
+      maxAmountRequired: offer.amount.toString(),
+      payTo: config.recipient,
+      asset: offer.token,
+      resource: resourceUrl,
+      description:
+        offer.description ??
+        config.description ??
+        "Payment required to access this resource",
+    })),
   };
 }
 
@@ -51,7 +83,9 @@ export function requireX402Payment(config: X402RouteConfig) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const xPayment = req.headers["x-payment"] as string | undefined;
 
-    console.log(`[x402] ${req.method} ${req.originalUrl} — X-PAYMENT present: ${!!xPayment}`);
+    console.log(
+      `[x402] ${req.method} ${req.originalUrl} — X-PAYMENT present: ${!!xPayment}`,
+    );
 
     if (!xPayment) {
       const resourceUrl = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
@@ -61,12 +95,33 @@ export function requireX402Payment(config: X402RouteConfig) {
     }
 
     try {
-      console.log(`[x402] Processing payment, recipient=${config.recipient}, token=${config.token}, amount=${config.amount}`);
+      const decoded = decodeX402Header(xPayment);
+      const selectedToken = decoded.auth.token.toLowerCase();
+      const offers =
+        config.offers && config.offers.length > 0
+          ? config.offers
+          : config.amount !== undefined && config.token
+            ? [{ amount: config.amount, token: config.token }]
+            : [];
+
+      const matchedOffer = offers.find(
+        (offer) => offer.token.toLowerCase() === selectedToken,
+      );
+
+      if (!matchedOffer) {
+        throw new Error(
+          `Token not accepted for this route: ${decoded.auth.token}`,
+        );
+      }
+
+      console.log(
+        `[x402] Processing payment, recipient=${config.recipient}, token=${matchedOffer.token}, amount=${matchedOffer.amount}`,
+      );
       const settlement = await processX402Payment(
         xPayment,
         config.recipient,
-        config.token,
-        config.amount
+        matchedOffer.token,
+        matchedOffer.amount,
       );
 
       console.log(`[x402] Settlement OK: txHash=${settlement.txHash}`);

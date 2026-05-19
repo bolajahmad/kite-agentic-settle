@@ -1,0 +1,141 @@
+---
+sidebar_position: 5
+title: Tool Reference
+description: All 7 Kite MCP tools with full parameter tables
+---
+
+# MCP Tool Reference
+
+## `call_paid_api`
+
+The main workhorse. Calls a paid API endpoint, handles x402 payment, and returns the API response.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `url` | string | ✓ | API endpoint URL |
+| `agentId` | string | ✓ | On-chain agent tokenId (e.g. `"1"`) |
+| `method` | string | — | HTTP method (default: `GET`) |
+| `body` | string | — | Request body for POST/PUT |
+| `autopay` | boolean | — | Automatically pay on 402 (default: `true`) |
+| `maxAmount` | string | — | Maximum payment cap in wei |
+| `sessionKey` | string | — | Specific session key address (auto-selected when omitted) |
+| `mode` | string | — | Payment mode: `perCall`, `batch`, `stream`, `channel`, `auto` |
+| `channelId` | string | — | Existing channel ID to reuse |
+| `deposit` | string | — | Initial channel deposit in wei (new channels only) |
+| `maxPerCall` | string | — | Max cost cap per call in wei |
+| `maxDuration` | number | — | Channel lifetime in seconds |
+| `token` | string | — | ERC-20 token address override |
+
+**Returns:** `{ data, receipt, channelId? }`
+
+---
+
+## `open_channel`
+
+Opens a new payment channel on-chain with a provider.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `agentId` | string | ✓ | Agent tokenId |
+| `provider` | string | ✓ | Provider EOA address |
+| `deposit` | string | ✓ | Initial channel deposit in wei |
+| `maxSpend` | string | ✓ | Maximum total spend cap in wei |
+| `maxDuration` | number | ✓ | Channel lifetime in seconds |
+| `maxPerCall` | string | ✓ | Max cost per call in wei |
+| `sessionKey` | string | — | Session key address (auto-selected when omitted) |
+| `mode` | string | — | `prepaid` or `postpaid` (default: `prepaid`) |
+| `token` | string | — | ERC-20 token address |
+
+**Returns:** `{ channelId, txHash, deposit, provider }`
+
+---
+
+## `get_session_info`
+
+Lists session keys or looks up a single session.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `agentId` | string | ✓ (list mode) | Agent tokenId for listing |
+| `sessionKey` | string | — | Session key address for single lookup |
+| `limit` | number | — | Max results (default: 10) |
+| `offset` | number | — | Pagination offset (default: 0) |
+
+**Returns:** Array of `{ sessionKey, status, validUntil, valueLimit, maxLimit, amountUsed, callsRemaining }`
+
+---
+
+## `get_channel_info`
+
+Lists channels or looks up a single channel.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `agentId` | string | ✓ (list mode) | Agent tokenId for listing |
+| `channelId` | string | — | Channel ID for single lookup |
+| `limit` | number | — | Max results (default: 10) |
+| `offset` | number | — | Pagination offset (default: 0) |
+
+**Returns:** Array of `{ channelId, status, deposit, maxSpend, settledAmount, refundAmount, provider, token }`
+
+---
+
+## `check_balance`
+
+Checks the deposited balance in the KiteAAWallet.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `address` | string | ✓ | EOA address (`0x…`) |
+| `token` | string | — | ERC-20 token address (defaults to DmUSDT) |
+
+**Returns:** `{ depositedBalance, rawBalance, formatted, token }`
+
+---
+
+## `resolve_agent`
+
+Looks up agent NFT details from `IdentityRegistry` by tokenId. Read-only — no credential needed.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `agentId` | string | ✓ | Agent tokenId (e.g. `"1"`) |
+
+**Returns:** `{ agentId, owner, agentURI, aaWalletAddress, active }`
+
+---
+
+## `get_usage_logs`
+
+Retrieves payment usage logs recorded by this server instance.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `limit` | number | — | Max log entries (default: 50) |
+
+**Returns:** Array of `{ timestamp, tool, agentId, url, amount, token, txHash, success }`
+
+---
+
+## Error Responses
+
+All tools return a consistent error format when they fail:
+
+```json
+{
+  "error": true,
+  "message": "Session not found for agent 1",
+  "code": "SESSION_NOT_FOUND"
+}
+```
+
+Common error codes:
+
+| Code | Meaning |
+|---|---|
+| `SESSION_NOT_FOUND` | No active session for this agent |
+| `SESSION_EXPIRED` | Session key has passed its `validUntil` |
+| `INSUFFICIENT_BALANCE` | AA wallet has insufficient deposited balance |
+| `PAYMENT_REJECTED` | Decision engine rejected the payment |
+| `CHANNEL_NOT_ACTIVE` | Channel is not in Active state |
+| `PROVIDER_MISMATCH` | Payment was sent to wrong provider |

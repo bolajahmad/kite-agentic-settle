@@ -7,24 +7,14 @@
 
 import { formatUnits, parseUnits, zeroAddress } from "viem";
 import { TOKENS } from "../../config.js";
-import type { DecisionMode } from "../../decide.js";
-import { KITE_TESTNET, KiteSettleClient } from "../../index.js";
+import { KiteSettleClient } from "../../index.js";
 import {
   _tokenMetadataCache,
   resolveTokenMetadata,
 } from "../../utils/index.js";
-import { getVar } from "../../vars.js";
+import { getCredential } from "../../vars.js";
 import { findFlag } from "../index.js";
 import { callApi } from "./call.js";
-
-// ── Arg parsing ────────────────────────────────────────────────────
-interface CmdOpts {
-  decide: DecisionMode;
-  agentIndex?: string;
-  url?: string;
-  fundAddress?: string;
-  fundAmount?: string;
-}
 
 // ── Formatting ─────────────────────────────────────────────────────
 function fmt(wei: bigint): string {
@@ -32,101 +22,65 @@ function fmt(wei: bigint): string {
 }
 
 async function showBalance(args: string[]) {
-  // ── Resolve target address (priority: --agent > --address > credential) ──
   const agentFlag = findFlag(args, "--agent");
   const addressFlag = findFlag(args, "--address");
+  const tokenFlag = findFlag(args, "--token");
 
-  let targetAddress: string;
+  let client: KiteSettleClient;
+  let queryAddress: string | undefined;
   let displayLabel: string;
 
   if (agentFlag !== undefined) {
-    // Agent always wins — resolve owner from subgraph
+    // Resolve owner address from subgraph (agent may not be locally registered)
     const { getAgentById } = await import("../../indexer.js");
     const agent = await getAgentById(`0x${BigInt(agentFlag).toString(16)}`);
-    if (!agent) {
-      throw new Error(`Agent ${agentFlag} not found on-chain.`);
-    }
-    targetAddress = agent.owner.id || agent.owner.address;
-    displayLabel = `Agent ${agentFlag} (owner: ${targetAddress})`;
+    if (!agent) throw new Error(`Agent ${agentFlag} not found on-chain.`);
+    queryAddress = agent.owner.id || agent.owner.address;
+    displayLabel = `Agent ${agentFlag} (owner: ${queryAddress})`;
+    client = KiteSettleClient.createReadOnly();
   } else if (addressFlag) {
-    targetAddress = addressFlag;
-    displayLabel = targetAddress;
+    queryAddress = addressFlag;
+    displayLabel = addressFlag;
+    client = KiteSettleClient.createReadOnly();
   } else {
-    const credential = getVar("PRIVATE_KEY");
+    const credential = getCredential();
     if (!credential) {
       throw new Error(
         "No address to check. Pass --address <addr>, --agent <id>, or run: npx kite init",
       );
     }
-    // Derive address from credential without paying for a full session lookup
-    const client = await KiteSettleClient.create({ credential });
-    targetAddress = client.eoaAddress;
-    displayLabel = targetAddress;
+    client = await KiteSettleClient.create({ credential });
+    displayLabel = client.eoaAddress;
   }
 
-  // ── Build a client for RPC calls (credential optional) ─────────────
-  const credential = getVar("PRIVATE_KEY");
-  const client = credential
-    ? await KiteSettleClient.create({ credential })
-    : KiteSettleClient.createReadOnly();
+  const extraTokens: string[] =
+    tokenFlag === undefined
+      ? []
+      : tokenFlag.includes(",")
+        ? tokenFlag.split(",").map((t) => t.trim())
+        : [tokenFlag.trim()];
 
-  // ── Resolve token list ──────────────────────────────────────────────
-  let tokens: string[] = [];
-  const tokenFlag = findFlag(args, "--token");
-  if (tokenFlag) {
-    const isMultiple =
-      tokenFlag.includes(",") && tokenFlag.split(",").length > 1;
-    tokens = isMultiple
-      ? tokenFlag
-          .trim()
-          .split(",")
-          .map((t) => t.trim())
-      : [tokenFlag.trim()];
-  }
-  tokens.unshift(zeroAddress); // always include default token
-
-  const showNativeBalance = findFlag(args, "--show-native") || true;
+  const result = await client.balance({
+    address: queryAddress,
+    tokens: extraTokens,
+  });
 
   console.log(`  Address:  ${displayLabel}`);
+  console.log(`  AA Wallet: ${result.aaWalletAddress}`);
   console.log("");
 
-  const agentBalance = await Promise.all(
-    tokens.map(async (t) => {
-      const token = TOKENS.find(
-        ({ address, symbol }) =>
-          address.toLowerCase() === t.toLowerCase() ||
-          symbol.toLowerCase() === t.toLowerCase(),
-      );
-
-      const depBalance = await client.getDepositedBalance(
-        token?.address,
-        targetAddress,
-      );
-      const balance =
-        token?.address === zeroAddress
-          ? undefined
-          : await client.getWalletBalance(token?.address, targetAddress);
-      return {
-        ...token,
-        balance: formatUnits(depBalance, token?.decimals || 18),
-        nativeBalance: balance
-          ? formatUnits(balance, token?.decimals || 18)
-          : undefined,
-      };
-    }),
-  );
-
-  function displayBalance(tkn: (typeof agentBalance)[0], symbol: string) {
-    console.log(`  Token:    ${symbol}`);
-    console.log(`  Deposited Balance:  ${tkn.balance} ${symbol} (deposited)`);
-    if (showNativeBalance && tkn.address !== zeroAddress)
+  for (const tkn of result.tokens) {
+    console.log(`  Token:    ${tkn.symbol}`);
+    console.log(
+      `  Deposited Balance:  ${tkn.depositedBalanceFormatted} ${tkn.symbol} (deposited)`,
+    );
+    if (tkn.token.toLowerCase() !== zeroAddress.toLowerCase()) {
       console.log(
-        `     Balance:       ${tkn.nativeBalance} ${symbol} (wallet)`,
+        `     Balance:       ${tkn.walletBalanceFormatted} ${tkn.symbol} (wallet)`,
       );
+    }
     console.log("");
   }
-
-  agentBalance.forEach((tkn) => displayBalance(tkn, tkn.symbol || "KITE"));
 }
 
 async function getIndexedPayments(
@@ -159,7 +113,7 @@ async function getIndexedPayments(
     label = `Agent #${agent}`;
   } else {
     // Fallback: derive EOA address from stored credential
-    const credential = getVar("PRIVATE_KEY");
+    const credential = getCredential();
     if (!credential) {
       throw new Error(
         "No address to query. Pass --agent <id>, --session <key>, or run: npx kite init",
@@ -366,7 +320,7 @@ async function showUsage(args: string[]) {
 }
 
 async function fundWallet(args: string[]) {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const tokenFlag = findFlag(args, "--token");
@@ -381,12 +335,24 @@ async function fundWallet(args: string[]) {
 
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
   const client = await KiteSettleClient.create({ credential });
+  const contractService = client.getContractService();
+  const vaultWallet = await contractService.resolveOwnerVaultWalletAddress();
 
   console.log(`  From:     ${client.eoaAddress}`);
-  console.log(
-    `  To:       KiteAAWallet (${KITE_TESTNET.contracts.kiteAAWallet})`,
-  );
+  console.log(`  To:       ClientVault (${vaultWallet})`);
   console.log(`  Amount:   ${amountFlag.trim()} ${token?.symbol || "KITE"}`);
+
+  if (token?.address !== zeroAddress) {
+    const supported = await contractService.isVaultTokenSupported(
+      vaultWallet,
+      token!.address as `0x${string}`,
+    );
+    if (!supported) {
+      console.log(
+        `  Token:    enabling ${token?.symbol || token?.address} on ClientVault`,
+      );
+    }
+  }
 
   const balance =
     token?.address === zeroAddress
@@ -395,7 +361,7 @@ async function fundWallet(args: string[]) {
 
   if (balance < amount) {
     throw new Error(
-      `Deployer has insufficient tokens (${fmt(balance)} ${token?.symbol ?? "KITE"})`,
+      `Owner EOA has insufficient funds (${fmt(balance)} ${token?.symbol ?? "KITE"})`,
     );
   }
 
@@ -405,7 +371,7 @@ async function fundWallet(args: string[]) {
 }
 
 async function withdrawFunds(args: string[]) {
-  const credential = getVar("PRIVATE_KEY");
+  const credential = getCredential();
   if (!credential) throw new Error("No credential found. Run: npx kite init");
 
   const tokenFlag = findFlag(args, "--token");
@@ -426,14 +392,26 @@ async function withdrawFunds(args: string[]) {
 
   const amount = parseUnits(amountFlag || "0", token?.decimals ?? 18);
   const client = await KiteSettleClient.create({ credential });
+  const contractService = client.getContractService();
+  const vaultWallet = await contractService.resolveOwnerVaultWalletAddress();
 
-  console.log(
-    `  Withdrawing ${amountFlag.trim()} ${token?.symbol || "KITE"} to owner`,
-  );
-  console.log(`   Owner Address: ${client.eoaAddress}`);
-  console.log(
-    "  Note: This will transfer tokens from the AA wallet to your EOA",
-  );
+  const availableToWithdraw =
+    token?.address === zeroAddress
+      ? await contractService.getDeposit(vaultWallet)
+      : await contractService.getAvailableBalance(
+          vaultWallet,
+          token!.address as `0x${string}`,
+        );
+
+  if (availableToWithdraw < amount) {
+    throw new Error(
+      `ClientVault has insufficient funds (${fmt(availableToWithdraw)} ${token?.symbol ?? "KITE"})`,
+    );
+  }
+
+  console.log(`  From:     ClientVault (${vaultWallet})`);
+  console.log(`  To:       ${client.eoaAddress}`);
+  console.log(`  Amount:   ${amountFlag.trim()} ${token?.symbol || "KITE"}`);
 
   const data = await client.withdraw(amount, token?.address);
 
@@ -461,19 +439,5 @@ export async function runAppCommand(command: string, args: string[]) {
     case "withdraw":
       await withdrawFunds(args);
       break;
-    case "simulate": {
-      // Run simulate as a subprocess (it lives outside src/)
-      const { execFileSync } = await import("node:child_process");
-      const { resolve: pathResolve } = await import("node:path");
-      const script = pathResolve(
-        import.meta.dirname || ".",
-        "../examples/simulate.ts",
-      );
-      execFileSync("npx", ["tsx", script], {
-        stdio: "inherit",
-        env: process.env,
-      });
-      break;
-    }
   }
 }

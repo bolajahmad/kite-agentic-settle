@@ -1,5 +1,5 @@
 /**
- * kite clean — Delete stored configuration data from ~/.kite-agent-pay/vars.json
+ * kite clean — Delete stored configuration data from ~/.kite-agent-pay/
  *
  * Usage:
  *   npx kite clean                 Delete everything (prompts for confirmation)
@@ -8,17 +8,17 @@
  *
  * Two categories of stored data:
  *
- *   EOA / identity data (required for onboarding-style operations):
- *     PRIVATE_KEY, DEPLOYER_KEY, AGENT_<id>_ID, AGENT_<id>_URI,
- *     AGENT_<id>_OWNER, AGENT_<id>_PRIVATE_KEY
+ *   EOA credential (config.json — written by kite init):
+ *     PRIVATE_KEY
  *
- *   Session data (required for agent-mode calls: kite call, balance, etc.):
+ *   Agent / session data (vars.json — written by kite onboard / kite session):
+ *     AGENT_<id>_ID, AGENT_<id>_URI, AGENT_<id>_OWNER, AGENT_<id>_PRIVATE_KEY
  *     SESSION_<agentId>_<idx>_ADDRESS, SESSION_<agentId>_<idx>_PRIVATE_KEY,
  *     AGENT_<id>_SEED (legacy encrypted-blob passphrase, no longer generated)
  */
 
 import { prompt } from "../../utils/index.js";
-import { clearAllVars, clearVarsWhere, listVars } from "../../vars.js";
+import { clearAllVars, clearCredential, clearVarsWhere, listVars } from "../../vars.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -88,8 +88,10 @@ async function cleanAll() {
   if (!ok) return;
 
   const count = clearAllVars();
+  const hadCred = clearCredential();
+  const total = count + (hadCred ? 1 : 0);
   console.log("");
-  info(`✓ Deleted ${count} variable(s). Vars file is now empty.`);
+  info(`✓ Deleted ${total} variable(s). Config files are now empty.`);
   info("  Run  npx kite init  to set up again.");
   console.log("");
 }
@@ -163,18 +165,18 @@ export async function cmdClean(args: string[]) {
   ~/.kite-agent-pay/vars.json.
 
   Options:
-    (none)          Delete ALL stored data (credentials + sessions)
+    (none)          Delete ALL stored data (credential + sessions)
     --agent <id>    Delete data for a specific agentId only
     --session       Delete all session keys (across all agents)
     --help          Show this help
 
   Two categories of data are stored:
 
-    EOA / identity  PRIVATE_KEY, DEPLOYER_KEY, AGENT_<id>_* — needed by
-                    onboarding commands (kite init, kite onboard, kite session)
+    EOA credential  ~/.kite-agent-pay/config.json (written by kite init)
+                    Contains: PRIVATE_KEY
 
-    Session keys    SESSION_<id>_*  — needed by agent-mode commands
-                    (kite call, kite balance, kite channel, …)
+    Agent / session ~/.kite-agent-pay/vars.json (written by kite onboard / kite session)
+                    Contains: AGENT_<id>_*, SESSION_<agentId>_*
 
   Examples:
     npx kite clean                 Delete everything

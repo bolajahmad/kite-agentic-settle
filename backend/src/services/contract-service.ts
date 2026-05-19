@@ -1,8 +1,10 @@
 import { ethers } from "ethers";
 import { AttestationRegistryABI } from "../contracts/abi/AttestationRegistry.js";
+import { ClientAgentVaultABI } from "../contracts/abi/ClientAgentVaultABI.js";
 import { IdentityRegistryABI } from "../contracts/abi/IdentityRegistryABI.js";
 import { KiteAAWalletABI } from "../contracts/abi/KiteAAWalletABI.js";
 import { PaymentChannelABI } from "../contracts/abi/PaymentChannelABI.js";
+import { getSession } from "./channel-session.js";
 
 // ─── Provider & Signer ────────────────────────────────────────────────
 
@@ -59,6 +61,17 @@ export function getKiteAAWallet(
   return new ethers.Contract(
     getContractAddress("KITE_AA_WALLET_ADDRESS"),
     KiteAAWalletABI,
+    signerOrProvider ?? getSigner(),
+  );
+}
+
+export function getClientAgentVault(
+  walletContract: string,
+  signerOrProvider?: ethers.Signer | ethers.Provider,
+) {
+  return new ethers.Contract(
+    walletContract,
+    ClientAgentVaultABI,
     signerOrProvider ?? getSigner(),
   );
 }
@@ -190,6 +203,45 @@ export async function executePaymentOnChain(
   return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
 }
 
+export interface TransferAuthorization {
+  from: string;
+  to: string;
+  token: string;
+  value: bigint;
+  validAfter: bigint;
+  validBefore: bigint;
+  nonce: string;
+}
+
+/**
+ * Settle via ClientAgentVault using session-scoped TransferWithAuthorization.
+ */
+export async function executeTransferWithAuthorizationOnChain(
+  walletContract: string,
+  sessionId: string,
+  auth: TransferAuthorization,
+  sig: string,
+  metadata: string = "0x",
+) {
+  const vault = getClientAgentVault(walletContract);
+  const tx = await vault.executeTransferWithAuthorization(
+    sessionId,
+    {
+      from: auth.from,
+      to: auth.to,
+      token: auth.token,
+      value: auth.value,
+      validAfter: auth.validAfter,
+      validBefore: auth.validBefore,
+      nonce: auth.nonce,
+    },
+    sig,
+    metadata,
+  );
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
+}
+
 /** Pre-flight replay check — returns true when the nonce was already consumed. */
 export async function isNonceUsedOnChain(
   sessionKey: string,
@@ -197,6 +249,35 @@ export async function isNonceUsedOnChain(
 ): Promise<boolean> {
   const wallet = getKiteAAWallet(getProvider());
   return Boolean(await wallet.isNonceUsed(sessionKey, nonce));
+}
+
+/** Pre-flight replay check for vault TransferWithAuthorization nonces (bytes32). */
+export async function isVaultNonceUsedOnChain(
+  walletContract: string,
+  nonce: string,
+): Promise<boolean> {
+  const vault = getClientAgentVault(walletContract, getProvider());
+  return Boolean(await vault.isNonceUsed(nonce));
+}
+
+/** Read session status from IdentityRegistry. */
+export async function validateSessionOnChain(sessionKey: string): Promise<{
+  active: boolean;
+  agentId: bigint;
+  user: string;
+  walletContract: string;
+  validUntil: bigint;
+}> {
+  const registry = getIdentityRegistry(getProvider());
+  const [active, agentId, user, walletContract, validUntil] =
+    await registry.validateSession(sessionKey);
+  return {
+    active: Boolean(active),
+    agentId: BigInt(agentId),
+    user,
+    walletContract,
+    validUntil: BigInt(validUntil),
+  };
 }
 
 export async function getSessionRuleFromChain(sessionKeyAddress: string) {
@@ -386,6 +467,13 @@ export async function submitReceiptOnChain(
   return { txHash: receipt.hash };
 }
 
+export async function approveSettlementOnChain(channelId: string) {
+  const pc = getPaymentChannel();
+  const tx = await pc.approveSettlement(channelId);
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash };
+}
+
 export async function finalizeOnChain(
   channelId: string,
   merkleRoot: string = "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -423,6 +511,7 @@ export async function getChannelOnChain(channelId: string) {
     highestClaimedCost,
     highestSequenceNumber,
     wallet,
+    lastReceiptSubmitter,
   ] = await pc.getChannel(channelId);
   return {
     consumer,
@@ -442,6 +531,7 @@ export async function getChannelOnChain(channelId: string) {
     highestClaimedCost: highestClaimedCost.toString(),
     highestSequenceNumber: Number(highestSequenceNumber),
     wallet,
+    lastReceiptSubmitter,
   };
 }
 
@@ -620,6 +710,278 @@ export function startChannelWatcher(): () => void {
   const interval = setInterval(poll, 5_000);
   console.log(
     "[ChannelWatcher] Started — polling every 5s for ChannelOpened events.",
+  );
+
+  return () => {
+    stopped = true;
+    clearInterval(interval);
+  };
+}
+
+// ─── Settlement Cooperative Watcher ──────────────────────────────────
+
+/**
+ * Watch for settlement-related events and respond cooperatively:
+ *   - SettlementInitiated: Check if consumer under-claimed, submit higher receipt if needed
+ *   - ReceiptSubmitted: Log counter-receipt submissions
+ *   - SettlementApproved: Log successful cooperative settlement
+ *
+ * Provider strategy:
+ *   1. If consumer's claim matches our records → approve settlement (fast-path)
+ *   2. If consumer under-claimed → submit our higher receipt
+ *   3. If consumer over-claimed → submit correct receipt as defense
+ *
+ * Returns a cleanup function that stops the polling interval.
+ */
+export function startSettlementWatcher(): () => void {
+  if (
+    !process.env.PAYMENT_CHANNEL_ADDRESS ||
+    !process.env.DEPLOYER_PRIVATE_KEY
+  ) {
+    console.log(
+      "[SettlementWatcher] Skipping — PAYMENT_CHANNEL_ADDRESS or DEPLOYER_PRIVATE_KEY not set.",
+    );
+    return () => {};
+  }
+
+  const providerAddress = getSigner().address;
+  const iface = new ethers.Interface(PaymentChannelABI);
+  const processedSettlements = new Set<string>(); // Track processed channelIds to avoid duplicates
+  let lastBlock = 0;
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const currentBlock = await getProvider().getBlockNumber();
+      if (lastBlock === 0) {
+        lastBlock = currentBlock;
+        return;
+      }
+      if (currentBlock <= lastBlock) return;
+
+      const logs = await getProvider().getLogs({
+        address: process.env.PAYMENT_CHANNEL_ADDRESS,
+        fromBlock: lastBlock + 1,
+        toBlock: currentBlock,
+      });
+
+      for (const log of logs) {
+        let parsed: ethers.LogDescription | null = null;
+        try {
+          parsed = iface.parseLog({
+            topics: log.topics as string[],
+            data: log.data,
+          });
+        } catch {
+          continue;
+        }
+
+        // Handle SettlementInitiated event
+        if (parsed?.name === "SettlementInitiated") {
+          const channelId: string = parsed.args.channelId;
+          const initiator: string = parsed.args.initiator;
+          const claimedAmount: bigint = parsed.args.claimedAmount;
+          const settlementDeadline: bigint = parsed.args.settlementDeadline;
+
+          // Avoid re-processing same settlement
+          if (processedSettlements.has(channelId)) continue;
+          processedSettlements.add(channelId);
+
+          console.log(
+            `[SettlementWatcher] SettlementInitiated: channelId=${channelId}, ` +
+              `initiator=${initiator}, claimedAmount=${claimedAmount}, ` +
+              `deadline=${new Date(Number(settlementDeadline) * 1000).toISOString()}`,
+          );
+
+          // Check if we are the provider for this channel (on-chain fetch)
+          const channelData = await getChannelOnChain(channelId);
+          if (channelData.provider.toLowerCase() !== providerAddress.toLowerCase()) {
+            console.log(`[SettlementWatcher] Not our channel (provider=${channelData.provider}), ignoring`);
+            continue;
+          }
+
+          // Resolve the consumer (= session key) and agent identity from on-chain,
+          // mirroring the CLI pattern of using channel data rather than local state.
+          const sessionKeyAddress = channelData.consumer;
+          try {
+            const agentInfo = await getAgentBySessionOnChain(sessionKeyAddress);
+            console.log(
+              `[SettlementWatcher] Agent: ${agentInfo.agentDomain} (id=${agentInfo.agentId}), ` +
+                `sessionKey=${sessionKeyAddress}`,
+            );
+          } catch {
+            console.log(`[SettlementWatcher] Session key: ${sessionKeyAddress} (agent lookup failed)`);
+          }
+
+          // Try local session first (populated by requireChannelPayment middleware).
+          // Fall back gracefully when the channel was opened externally — in that
+          // case the contract has already validated our signature on the receipt, so
+          // we can safely approve without re-checking the amounts locally.
+          const session = getSession(channelId);
+          if (!session?.lastReceipt) {
+            console.log(
+              `[SettlementWatcher] No local receipt record for ${channelId} — ` +
+                `approving (signature already verified on-chain by contract)`,
+            );
+            try {
+              const { txHash } = await approveSettlementOnChain(channelId);
+              console.log(`[SettlementWatcher] ✅ Settlement approved. Tx: ${txHash}`);
+            } catch (err: any) {
+              console.error(`[SettlementWatcher] ❌ Failed to approve: ${err.message}`);
+              console.log(`[SettlementWatcher] Will wait for challenge window to expire naturally`);
+            }
+            continue;
+          }
+
+          const ourHighestCost = BigInt(session.lastReceipt.cumulativeCost);
+          const ourHighestSeq = session.lastReceipt.sequenceNumber;
+
+          console.log(
+            `[SettlementWatcher] Our records: seq=${ourHighestSeq}, cost=${ourHighestCost}`,
+          );
+          console.log(
+            `[SettlementWatcher] On-chain claim: cost=${claimedAmount}`,
+          );
+
+          // Compare amounts and decide action
+          if (ourHighestCost > claimedAmount) {
+            // Consumer under-claimed! Submit our higher receipt
+            console.log(
+              `[SettlementWatcher] ⚠️  Consumer under-claimed. Submitting higher receipt...`,
+            );
+
+            try {
+              const { txHash } = await submitReceiptOnChain(
+                channelId,
+                ourHighestSeq,
+                ourHighestCost,
+                session.lastReceipt.timestamp,
+                session.lastReceipt.providerSignature,
+              );
+              console.log(
+                `[SettlementWatcher] ✅ Higher receipt submitted. Tx: ${txHash}`,
+              );
+            } catch (err: any) {
+              console.error(
+                `[SettlementWatcher] ❌ Failed to submit receipt: ${err.message}`,
+              );
+            }
+          } else if (ourHighestCost < claimedAmount) {
+            // Consumer over-claimed! This is suspicious - submit our correct receipt
+            console.warn(
+              `[SettlementWatcher] 🚨 Consumer over-claimed! ` +
+                `Claimed ${claimedAmount} but we only have ${ourHighestCost}`,
+            );
+            console.warn(
+              `[SettlementWatcher] Submitting our highest valid receipt as defense...`,
+            );
+
+            try {
+              const { txHash } = await submitReceiptOnChain(
+                channelId,
+                ourHighestSeq,
+                ourHighestCost,
+                session.lastReceipt.timestamp,
+                session.lastReceipt.providerSignature,
+              );
+              console.log(
+                `[SettlementWatcher] ✅ Defense receipt submitted. Tx: ${txHash}`,
+              );
+            } catch (err: any) {
+              console.error(
+                `[SettlementWatcher] ❌ Failed to submit defense: ${err.message}`,
+              );
+            }
+          } else {
+            // Perfect match! Approve settlement for fast-path
+            console.log(
+              `[SettlementWatcher] ✅ Amounts match perfectly. Approving settlement...`,
+            );
+
+            try {
+              // Call approveSettlement to skip challenge window
+              const { txHash } = await approveSettlementOnChain(channelId);
+              console.log(
+                `[SettlementWatcher] ✅ Settlement approved (fast-path). Tx: ${txHash}`,
+              );
+            } catch (err: any) {
+              console.error(
+                `[SettlementWatcher] ❌ Failed to approve settlement: ${err.message}`,
+              );
+              console.log(
+                `[SettlementWatcher] Will wait for challenge window to expire naturally`,
+              );
+            }
+          }
+        }
+
+        // Handle ReceiptSubmitted event (counter-receipt)
+        if (parsed?.name === "ReceiptSubmitted") {
+          const channelId: string = parsed.args.channelId;
+          const submitter: string = parsed.args.submitter;
+          const sequenceNumber: bigint = parsed.args.sequenceNumber;
+          const cumulativeCost: bigint = parsed.args.cumulativeCost;
+
+          console.log(
+            `[SettlementWatcher] ReceiptSubmitted: channelId=${channelId}, ` +
+              `submitter=${submitter}, seq=${sequenceNumber}, cost=${cumulativeCost}`,
+          );
+
+          // Check if this is a counter-receipt from consumer
+          const channelData = await getChannelOnChain(channelId);
+          if (
+            channelData.provider.toLowerCase() === providerAddress.toLowerCase() &&
+            submitter.toLowerCase() !== providerAddress.toLowerCase()
+          ) {
+            console.log(
+              `[SettlementWatcher] Consumer submitted counter-receipt. ` +
+                `Consider responding if amount is incorrect.`,
+            );
+          }
+        }
+
+        // Handle SettlementApproved event
+        if (parsed?.name === "SettlementApproved") {
+          const channelId: string = parsed.args.channelId;
+          const approver: string = parsed.args.approver;
+          const finalAmount: bigint = parsed.args.finalAmount;
+
+          console.log(
+            `[SettlementWatcher] ✅ SettlementApproved: channelId=${channelId}, ` +
+              `approver=${approver}, finalAmount=${finalAmount}`,
+          );
+          console.log(
+            `[SettlementWatcher] Channel settled cooperatively (fast-path)`,
+          );
+        }
+
+        // Handle ChannelFinalized event
+        if (parsed?.name === "ChannelFinalized") {
+          const channelId: string = parsed.args.channelId;
+          const payment: bigint = parsed.args.payment;
+          const refund: bigint = parsed.args.refund;
+
+          console.log(
+            `[SettlementWatcher] ChannelFinalized: channelId=${channelId}, ` +
+              `payment=${payment}, refund=${refund}`,
+          );
+
+          // Clean up processed settlements set
+          processedSettlements.delete(channelId);
+        }
+      }
+
+      lastBlock = currentBlock;
+    } catch (err: any) {
+      // Non-fatal — just log and continue polling
+      console.error(`[SettlementWatcher] Poll error: ${err.message}`);
+    }
+  };
+
+  const interval = setInterval(poll, 5_000);
+  console.log(
+    "[SettlementWatcher] Started — polling every 5s for settlement events.",
   );
 
   return () => {

@@ -192,7 +192,6 @@ contract AttestationRegistry is Ownable {
     }
 
     // ─── 1. Reputation Registry ────────────────────────────────────────
-
     /**
      * @notice Give feedback to an agent.
      *         Any address can give feedback. Multiple entries per (agentId, giver) allowed.

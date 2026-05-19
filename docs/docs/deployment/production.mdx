@@ -1,0 +1,63 @@
+---
+sidebar_position: 3
+title: Production Checklist
+description: Checklist for deploying Kite in production
+---
+
+# Production Checklist
+
+:::warning
+Kite is currently in testnet/hackathon stage. The contracts have not been formally audited. Do not use real funds.
+:::
+
+For evaluation and production-readiness purposes, here is what a production deployment would require:
+
+## Smart Contract Readiness
+
+- [ ] Contracts formally audited by a third party
+- [ ] Contract addresses updated for mainnet deployment
+- [ ] Multisig or timelock for contract upgrades
+- [ ] Emergency pause mechanism verified
+
+## Infrastructure
+
+- [ ] Backend provider deployed with TLS (HTTPS)
+- [ ] Health monitoring (uptime checks on `/health`)
+- [ ] Structured logging (not just `console.log`)
+- [ ] Rate limiting on all endpoints
+- [ ] Receipt storage backed by persistent database (not local files)
+
+## Key Management
+
+- [ ] Provider EOA private key stored in a secrets manager (AWS Secrets Manager, Vault, etc.)
+- [ ] Never in environment variables passed through shell history
+- [ ] Regular rotation plan for session keys
+- [ ] EOA backup (BIP-39 mnemonic stored securely offline)
+
+## Operational
+
+- [ ] Channel settlement watcher running 24/7
+- [ ] Alerting on missed settlements or force-finalizes
+- [ ] Regular subgraph sync verification
+- [ ] Receipt backup schedule (at least daily)
+
+## Agent Deployment
+
+- [ ] Session expiry < 30 days
+- [ ] Budget caps set conservatively
+- [ ] `maxPerCall` reviewed for each endpoint
+- [ ] Session revocation runbook documented
+
+## What Mainnet Would Need
+
+Beyond testnet:
+- Real USDT or USDC contract addresses
+- Bundler on mainnet (or EIP-4337 bundler network)
+- Gas token (ETH) for all AA wallet operations
+- Legal/compliance review of payment flows
+
+## Related Pages
+
+- [Security: Tradeoffs →](../security/tradeoffs)
+- [Security: Threat Model →](../security/threat-model)
+- [Deploy a Provider →](../guides/deploy-provider)
